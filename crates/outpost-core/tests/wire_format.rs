@@ -1,11 +1,9 @@
 //! Pins the JSON shape that `ui/src/core/api.ts` relies on, and exercises the
 //! command-and-event interface the way a shell adapter does.
 
-use outpost_core::api::{Command, ErrorCode, Event, Response, MAX_PAGE};
+use outpost_core::api::{Command, ErrorCode, Event, Response, Secret, SyncState, SyncStatus, MAX_PAGE};
 use outpost_core::Core;
 use serde_json::{json, Value};
-use std::sync::mpsc;
-use std::time::Duration;
 
 fn core() -> Core {
     Core::start(|_| {})
@@ -46,11 +44,34 @@ fn commands_decode_from_the_documented_json() {
             },
         ),
         (
-            json!({"type": "startDemoSync", "folder": "demo/inbox"}),
-            Command::StartDemoSync {
+            json!({"type": "locateMessage", "folder": "demo/inbox", "id": 7}),
+            Command::LocateMessage {
                 folder: "demo/inbox".into(),
+                id: 7,
             },
         ),
+        (json!({"type": "listAccounts"}), Command::ListAccounts),
+        (
+            json!({"type": "addAccount", "host": "mail.example.com", "port": 993, "encrypted": true,
+                   "username": "me@example.com", "password": "hunter2", "remember": true}),
+            Command::AddAccount {
+                host: "mail.example.com".into(),
+                port: 993,
+                encrypted: true,
+                username: "me@example.com".into(),
+                password: Secret("hunter2".into()),
+                remember: true,
+            },
+        ),
+        (
+            json!({"type": "providePassword", "account": "acct/a", "password": "hunter2", "remember": false}),
+            Command::ProvidePassword {
+                account: "acct/a".into(),
+                password: Secret("hunter2".into()),
+                remember: false,
+            },
+        ),
+        (json!({"type": "syncNow", "account": "acct/a"}), Command::SyncNow { account: "acct/a".into() }),
     ];
     for (wire, expected) in cases {
         assert_eq!(serde_json::from_value::<Command>(wire.clone()).unwrap(), expected);
@@ -90,14 +111,35 @@ fn a_message_row_has_exactly_the_fields_the_interface_expects() {
 #[test]
 fn events_encode_with_a_type_tag() {
     assert_eq!(
-        serde_json::to_value(Event::SyncProgress {
-            folder: "f".into(),
-            done: 1,
-            total: 2
+        serde_json::to_value(Event::AccountStatus {
+            account: "acct/a".into(),
+            status: SyncStatus { state: SyncState::UpToDate, detail: String::new() },
         })
         .unwrap(),
-        json!({"type": "syncProgress", "folder": "f", "done": 1, "total": 2})
+        json!({"type": "accountStatus", "account": "acct/a", "status": {"state": "upToDate", "detail": ""}})
     );
+    assert_eq!(
+        serde_json::to_value(Event::FolderChanged { folder: "acct/a/3".into() }).unwrap(),
+        json!({"type": "folderChanged", "folder": "acct/a/3"})
+    );
+    assert_eq!(
+        serde_json::to_value(Event::AccountSetupFailed { error: "no".into() }).unwrap(),
+        json!({"type": "accountSetupFailed", "error": "no"})
+    );
+}
+
+#[test]
+fn passwords_do_not_appear_in_debug_output() {
+    let command = Command::AddAccount {
+        host: "h".into(),
+        port: 993,
+        encrypted: true,
+        username: "u".into(),
+        password: Secret("hunter2".into()),
+        remember: false,
+    };
+    let shown = format!("{command:?}");
+    assert!(!shown.contains("hunter2") && shown.contains("***"), "{shown}");
 }
 
 #[test]
@@ -183,35 +225,6 @@ fn errors_are_reported_not_panicked() {
     assert_eq!(reply["error"]["code"], "badCommand");
 }
 
-#[test]
-fn events_reach_the_sink_in_order_and_finish() {
-    let (tx, rx) = mpsc::channel();
-    let core = Core::start(move |e| {
-        let _ = tx.send(e);
-    });
-    let reply = core
-        .handle(Command::StartDemoSync {
-            folder: "demo/small".into(),
-        })
-        .unwrap();
-    assert_eq!(reply, Response::Accepted);
-
-    let mut last_done = 0;
-    loop {
-        match rx.recv_timeout(Duration::from_secs(10)).expect("event") {
-            Event::SyncProgress { done, total, .. } => {
-                assert!(done >= last_done && done <= total);
-                last_done = done;
-            }
-            Event::SyncFinished { folder } => {
-                assert_eq!(folder, "demo/small");
-                break;
-            }
-        }
-    }
-    assert_eq!(last_done, 40);
-}
-
 mod stored_mail {
     use super::*;
     use outpost_core::api::FolderInfo;
@@ -291,7 +304,24 @@ mod stored_mail {
         assert_eq!(search(&inbox, "alpha "), Vec::<String>::new());
         assert_eq!(search(&account, "body").len(), 30);
 
-        for bad in ["acct/home/999", "acct/nobody", "acct/home/x", "demo/inbox"] {
+        // The synthetic account is not listed once there is a real one.
+        assert!(!folders.iter().any(|f| f.id.starts_with("demo")));
+        assert_eq!(
+            core.handle(Command::SyncNow { account: account.clone() }).unwrap_err().code,
+            ErrorCode::NotPossible,
+            "mail that is only browsed has no server to sync with"
+        );
+        let Response::Located { index } =
+            core.handle(Command::LocateMessage { folder: inbox.clone(), id: rows[4].id }).unwrap()
+        else {
+            panic!("wrong response")
+        };
+        assert_eq!(index, Some(29));
+        let Response::Accounts { accounts } = core.handle(Command::ListAccounts).unwrap() else { panic!() };
+        assert_eq!(accounts.len(), 1);
+        assert_eq!((accounts[0].name.as_str(), accounts[0].status.state), ("home", SyncState::NotSyncing));
+
+        for bad in ["acct/home/999", "acct/nobody", "acct/home/x"] {
             let err = core.handle(Command::FolderLayout { folder: bad.into() }).unwrap_err();
             assert_eq!(err.code, ErrorCode::UnknownFolder, "{bad}");
         }

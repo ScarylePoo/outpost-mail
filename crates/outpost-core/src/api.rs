@@ -45,9 +45,46 @@ pub enum Command {
         text: String,
         limit: u32,
     },
-    /// Milestone 0 only: makes the core push a burst of progress events, to
-    /// prove the event path end to end.
-    StartDemoSync { folder: FolderId },
+    /// Where a message now is in a folder's list, so the list can keep its
+    /// place when the folder changes underneath it.
+    LocateMessage { folder: FolderId, id: i64 },
+    /// The accounts and what each one's sync is doing.
+    ListAccounts,
+    /// Signs in to check the details, then adds the account and starts
+    /// syncing it. Answers `Accepted` at once; the outcome arrives as an
+    /// `AccountAdded` or `AccountSetupFailed` event.
+    AddAccount {
+        host: String,
+        port: u16,
+        /// False only when the user has explicitly chosen an unencrypted
+        /// connection for this account.
+        encrypted: bool,
+        username: String,
+        password: Secret,
+        /// Keep the password in the operating system's credential store.
+        remember: bool,
+    },
+    /// Supplies the password for an account that has none stored, or whose
+    /// stored one was refused, and starts syncing it.
+    ProvidePassword {
+        account: FolderId,
+        password: Secret,
+        remember: bool,
+    },
+    /// Checks every folder of an account now instead of at the next poll.
+    SyncNow { account: FolderId },
+}
+
+/// A password in transit between the interface and the core. It prints as
+/// `***` so that it cannot end up in a log by way of a debug message.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(pub String);
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("***")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -76,6 +113,13 @@ pub enum Response {
     Message {
         message: MessageView,
     },
+    Located {
+        /// `None` if the message is no longer in the folder.
+        index: Option<u32>,
+    },
+    Accounts {
+        accounts: Vec<AccountInfo>,
+    },
     /// The command was accepted; results arrive as events.
     Accepted,
 }
@@ -83,14 +127,56 @@ pub enum Response {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum Event {
-    SyncProgress {
-        folder: FolderId,
-        done: u32,
-        total: u32,
+    /// What an account's sync is doing changed.
+    AccountStatus {
+        account: FolderId,
+        status: SyncStatus,
     },
-    SyncFinished {
-        folder: FolderId,
-    },
+    /// The contents of a folder changed: messages arrived, left, were
+    /// re-flagged or gained their body.
+    FolderChanged { folder: FolderId },
+    /// An account's set of folders changed.
+    FoldersChanged { account: FolderId },
+    /// `AddAccount` succeeded.
+    AccountAdded { account: FolderId },
+    /// `AddAccount` failed. Nothing was saved.
+    AccountSetupFailed { error: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SyncState {
+    /// The account is only being browsed; nothing syncs it.
+    NotSyncing,
+    /// A password is needed before sync can start.
+    NeedsPassword,
+    Connecting,
+    Syncing,
+    /// Up to date and waiting for changes.
+    UpToDate,
+    /// The connection failed; another attempt is scheduled.
+    Offline,
+    /// The server refused the password.
+    SignInFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncStatus {
+    pub state: SyncState,
+    /// A sentence for the status bar, or empty.
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountInfo {
+    pub id: FolderId,
+    pub name: String,
+    /// Empty for an account that is only browsed.
+    pub host: String,
+    pub username: String,
+    pub status: SyncStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -165,6 +251,8 @@ pub enum ErrorCode {
     BadCommand,
     UnknownFolder,
     UnknownMessage,
+    /// The command cannot be carried out as things stand.
+    NotPossible,
     Internal,
 }
 

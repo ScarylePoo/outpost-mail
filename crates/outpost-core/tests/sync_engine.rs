@@ -342,7 +342,8 @@ async fn running_sync_gets_push_polls_and_survives_a_dropped_connection() {
         tokio::spawn(async move {
             let options = Options { poll_interval: Duration::from_secs(2), ..Options::default() };
             let account = account(server, "gina");
-            sync::run(&store, &account, PASSWORD, &options, stop, move |p| seen.lock().unwrap().push(p)).await;
+            let now = tokio::sync::Notify::new();
+            sync::run(&store, &account, PASSWORD, &options, stop, &now, move |p| seen.lock().unwrap().push(p)).await;
         })
     };
     let subjects = |store: &Store| -> Vec<String> { local(store).into_iter().filter(|r| r.3).map(|r| r.1).collect() };
@@ -381,7 +382,8 @@ async fn a_refused_sign_in_is_reported_and_not_retried() {
     let (_handle, stop) = sync::stop_signal();
     let log = seen.clone();
     let (account, options) = (account(server.server(), "harry"), Options::default());
-    let run = sync::run(&store, &account, "wrong password", &options, stop, move |p| {
+    let now = tokio::sync::Notify::new();
+    let run = sync::run(&store, &account, "wrong password", &options, stop, &now, move |p| {
         log.lock().unwrap().push(p)
     });
     tokio::time::timeout(Duration::from_secs(10), run).await.expect("returns instead of retrying");

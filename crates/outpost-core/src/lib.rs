@@ -14,6 +14,7 @@
 //! the sync engine exists, an installation with no accounts shows a
 //! synthetic one so the interface has something to display.
 
+pub mod accounts;
 pub mod api;
 pub mod imap;
 pub mod render;
@@ -21,16 +22,17 @@ pub mod store;
 pub mod sync;
 pub mod synthetic;
 
+use accounts::{AccountConfig, OsSecrets, Secrets};
 use api::{
-    AttachmentInfo, Command, CoreError, ErrorCode, Event, FolderId, FolderInfo, MessageRow,
-    MessageView, Response, MAX_PAGE,
+    AccountInfo, AttachmentInfo, Command, CoreError, ErrorCode, Event, FolderId, FolderInfo,
+    MessageRow, MessageView, Response, SyncState, SyncStatus, MAX_PAGE,
 };
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, RwLock};
 use store::index::ListRow;
 use store::maildir::Flags;
 use store::{Store, StoreError};
+use sync::{Progress, StopHandle};
 
 /// Where the core sends events. A shell adapter supplies one.
 pub trait EventSink: Send + Sync + 'static {
@@ -46,7 +48,8 @@ impl<F: Fn(Event) + Send + Sync + 'static> EventSink for F {
 #[derive(Debug, Clone, Default)]
 pub struct Config {
     /// The data directory. Each subdirectory of `<data_dir>/accounts` is one
-    /// account. `None` means no stored mail: the synthetic account is shown.
+    /// account. `None` means no stored mail: the synthetic account is shown
+    /// and accounts cannot be added.
     pub data_dir: Option<PathBuf>,
 }
 
@@ -59,15 +62,30 @@ struct SyntheticFolder {
 /// ids are `acct/<directory name>/<folder number in the index>`.
 struct Account {
     id: FolderId,
+    /// The directory name, which doubles as the display name.
     name: String,
-    store: Store,
+    store: Arc<Store>,
+    /// `None` for mail that is only browsed (no server details saved).
+    config: Option<AccountConfig>,
+    live: Mutex<Live>,
+    /// Asks the running sync for a full pass now.
+    now: Arc<tokio::sync::Notify>,
+}
+
+/// The parts of an account that change while the app runs.
+struct Live {
+    /// Held in memory only. See `accounts.rs`.
+    password: Option<String>,
+    /// Stops the running sync when dropped or told to.
+    running: Option<StopHandle>,
+    status: SyncStatus,
 }
 
 /// What a folder id refers to.
 enum Target<'a> {
     Synthetic(&'a SyntheticFolder),
-    Account(&'a Account),
-    Folder(&'a Account, i64),
+    Account(Arc<Account>),
+    Folder(Arc<Account>, i64),
 }
 
 /// A handle to the running core. Cheap to clone and safe to share.
@@ -78,8 +96,19 @@ pub struct Core {
 
 struct Inner {
     sink: Box<dyn EventSink>,
-    accounts: Vec<Account>,
+    data_dir: Option<PathBuf>,
+    accounts: RwLock<Vec<Arc<Account>>>,
     synthetic: Vec<SyntheticFolder>,
+    secrets: Arc<dyn Secrets>,
+    /// Runs the sync engine. Commands never wait on it.
+    runtime: tokio::runtime::Runtime,
+}
+
+fn status(state: SyncState, detail: impl Into<String>) -> SyncStatus {
+    SyncStatus {
+        state,
+        detail: detail.into(),
+    }
 }
 
 impl Core {
@@ -88,24 +117,155 @@ impl Core {
         Self::start_with(Config::default(), sink).expect("a core without stored mail cannot fail to start")
     }
 
-    /// Starts a core. Opens each account's index; never scans mail folders.
+    /// Starts a core, keeping passwords in the operating system's
+    /// credential store. Opens each account's index (never scanning mail
+    /// folders) and starts syncing every account whose password is stored.
     pub fn start_with(config: Config, sink: impl EventSink) -> Result<Self, CoreError> {
+        Self::start_with_secrets(config, Arc::new(OsSecrets), sink)
+    }
+
+    /// As [`Core::start_with`], with passwords kept somewhere else.
+    pub fn start_with_secrets(
+        config: Config,
+        secrets: Arc<dyn Secrets>,
+        sink: impl EventSink,
+    ) -> Result<Self, CoreError> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("outpost-sync")
+            .enable_all()
+            .build()
+            .map_err(|e| CoreError::new(ErrorCode::Internal, e.to_string()))?;
         let accounts = match &config.data_dir {
             Some(dir) => open_accounts(dir).map_err(internal)?,
             None => Vec::new(),
         };
-        let synthetic = if accounts.is_empty() {
-            synthetic_folders()
-        } else {
-            Vec::new()
-        };
-        Ok(Self {
+        let core = Self {
             inner: Arc::new(Inner {
                 sink: Box::new(sink),
-                accounts,
-                synthetic,
+                data_dir: config.data_dir,
+                accounts: RwLock::new(accounts),
+                synthetic: synthetic_folders(),
+                secrets,
+                runtime,
             }),
-        })
+        };
+        for account in core.accounts() {
+            let Some(config) = &account.config else { continue };
+            match core.inner.secrets.get(&config.secret_key(&account.name)) {
+                Some(password) => {
+                    account.live.lock().unwrap().password = Some(password);
+                    core.start_sync(&account);
+                }
+                None => core.set_status(&account, status(SyncState::NeedsPassword, "")),
+            }
+        }
+        Ok(core)
+    }
+
+    fn accounts(&self) -> Vec<Arc<Account>> {
+        self.inner.accounts.read().unwrap().clone()
+    }
+
+    fn account(&self, id: &FolderId) -> Result<Arc<Account>, CoreError> {
+        match self.target(id)? {
+            Target::Account(account) | Target::Folder(account, _) => Ok(account),
+            Target::Synthetic(_) => Err(CoreError::new(
+                ErrorCode::NotPossible,
+                "the synthetic account has no server",
+            )),
+        }
+    }
+
+    fn set_status(&self, account: &Account, new: SyncStatus) {
+        {
+            let mut live = account.live.lock().unwrap();
+            if live.status == new {
+                return;
+            }
+            live.status = new.clone();
+        }
+        self.inner.sink.emit(Event::AccountStatus {
+            account: account.id.clone(),
+            status: new,
+        });
+    }
+
+    /// Starts (or restarts) an account's sync with the password it holds.
+    fn start_sync(&self, account: &Arc<Account>) {
+        let Some(config) = account.config.clone() else { return };
+        let (handle, stop) = sync::stop_signal();
+        let password = {
+            let mut live = account.live.lock().unwrap();
+            let Some(password) = live.password.clone() else { return };
+            // Replacing the handle stops whichever sync was running.
+            if let Some(old) = live.running.replace(handle) {
+                old.stop();
+            }
+            password
+        };
+        let core = self.clone();
+        let account = account.clone();
+        self.inner.runtime.spawn(async move {
+            let server_account = sync::Account {
+                server: config.server(),
+                username: config.username.clone(),
+            };
+            let report = {
+                let (core, account) = (core.clone(), account.clone());
+                move |progress: Progress| core.report(&account, progress)
+            };
+            sync::run(
+                &account.store,
+                &server_account,
+                &password,
+                &sync::Options::default(),
+                stop,
+                &account.now,
+                report,
+            )
+            .await;
+        });
+    }
+
+    /// Turns the sync engine's progress into status and events.
+    fn report(&self, account: &Account, progress: Progress) {
+        let count = |n: usize| n.to_string();
+        match progress {
+            Progress::Connecting => self.set_status(account, status(SyncState::Connecting, "")),
+            Progress::Folders { .. } => self.inner.sink.emit(Event::FoldersChanged {
+                account: account.id.clone(),
+            }),
+            Progress::Headers { folder, done, total } => self.set_status(
+                account,
+                status(
+                    SyncState::Syncing,
+                    format!("{folder}: message list {} of {}", count(done), count(total)),
+                ),
+            ),
+            Progress::Bodies { folder, done, total } => self.set_status(
+                account,
+                status(
+                    SyncState::Syncing,
+                    format!("{folder}: downloading {} of {}", count(done), count(total)),
+                ),
+            ),
+            Progress::FolderChanged { folder_id } => self.inner.sink.emit(Event::FolderChanged {
+                folder: format!("{}/{folder_id}", account.id),
+            }),
+            Progress::Idle => self.set_status(account, status(SyncState::UpToDate, "")),
+            Progress::Offline { error, retry_in } => self.set_status(
+                account,
+                status(
+                    SyncState::Offline,
+                    format!("{error}. Trying again in {} s.", retry_in.as_secs()),
+                ),
+            ),
+            Progress::SignInFailed { error } => {
+                account.live.lock().unwrap().running = None;
+                self.set_status(account, status(SyncState::SignInFailed, error));
+            }
+        }
     }
 
     /// Handles one command.
@@ -201,30 +361,158 @@ impl Core {
                     rows: message_rows(rows, 0),
                 })
             }
-            Command::StartDemoSync { folder } => {
-                let total = match self.target(&folder)? {
-                    Target::Synthetic(f) => f.info.total,
-                    Target::Folder(account, id) => {
-                        account.store.index().folder_total(id).map_err(internal)?
+            Command::LocateMessage { folder, id } => {
+                let index = match self.target(&folder)? {
+                    Target::Synthetic(f) => (id >= 0 && id < f.info.total as i64).then_some(id as u32),
+                    Target::Folder(account, folder_id) => {
+                        account.store.index().position(folder_id, id).map_err(internal)?
                     }
-                    Target::Account(_) => 0,
+                    Target::Account(_) => None,
                 };
+                Ok(Response::Located { index })
+            }
+            Command::ListAccounts => Ok(Response::Accounts {
+                accounts: self
+                    .accounts()
+                    .iter()
+                    .map(|a| AccountInfo {
+                        id: a.id.clone(),
+                        name: a.name.clone(),
+                        host: a.config.as_ref().map(|c| c.host.clone()).unwrap_or_default(),
+                        username: a.config.as_ref().map(|c| c.username.clone()).unwrap_or_default(),
+                        status: a.live.lock().unwrap().status.clone(),
+                    })
+                    .collect(),
+            }),
+            Command::AddAccount {
+                host,
+                port,
+                encrypted,
+                username,
+                password,
+                remember,
+            } => {
+                let Some(data_dir) = self.inner.data_dir.clone() else {
+                    return Err(CoreError::new(
+                        ErrorCode::NotPossible,
+                        "there is no data directory to keep an account in",
+                    ));
+                };
+                let config = AccountConfig {
+                    host: host.trim().to_string(),
+                    port,
+                    encrypted,
+                    username: username.trim().to_string(),
+                };
+                if config.host.is_empty() || config.username.is_empty() || password.0.is_empty() {
+                    return Err(CoreError::new(
+                        ErrorCode::NotPossible,
+                        "the server, the user name and the password are all needed",
+                    ));
+                }
                 let core = self.clone();
-                std::thread::spawn(move || {
-                    const STEPS: u32 = 20;
-                    for step in 1..=STEPS {
-                        std::thread::sleep(Duration::from_millis(100));
-                        core.inner.sink.emit(Event::SyncProgress {
-                            folder: folder.clone(),
-                            done: (total as u64 * step as u64 / STEPS as u64) as u32,
-                            total,
-                        });
-                    }
-                    core.inner.sink.emit(Event::SyncFinished { folder });
+                self.inner.runtime.spawn(async move {
+                    let outcome = core.add_account(data_dir, config, password.0, remember).await;
+                    core.inner.sink.emit(match outcome {
+                        Ok(account) => Event::AccountAdded { account },
+                        Err(error) => Event::AccountSetupFailed { error },
+                    });
                 });
                 Ok(Response::Accepted)
             }
+            Command::ProvidePassword {
+                account,
+                password,
+                remember,
+            } => {
+                let account = self.account(&account)?;
+                let Some(config) = &account.config else {
+                    return Err(CoreError::new(ErrorCode::NotPossible, "this account has no server"));
+                };
+                if remember {
+                    // Not being able to remember it is not a reason to
+                    // refuse to sync; it will be asked for again next time.
+                    let _ = self.inner.secrets.set(&config.secret_key(&account.name), &password.0);
+                }
+                account.live.lock().unwrap().password = Some(password.0);
+                self.start_sync(&account);
+                Ok(Response::Accepted)
+            }
+            Command::SyncNow { account } => {
+                let account = self.account(&account)?;
+                if account.config.is_none() {
+                    return Err(CoreError::new(ErrorCode::NotPossible, "this account has no server"));
+                }
+                let (running, has_password) = {
+                    let live = account.live.lock().unwrap();
+                    (live.running.is_some(), live.password.is_some())
+                };
+                if !has_password {
+                    return Err(CoreError::new(ErrorCode::NotPossible, "the account needs its password first"));
+                }
+                if running {
+                    account.now.notify_one();
+                } else {
+                    self.start_sync(&account);
+                }
+                Ok(Response::Accepted)
+            }
         }
+    }
+
+    /// Checks the details by signing in, then saves the account and starts
+    /// syncing it. Returns the new account's id, or what went wrong in words
+    /// for the user. Nothing is saved unless the sign-in worked.
+    async fn add_account(
+        &self,
+        data_dir: PathBuf,
+        config: AccountConfig,
+        password: String,
+        remember: bool,
+    ) -> Result<FolderId, String> {
+        let duplicate = self.accounts().iter().any(|a| {
+            a.config.as_ref().is_some_and(|c| {
+                c.host.eq_ignore_ascii_case(&config.host) && c.username.eq_ignore_ascii_case(&config.username)
+            })
+        });
+        if duplicate {
+            return Err("This account has already been added.".into());
+        }
+        let session = imap::Session::connect(&config.server(), &config.username, &password)
+            .await
+            .map_err(|e| e.to_string())?;
+        session.logout().await;
+
+        let core = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let root = data_dir.join("accounts");
+            let name = accounts::directory_name(&config.username, |n| root.join(n).exists());
+            let dir = root.join(&name);
+            let store = Store::open(&dir).map_err(|e| e.to_string())?;
+            config.save(&dir).map_err(|e| format!("could not save the account: {e}"))?;
+            if remember {
+                // If there is no credential store, the password simply is
+                // not remembered: it stays in memory until the app closes.
+                let _ = core.inner.secrets.set(&config.secret_key(&name), &password);
+            }
+            let account = Arc::new(Account {
+                id: format!("acct/{name}"),
+                name,
+                store: Arc::new(store),
+                config: Some(config),
+                live: Mutex::new(Live {
+                    password: Some(password),
+                    running: None,
+                    status: status(SyncState::Connecting, ""),
+                }),
+                now: Arc::default(),
+            });
+            core.inner.accounts.write().unwrap().push(account.clone());
+            core.start_sync(&account);
+            Ok(account.id.clone())
+        })
+        .await
+        .map_err(|e| e.to_string())?
     }
 
     /// The same interface as [`Core::handle`], as JSON text in and out, for
@@ -242,9 +530,14 @@ impl Core {
     }
 
     fn list_folders(&self) -> Result<Response, CoreError> {
-        let mut folders: Vec<FolderInfo> =
-            self.inner.synthetic.iter().map(|f| f.info.clone()).collect();
-        for account in &self.inner.accounts {
+        let accounts = self.accounts();
+        // The synthetic account is only there to fill an empty window.
+        let mut folders: Vec<FolderInfo> = if accounts.is_empty() {
+            self.inner.synthetic.iter().map(|f| f.info.clone()).collect()
+        } else {
+            Vec::new()
+        };
+        for account in &accounts {
             folders.push(FolderInfo {
                 id: account.id.clone(),
                 name: account.name.clone(),
@@ -263,7 +556,7 @@ impl Core {
         if let Some(f) = self.inner.synthetic.iter().find(|f| &f.info.id == id) {
             return Ok(Target::Synthetic(f));
         }
-        for account in &self.inner.accounts {
+        for account in self.accounts() {
             if id == &account.id {
                 return Ok(Target::Account(account));
             }
@@ -279,6 +572,18 @@ impl Core {
             }
         }
         Err(unknown())
+    }
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        // Ask every sync to stop; the runtime then winds down without
+        // waiting on a server.
+        for account in self.accounts.read().unwrap().iter() {
+            if let Some(running) = account.live.lock().unwrap().running.take() {
+                running.stop();
+            }
+        }
     }
 }
 
@@ -427,7 +732,7 @@ fn message_rows(rows: Vec<ListRow>, first_index: u32) -> Vec<MessageRow> {
         .collect()
 }
 
-fn open_accounts(data_dir: &Path) -> Result<Vec<Account>, StoreError> {
+fn open_accounts(data_dir: &Path) -> Result<Vec<Arc<Account>>, StoreError> {
     let root = data_dir.join("accounts");
     std::fs::create_dir_all(&root)?;
     let mut names: Vec<String> = std::fs::read_dir(&root)?
@@ -442,11 +747,19 @@ fn open_accounts(data_dir: &Path) -> Result<Vec<Account>, StoreError> {
     names
         .into_iter()
         .map(|name| {
-            Ok(Account {
+            let dir = root.join(&name);
+            Ok(Arc::new(Account {
                 id: format!("acct/{name}"),
-                store: Store::open(root.join(&name))?,
+                store: Arc::new(Store::open(&dir)?),
+                config: AccountConfig::load(&dir),
                 name,
-            })
+                live: Mutex::new(Live {
+                    password: None,
+                    running: None,
+                    status: status(SyncState::NotSyncing, ""),
+                }),
+                now: Arc::default(),
+            }))
         })
         .collect()
 }

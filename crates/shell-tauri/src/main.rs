@@ -44,10 +44,14 @@ fn main() {
     tauri::Builder::default()
         .setup(|app| {
             let handle = app.handle().clone();
-            // Until there is a settings screen, the data directory comes
-            // from OUTPOST_DATA. Without it the synthetic account is shown.
+            // Mail lives in the per-user application data folder unless
+            // OUTPOST_DATA points somewhere else.
+            let data_dir = match std::env::var_os("OUTPOST_DATA") {
+                Some(dir) => dir.into(),
+                None => app.path().app_data_dir()?,
+            };
             let config = Config {
-                data_dir: std::env::var_os("OUTPOST_DATA").map(Into::into),
+                data_dir: Some(data_dir),
             };
             let core = Core::start_with(config, move |event: Event| {
                 let _ = handle.emit(CORE_EVENT, event);

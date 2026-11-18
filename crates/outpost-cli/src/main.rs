@@ -163,7 +163,8 @@ async fn run_sync(args: &Args) -> Result<(), String> {
             let _ = tokio::signal::ctrl_c().await;
             handle.stop();
         });
-        sync::run(&store, &account, &password, &options, stop, show).await;
+        let now = tokio::sync::Notify::new();
+        sync::run(&store, &account, &password, &options, stop, &now, show).await;
         status("");
         eprintln!("\rStopped.");
         return Ok(());

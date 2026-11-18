@@ -55,6 +55,8 @@ function row(i: number): MessageRow {
   };
 }
 
+const listeners = new Set<(event: CoreEvent) => void>();
+
 function answer(command: Command): Response {
   const folder = (id: string) => {
     const f = FOLDERS.find((f) => f.id === id);
@@ -108,26 +110,23 @@ function answer(command: Command): Response {
         },
       };
     }
-    case "startDemoSync":
-      folder(command.folder);
+    case "locateMessage":
+      return { type: "located", index: command.id };
+    case "listAccounts":
+      return { type: "accounts", accounts: [] };
+    case "addAccount":
+      // The browser stub has no server to sign in to.
+      setTimeout(
+        () => listeners.forEach((l) => l({ type: "accountSetupFailed", error: "The browser stub cannot add accounts." })),
+        600,
+      );
+      return { type: "accepted" };
+    case "providePassword":
+    case "syncNow":
       return { type: "accepted" };
   }
 }
 
-const listeners = new Set<(event: CoreEvent) => void>();
-
-function demoSync(folder: string, total: number) {
-  let step = 0;
-  const timer = setInterval(() => {
-    step++;
-    const event: CoreEvent =
-      step <= 20
-        ? { type: "syncProgress", folder, done: Math.floor((total * step) / 20), total }
-        : { type: "syncFinished", folder };
-    listeners.forEach((l) => l(event));
-    if (step > 20) clearInterval(timer);
-  }, 100);
-}
 
 export const stubTransport: Transport = {
   name: "browser stub",
@@ -136,11 +135,7 @@ export const stubTransport: Transport = {
       // A few milliseconds, like a real process boundary.
       setTimeout(() => {
         try {
-          const response = answer(command);
-          if (command.type === "startDemoSync") {
-            demoSync(command.folder, FOLDERS.find((f) => f.id === command.folder)?.total ?? 0);
-          }
-          resolve(response as ResponseTo<C>);
+          resolve(answer(command) as ResponseTo<C>);
         } catch (e) {
           reject(e);
         }

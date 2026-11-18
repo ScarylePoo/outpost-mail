@@ -513,19 +513,23 @@ pub async fn sync_once(
 /// inbox for push, with the other folders checked every
 /// `options.poll_interval`. Reconnects with backoff when the connection
 /// fails. Returns only when stopped or when the server refuses the sign-in.
+///
+/// `now` asks for a full pass straight away: it ends a wait between passes
+/// and a wait before a retry.
 pub async fn run(
     store: &Store,
     account: &Account,
     password: &str,
     options: &Options,
     mut stop: Stop,
+    now: &tokio::sync::Notify,
     mut progress: impl FnMut(Progress) + Send,
 ) {
     const FIRST_RETRY: Duration = Duration::from_secs(2);
     const LONGEST_RETRY: Duration = Duration::from_secs(5 * 60);
     let mut retry_in = FIRST_RETRY;
     loop {
-        let outcome = connected(store, account, password, options, &mut stop, &mut progress, &mut retry_in).await;
+        let outcome = connected(store, account, password, options, &mut stop, now, &mut progress, &mut retry_in).await;
         match outcome {
             Err(SyncError::Stopped) | Ok(()) => return,
             Err(SyncError::Imap(e)) if !e.is_transient() && matches!(e, ImapError::Rejected { command: "LOGIN", .. }) => {
@@ -538,10 +542,10 @@ pub async fn run(
                     retry_in,
                 });
                 tokio::select! {
-                    _ = tokio::time::sleep(retry_in) => {}
+                    _ = tokio::time::sleep(retry_in) => retry_in = (retry_in * 2).min(LONGEST_RETRY),
+                    _ = now.notified() => retry_in = FIRST_RETRY,
                     _ = stop.requested() => return,
                 }
-                retry_in = (retry_in * 2).min(LONGEST_RETRY);
             }
         }
     }
@@ -554,6 +558,7 @@ async fn connected(
     password: &str,
     options: &Options,
     stop: &mut Stop,
+    now: &tokio::sync::Notify,
     progress: &mut (dyn FnMut(Progress) + Send),
     retry_in: &mut Duration,
 ) -> Result<()> {
@@ -581,6 +586,7 @@ async fn connected(
             let Some(inbox) = &inbox else {
                 tokio::select! {
                     _ = tokio::time::sleep(remaining) => {}
+                    _ = now.notified() => {}
                     _ = stop.requested() => return Ok(()),
                 }
                 break;
@@ -589,6 +595,7 @@ async fn connected(
                 // No push: look at the inbox once a minute instead.
                 tokio::select! {
                     _ = tokio::time::sleep(remaining.min(Duration::from_secs(60))) => {}
+                    _ = now.notified() => break,
                     _ = stop.requested() => return Ok(()),
                 }
             } else {
@@ -596,8 +603,18 @@ async fn connected(
                 // Servers drop a connection that idles for 30 minutes.
                 let limit = remaining.min(Duration::from_secs(25 * 60));
                 let mut stopping = stop.clone();
-                let pushed = session.idle(limit, async move { stopping.requested().await }).await?;
+                let asked = std::sync::atomic::AtomicBool::new(false);
+                let wake = async {
+                    tokio::select! {
+                        _ = stopping.requested() => {}
+                        _ = now.notified() => asked.store(true, std::sync::atomic::Ordering::Relaxed),
+                    }
+                };
+                let pushed = session.idle(limit, wake).await?;
                 stop.check()?;
+                if asked.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
                 if !pushed {
                     continue;
                 }

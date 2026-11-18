@@ -13,7 +13,19 @@ export type Command =
   | { type: "listMessages"; folder: FolderId; offset: number; limit: number }
   | { type: "openMessage"; folder: FolderId; id: number }
   | { type: "search"; scope: FolderId; text: string; limit: number }
-  | { type: "startDemoSync"; folder: FolderId };
+  | { type: "locateMessage"; folder: FolderId; id: number }
+  | { type: "listAccounts" }
+  | {
+      type: "addAccount";
+      host: string;
+      port: number;
+      encrypted: boolean;
+      username: string;
+      password: string;
+      remember: boolean;
+    }
+  | { type: "providePassword"; account: FolderId; password: string; remember: boolean }
+  | { type: "syncNow"; account: FolderId };
 
 export interface FolderInfo {
   id: FolderId;
@@ -56,6 +68,28 @@ export interface MessageView {
   downloaded: boolean;
 }
 
+export type SyncState =
+  | "notSyncing"
+  | "needsPassword"
+  | "connecting"
+  | "syncing"
+  | "upToDate"
+  | "offline"
+  | "signInFailed";
+
+export interface SyncStatus {
+  state: SyncState;
+  detail: string;
+}
+
+export interface AccountInfo {
+  id: FolderId;
+  name: string;
+  host: string;
+  username: string;
+  status: SyncStatus;
+}
+
 export type Response =
   | { type: "pong"; coreVersion: string }
   | { type: "folders"; folders: FolderInfo[] }
@@ -63,14 +97,19 @@ export type Response =
   | { type: "messages"; folder: FolderId; offset: number; total: number; rows: MessageRow[] }
   | { type: "searchResults"; rows: MessageRow[] }
   | { type: "message"; message: MessageView }
+  | { type: "located"; index: number | null }
+  | { type: "accounts"; accounts: AccountInfo[] }
   | { type: "accepted" };
 
 export type CoreEvent =
-  | { type: "syncProgress"; folder: FolderId; done: number; total: number }
-  | { type: "syncFinished"; folder: FolderId };
+  | { type: "accountStatus"; account: FolderId; status: SyncStatus }
+  | { type: "folderChanged"; folder: FolderId }
+  | { type: "foldersChanged"; account: FolderId }
+  | { type: "accountAdded"; account: FolderId }
+  | { type: "accountSetupFailed"; error: string };
 
 export interface CoreError {
-  code: "badCommand" | "unknownFolder" | "unknownMessage" | "internal";
+  code: "badCommand" | "unknownFolder" | "unknownMessage" | "notPossible" | "internal";
   message: string;
 }
 
@@ -82,7 +121,11 @@ type ResponseFor = {
   listMessages: "messages";
   search: "searchResults";
   openMessage: "message";
-  startDemoSync: "accepted";
+  locateMessage: "located";
+  listAccounts: "accounts";
+  addAccount: "accepted";
+  providePassword: "accepted";
+  syncNow: "accepted";
 };
 
 export type ResponseTo<C extends Command> = Extract<Response, { type: ResponseFor[C["type"]] }>;

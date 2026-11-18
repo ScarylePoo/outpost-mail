@@ -374,6 +374,19 @@ impl Index {
         })
     }
 
+    /// Where a message is in its folder's list (0 is the top), or `None` if
+    /// it is not in that folder.
+    pub fn position(&self, folder_id: i64, id: i64) -> Result<Option<u32>> {
+        self.read(|conn| {
+            conn.prepare_cached(
+                "SELECT (SELECT count(*) FROM message WHERE folder_id = ?1 AND sort_key > m.sort_key)
+                 FROM message m WHERE m.id = ?2 AND m.folder_id = ?1",
+            )?
+            .query_row(params![folder_id, id], |r| r.get(0))
+            .optional()
+        })
+    }
+
     /// The preview length of every message in a folder, in list order.
     pub fn preview_lens(&self, folder_id: i64) -> Result<Vec<u16>> {
         self.read(|conn| {

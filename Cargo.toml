@@ -1,8 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["crates/outpost-core", "crates/outpost-bench", "crates/shell-tauri"]
+members = ["crates/outpost-core", "crates/outpost-bench", "crates/outpost-cli", "crates/shell-tauri"]
 # `cargo test` at the root runs the core only, so it needs no webview libraries.
-default-members = ["crates/outpost-core", "crates/outpost-bench"]
+default-members = ["crates/outpost-core", "crates/outpost-bench", "crates/outpost-cli"]
 
 [workspace.package]
 version = "0.0.1"

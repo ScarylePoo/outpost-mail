@@ -28,6 +28,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev
 
+      # The sync tests start their own private Dovecot. Without this they
+      # would report themselves skipped; on Linux CI that must be a failure.
+      - name: Dovecot for the sync tests
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y dovecot-imapd openssl
+          /usr/sbin/dovecot --version
+          echo "OUTPOST_REQUIRE_DOVECOT=1" >> "$GITHUB_ENV"
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4

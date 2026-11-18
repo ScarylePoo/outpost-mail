@@ -95,7 +95,7 @@ async fn messages_are_fetched_without_changing_anything() {
     assert_eq!((opened.exists, opened.uid_next), (6, Some(7)));
     assert!(opened.highest_modseq.is_some());
 
-    let flags = session.fetch_flags(None).await.unwrap();
+    let flags = session.fetch_flags(1, None).await.unwrap();
     let by_uid = |uid: u32| flags.iter().find(|f| f.uid == uid).unwrap().flags;
     assert_eq!(flags.len(), 6);
     assert_eq!(by_uid(1), Flags::SEEN);
@@ -158,9 +158,12 @@ async fn fast_resync_reports_what_changed_while_away() {
     assert!(again.highest_modseq.unwrap() > known.1);
 
     // Without QRESYNC data the same facts are available by asking.
-    let changed = session.fetch_flags(Some(known.1)).await.unwrap();
+    let changed = session.fetch_flags(1, Some(known.1)).await.unwrap();
     assert!(changed.iter().any(|c| c.uid == 3 && c.flags == Flags::FLAGGED));
     assert!(!changed.iter().any(|c| c.uid == 1), "unchanged messages are not reported");
+    let recent: Vec<u32> = session.fetch_flags(6, None).await.unwrap().iter().map(|f| f.uid).collect();
+    assert_eq!(recent, [6, 7], "a starting UID narrows the list");
+    assert!(session.fetch_flags(50, None).await.unwrap().is_empty(), "nothing at or above 50");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -191,6 +194,47 @@ async fn idle_wakes_for_new_mail_for_a_signal_and_for_the_limit() {
     // So does the time limit. The session is still usable afterwards.
     let changed = session.idle(Duration::from_millis(200), std::future::pending()).await.unwrap();
     assert!(!changed);
-    assert_eq!(session.fetch_flags(None).await.unwrap().len(), 1);
+    assert_eq!(session.fetch_flags(1, None).await.unwrap().len(), 1);
     session.noop().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tls_connections_work_and_certificates_are_checked() {
+    let Some(server) = TestServer::start() else { return };
+    let Some(tls) = server.tls_server() else {
+        eprintln!("SKIPPED: no openssl to make a test certificate");
+        return;
+    };
+    let mut other = server.other_client("tina");
+    other.append("INBOX", "", &message(1, "over tls", "secret body"));
+
+    // With the server's certificate accepted, everything works as usual.
+    let mut session = Session::connect(&tls, "tina", PASSWORD).await.unwrap();
+    session.examine(b"INBOX", None).await.unwrap();
+    assert_eq!(session.fetch_message(1).await.unwrap().unwrap(), message(1, "over tls", "secret body"));
+    session.logout().await;
+
+    // Without it, the self-signed certificate is refused: checked against
+    // the system's trust store, where it is not.
+    let untrusted = outpost_core::imap::Server { trusted_certificate: None, ..tls.clone() };
+    match Session::connect(&untrusted, "tina", PASSWORD).await {
+        Err(ImapError::Tls(_)) => {}
+        other => panic!("expected the certificate to be refused, got {:?}", other.err()),
+    }
+
+    // The right certificate under the wrong name is refused too.
+    let wrong_name = outpost_core::imap::Server { host: "127.0.0.1".into(), ..tls.clone() };
+    match Session::connect(&wrong_name, "tina", PASSWORD).await {
+        Err(ImapError::Tls(_)) => {}
+        other => panic!("expected a name mismatch, got {:?}", other.err()),
+    }
+
+    // A different certificate does not vouch for this server.
+    let Some(second) = TestServer::start() else { return };
+    let someone_else = outpost_core::imap::Server { trusted_certificate: Some(second.certificate_der()), ..tls.clone() };
+    assert!(matches!(Session::connect(&someone_else, "tina", PASSWORD).await, Err(ImapError::Tls(_))));
+
+    // Speaking TLS to a port that does not is an error, not a hang.
+    let not_tls = outpost_core::imap::Server { port: server.port, ..tls };
+    assert!(Session::connect(&not_tls, "tina", PASSWORD).await.is_err());
 }

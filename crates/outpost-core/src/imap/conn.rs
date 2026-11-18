@@ -43,6 +43,10 @@ pub struct Server {
     pub host: String,
     pub port: u16,
     pub security: Security,
+    /// A certificate (DER) to trust for this server instead of the
+    /// operating system's trust store. For a server with a self-signed
+    /// certificate that the user has chosen to accept.
+    pub trusted_certificate: Option<Vec<u8>>,
 }
 
 #[derive(Debug)]
@@ -114,17 +118,32 @@ pub struct Connection {
     pub(crate) greeting_was_preauth: bool,
 }
 
-fn tls_config() -> std::result::Result<Arc<ClientConfig>, String> {
+fn tls_config(trusted: Option<&[u8]>) -> std::result::Result<Arc<ClientConfig>, String> {
     use rustls_platform_verifier::BuilderVerifierExt;
     use tokio_rustls::rustls::crypto::ring::default_provider;
-    // Certificates are checked against the operating system's trust store,
-    // so a private or company certificate authority installed there works.
-    let config = ClientConfig::builder_with_provider(Arc::new(default_provider()))
+    use tokio_rustls::rustls::pki_types::CertificateDer;
+    use tokio_rustls::rustls::RootCertStore;
+    let builder = ClientConfig::builder_with_provider(Arc::new(default_provider()))
         .with_safe_default_protocol_versions()
-        .map_err(|e| e.to_string())?
-        .with_platform_verifier()
-        .map_err(|e| e.to_string())?
-        .with_no_client_auth();
+        .map_err(|e| e.to_string())?;
+    let config = match trusted {
+        // Normally certificates are checked against the operating system's
+        // trust store, so a private or company certificate authority
+        // installed there works.
+        None => builder
+            .with_platform_verifier()
+            .map_err(|e| e.to_string())?
+            .with_no_client_auth(),
+        // With a certificate the user accepted, exactly that one is trusted.
+        // The name on it must still match the server's.
+        Some(der) => {
+            let mut roots = RootCertStore::empty();
+            roots
+                .add(CertificateDer::from(der.to_vec()))
+                .map_err(|e| format!("the saved certificate is not usable: {e}"))?;
+            builder.with_root_certificates(roots).with_no_client_auth()
+        }
+    };
     Ok(Arc::new(config))
 }
 
@@ -144,7 +163,8 @@ impl Connection {
             Security::Tls => {
                 let name = ServerName::try_from(server.host.clone())
                     .map_err(|e| ImapError::Tls(e.to_string()))?;
-                let connector = TlsConnector::from(tls_config().map_err(ImapError::Tls)?);
+                let config = tls_config(server.trusted_certificate.as_deref());
+                let connector = TlsConnector::from(config.map_err(ImapError::Tls)?);
                 let tls = tokio::time::timeout(CONNECT_TIMEOUT, connector.connect(name, tcp))
                     .await
                     .map_err(|_| ImapError::Timeout)?
@@ -176,6 +196,11 @@ impl Connection {
     /// most recent capability list it sent.
     pub fn has(&self, name: &str) -> bool {
         self.capabilities.contains(&name.to_ascii_uppercase())
+    }
+
+    /// Everything the server last advertised, upper-cased and sorted.
+    pub fn capabilities(&self) -> Vec<String> {
+        self.capabilities.iter().cloned().collect()
     }
 
     pub fn capabilities_known(&self) -> bool {
@@ -245,7 +270,7 @@ impl Connection {
     async fn send(
         &mut self,
         body: CommandBody<'_>,
-        on_untagged: &mut dyn FnMut(Untagged),
+        on_untagged: &mut (dyn FnMut(Untagged) + Send),
     ) -> Result<String> {
         self.next_tag += 1;
         let tag = format!("A{}", self.next_tag);
@@ -273,7 +298,7 @@ impl Connection {
         &mut self,
         tag: &str,
         command: &'static str,
-        on_untagged: &mut dyn FnMut(Untagged),
+        on_untagged: &mut (dyn FnMut(Untagged) + Send),
     ) -> Result<()> {
         loop {
             match self.read_response(RESPONSE_TIMEOUT).await? {
@@ -301,7 +326,7 @@ impl Connection {
         status: Status<'static>,
         tag: &str,
         command: &'static str,
-        on_untagged: &mut dyn FnMut(Untagged),
+        on_untagged: &mut (dyn FnMut(Untagged) + Send),
     ) -> Result<Option<StatusBody<'static>>> {
         match status {
             Status::Bye(bye) => Err(ImapError::Bye(bye.text.to_string())),
@@ -341,7 +366,7 @@ impl Connection {
     pub async fn run(
         &mut self,
         body: CommandBody<'_>,
-        mut on_untagged: impl FnMut(Untagged),
+        mut on_untagged: impl FnMut(Untagged) + Send,
     ) -> Result<StatusBody<'static>> {
         let name = body.name();
         let tag = self.send(body, &mut on_untagged).await?;
@@ -352,7 +377,7 @@ impl Connection {
         &mut self,
         tag: &str,
         command: &'static str,
-        on_untagged: &mut dyn FnMut(Untagged),
+        on_untagged: &mut (dyn FnMut(Untagged) + Send),
     ) -> Result<StatusBody<'static>> {
         loop {
             match self.read_response(RESPONSE_TIMEOUT).await? {
@@ -384,7 +409,7 @@ impl Connection {
     pub async fn idle(
         &mut self,
         limit: Duration,
-        wake: impl std::future::Future<Output = ()>,
+        wake: impl std::future::Future<Output = ()> + Send,
     ) -> Result<Vec<Untagged>> {
         let mut seen = Vec::new();
         let tag = self.send(CommandBody::Idle, &mut |u| seen.push(u)).await?;

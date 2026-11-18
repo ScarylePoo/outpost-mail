@@ -36,6 +36,8 @@ pub struct TestServer {
     dir: PathBuf,
     binary: PathBuf,
     pub port: u16,
+    /// The TLS port, if `openssl` was available to make a certificate.
+    pub tls_port: Option<u16>,
 }
 
 impl TestServer {
@@ -61,6 +63,23 @@ impl TestServer {
         }
         let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let (user, group) = (output_of("id", &["-un"]), output_of("id", &["-gn"]));
+        // A self-signed certificate for "localhost", for the TLS tests.
+        let made_certificate = Command::new("openssl")
+            .args(["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2", "-subj", "/CN=localhost"])
+            .args(["-addext", "subjectAltName=DNS:localhost", "-addext", "basicConstraints=critical,CA:FALSE"])
+            .arg("-keyout").arg(dir.join("key.pem"))
+            .arg("-out").arg(dir.join("cert.pem"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        let tls_port = made_certificate
+            .then(|| TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port());
+        let ssl = match tls_port {
+            Some(_) => format!("ssl = yes\nssl_server_cert_file = {0}/cert.pem\nssl_server_key_file = {0}/key.pem", dir.display()),
+            None => "ssl = no".to_string(),
+        };
+        let tls_listener = tls_port.unwrap_or(0);
         let version = output_of(binary.to_str().unwrap(), &["--version"]);
         let version = version.split_whitespace().next().unwrap_or("2.4.0").to_string();
         let d = dir.display();
@@ -77,7 +96,7 @@ default_internal_user = {user}
 default_internal_group = {group}
 default_login_user = {user}
 first_valid_uid = 1
-ssl = no
+{ssl}
 auth_allow_cleartext = yes
 auth_mechanisms = plain login
 mail_driver = maildir
@@ -123,7 +142,8 @@ service imap-login {{
     port = {port}
   }}
   inet_listener imaps {{
-    port = 0
+    port = {tls_listener}
+    ssl = yes
   }}
 }}
 service anvil {{
@@ -138,7 +158,7 @@ service stats {{
 "#
         );
         std::fs::write(dir.join("dovecot.conf"), config).unwrap();
-        let server = TestServer { dir, binary, port };
+        let server = TestServer { dir, binary, port, tls_port };
         let status = server.dovecot(&[]);
         assert!(status, "Dovecot did not start; see {}", server.dir.join("dovecot.log").display());
 
@@ -176,7 +196,28 @@ service stats {{
             host: "127.0.0.1".into(),
             port: self.port,
             security: Security::Plaintext,
+            trusted_certificate: None,
         }
+    }
+
+    /// The same server over TLS, trusting its self-signed certificate.
+    /// `None` if no certificate could be made on this machine.
+    pub fn tls_server(&self) -> Option<Server> {
+        Some(Server {
+            host: "localhost".into(),
+            port: self.tls_port?,
+            security: Security::Tls,
+            trusted_certificate: Some(self.certificate_der()),
+        })
+    }
+
+    pub fn certificate_der(&self) -> Vec<u8> {
+        let out = Command::new("openssl")
+            .args(["x509", "-outform", "DER", "-in"])
+            .arg(self.dir.join("cert.pem"))
+            .output()
+            .unwrap();
+        out.stdout
     }
 
     /// Signs in as `user` with the independent client.
@@ -293,4 +334,105 @@ pub fn message(n: u32, subject: &str, body: &str) -> Vec<u8> {
         subject_id = subject.len(),
     )
     .into_bytes()
+}
+
+/// A directory that is deleted when dropped.
+pub struct TempDir(PathBuf);
+
+impl TempDir {
+    pub fn new() -> TempDir {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "outpost-sync-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        TempDir(path)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Sits between the code under test and the server, and can cut the
+/// connection after a set number of bytes have come back from the server:
+/// a dropped connection in the middle of whatever was happening.
+pub struct FlakyProxy {
+    pub port: u16,
+    /// Bytes the server may still send before the connection is cut.
+    /// Negative means no limit.
+    budget: std::sync::Arc<std::sync::atomic::AtomicI64>,
+}
+
+impl FlakyProxy {
+    pub fn start(server_port: u16) -> FlakyProxy {
+        use std::sync::atomic::AtomicI64;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let budget = std::sync::Arc::new(AtomicI64::new(-1));
+        let shared = budget.clone();
+        std::thread::spawn(move || {
+            for client in listener.incoming() {
+                let Ok(client) = client else { break };
+                let Ok(server) = TcpStream::connect(("127.0.0.1", server_port)) else { continue };
+                let (mut client_in, mut server_out) = (client.try_clone().unwrap(), server.try_clone().unwrap());
+                // Client to server: passed through untouched.
+                std::thread::spawn(move || {
+                    let _ = std::io::copy(&mut client_in, &mut server_out);
+                    let _ = server_out.shutdown(std::net::Shutdown::Both);
+                });
+                // Server to client: counted against the budget.
+                let budget = shared.clone();
+                let (mut server_in, mut client_out) = (server, client);
+                std::thread::spawn(move || {
+                    let mut buffer = [0u8; 4096];
+                    loop {
+                        let Ok(n) = server_in.read(&mut buffer) else { break };
+                        if n == 0 {
+                            break;
+                        }
+                        let left = budget.load(Ordering::SeqCst);
+                        let allowed = if left < 0 { n } else { n.min(left as usize) };
+                        if left >= 0 {
+                            budget.store(left - allowed as i64, Ordering::SeqCst);
+                        }
+                        if client_out.write_all(&buffer[..allowed]).is_err() || allowed < n {
+                            break;
+                        }
+                    }
+                    let _ = client_out.shutdown(std::net::Shutdown::Both);
+                    let _ = server_in.shutdown(std::net::Shutdown::Both);
+                });
+            }
+        });
+        FlakyProxy { port, budget }
+    }
+
+    /// Cuts the connection once the server has sent `bytes` more bytes.
+    pub fn cut_after(&self, bytes: i64) {
+        self.budget.store(bytes, Ordering::SeqCst);
+    }
+
+    /// Lets everything through again (for connections made from now on).
+    pub fn heal(&self) {
+        self.budget.store(-1, Ordering::SeqCst);
+    }
+
+    pub fn server(&self) -> Server {
+        Server {
+            host: "127.0.0.1".into(),
+            port: self.port,
+            security: Security::Plaintext,
+            trusted_certificate: None,
+        }
+    }
 }

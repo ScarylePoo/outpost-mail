@@ -7,6 +7,106 @@ started.
 Status words: **Decided** (owner agreed), **Proposal** (default in use, owner
 has not reviewed), **Finding** (a test result).
 
+## 2026-11-18 · Milestone 2
+
+**Proposals** unless marked otherwise.
+
+### Finding: `imap-codec` does the job
+
+The spike planned in the library evaluation passed. Against Dovecot 2.4.2,
+sign-in, folder listing, read-only open with QRESYNC, header and body
+fetching, and IDLE all worked through its typed commands and responses on the
+first attempt. Its `Fragmentizer` does the framing, including literals. The
+pin is `=2.0.0-alpha.10`. `imap-next` was not needed: the connection layer on
+top is about 400 lines (`crates/outpost-core/src/imap/conn.rs`).
+
+### Sync is read-only by construction in this milestone
+
+Folders are opened with EXAMINE, never SELECT, and bodies are fetched with
+PEEK. The session layer has no command that changes anything. Tests compare
+the server's flags before and after a sync, and `outpost-sync --once` does the
+same against a real account.
+
+### How a folder is synced
+
+1. Open it. If the server offers QRESYNC and the folder was fully listed
+   before, the open itself reports what was removed or re-flagged since last
+   time, and only UIDs at or above the last-seen UIDNEXT are looked at for new
+   mail. Otherwise the complete UID-and-flags list is fetched and compared.
+2. Remove what is gone, update flags, then fetch list data (nine header fields,
+   size, date, flags) for unknown messages, newest first, 200 at a time.
+3. Only after that, record the folder's new sync position.
+
+Bodies are a separate step after every folder's list is complete, so all
+folders can be browsed early. Small messages (up to 256 kB) are fetched
+several per request, up to 2 MB a request; larger ones alone, in 512 kB
+pieces. A message known only by its list data is a normal row in the index
+with no file yet, and gets its preview and search text when the body lands.
+
+Every step commits as it goes and the sync position is written last, so an
+interrupted sync is resumed by running it again. There is no separate "resume"
+code path to get wrong.
+
+### When the server renumbers a folder, the local copy is replaced
+
+A changed UIDVALIDITY means no local message can be matched to the server's.
+The folder's local index entries and files are deleted and it is synced from
+scratch. Safe while sync is read-only, since the local copy holds nothing the
+server does not. **To revisit in milestone 4**, when unsent local changes can
+exist: they must not be thrown away with it. Matching by Message-ID to avoid
+downloading again is a possible later optimisation.
+
+### UIDVALIDITY is also kept beside the mail files
+
+Each synced folder has a small `outpost-uidvalidity` file. File names carry
+UIDs, so after an index rebuild this file is what says whether those UIDs
+still mean anything to the server. With it, a rebuilt index syncs without
+downloading anything again (tested). Without it (imported mail, or the file
+was lost) the mail is kept but detached from its UIDs, and the folder
+downloads afresh, leaving duplicates. Accepted as a rare case; noted here so
+it is not a surprise.
+
+### A folder the server stops listing is deleted locally, with its mail
+
+That is what "notice folder changes made by other clients" means for a
+deletion. A rename looks like a deletion plus a new folder and downloads the
+mail again; recognising renames is left for later. The deletion only happens
+after a folder list the server completed successfully.
+
+### One connection per account, for now
+
+A pass syncs everything, then the same connection waits in IDLE on the inbox;
+the other folders are checked every ten minutes (the timer the handoff doc
+proposed for polling). New inbox mail therefore waits behind a long first
+sync. A second connection dedicated to the inbox is the fix and belongs with
+the main window in milestone 3, where the delay would be visible.
+
+### Certificates are checked against the operating system's trust store
+
+Through `rustls-platform-verifier`, so a private certificate authority the
+user or their employer installed is honoured. An account can instead carry one
+certificate the user chose to accept, which is then the only one trusted for
+that server; the host name must still match. Checked by hand on Windows and
+Linux: Gmail and Microsoft 365 connect; expired, wrong-name and self-signed
+certificates are refused with a reason.
+
+### Not done yet in milestone 2
+
+- **STARTTLS** (encryption negotiated on port 143). Only TLS from the first
+  byte (port 993) is implemented. Add if the owner's host or a tester needs it.
+- **The app does not start sync itself.** Sync runs from `outpost-sync`. The
+  app needs account setup and stored credentials first (milestones 3 and 7).
+- **Gmail and Microsoft 365 are untested.** Both need app passwords or OAuth.
+- **No reconnection on network change or wake from sleep** beyond noticing the
+  dead connection (60 s timeout) and retrying with backoff.
+
+### Dependencies added
+
+`imap-codec` (MIT or Apache-2.0), `tokio` (MIT), `tokio-rustls` and `rustls`
+with the `ring` crypto provider (MIT, Apache-2.0 or ISC; ring itself is
+Apache-2.0 and ISC), `rustls-platform-verifier` (MIT or Apache-2.0), and
+`rpassword` in the command-line tool (Apache-2.0).
+
 ## 2026-11-17 · Milestone 1
 
 All of these are **Proposals** unless marked otherwise: they follow the

@@ -14,6 +14,7 @@ pub mod index;
 pub mod maildir;
 pub mod parse;
 pub mod rebuild;
+pub mod sync_state;
 
 use index::{Index, NewMessage};
 use maildir::{decode_segment, encode_segment, Flags, Maildir};
@@ -27,6 +28,8 @@ pub enum StoreError {
     IndexVersion(i32),
     NoSuchMessage(i64),
     NoSuchFolder(i64),
+    /// The message is known but its body has not been fetched yet.
+    NotDownloaded(i64),
 }
 
 impl std::fmt::Display for StoreError {
@@ -39,6 +42,7 @@ impl std::fmt::Display for StoreError {
             }
             StoreError::NoSuchMessage(id) => write!(f, "no message {id}"),
             StoreError::NoSuchFolder(id) => write!(f, "no folder {id}"),
+            StoreError::NotDownloaded(id) => write!(f, "message {id} has not been downloaded yet"),
         }
     }
 }

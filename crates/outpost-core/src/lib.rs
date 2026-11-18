@@ -17,6 +17,7 @@
 pub mod api;
 pub mod imap;
 pub mod store;
+pub mod sync;
 pub mod synthetic;
 
 use api::{

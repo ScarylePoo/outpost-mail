@@ -178,9 +178,9 @@ fn uid_set(uids: &[u32]) -> Option<SequenceSet> {
     SequenceSet::try_from(ranges).ok()
 }
 
-fn everything() -> SequenceSet {
+fn from_uid(from: u32) -> SequenceSet {
     SequenceSet::try_from(vec![Sequence::Range(
-        SeqOrUid::Value(NonZeroU32::MIN),
+        SeqOrUid::Value(NonZeroU32::new(from).unwrap_or(NonZeroU32::MIN)),
         SeqOrUid::Asterisk,
     )])
     .expect("one range is a valid set")
@@ -236,6 +236,24 @@ impl Session {
 
     pub fn has(&self, capability: &str) -> bool {
         self.conn.has(capability)
+    }
+
+    /// What the server advertises now that we are signed in.
+    pub fn capabilities(&self) -> Vec<String> {
+        self.conn.capabilities()
+    }
+
+    /// Connects without signing in and returns what the server advertises.
+    /// A way to check an address, port and certificate before asking for a
+    /// password.
+    pub async fn probe(server: &Server) -> Result<Vec<String>> {
+        let mut conn = Connection::open(server).await?;
+        if !conn.capabilities_known() {
+            conn.run(CommandBody::Capability, |_| {}).await?;
+        }
+        let capabilities = conn.capabilities();
+        let _ = conn.run(CommandBody::Logout, |_| {}).await;
+        Ok(capabilities)
     }
 
     /// Whether QRESYNC was offered and switched on.
@@ -378,15 +396,16 @@ impl Session {
         Ok(opened)
     }
 
-    /// UID and flags of every message in the open folder; with
-    /// `changed_since`, only those changed after that modification sequence.
-    pub async fn fetch_flags(&mut self, changed_since: Option<u64>) -> Result<Vec<FlagState>> {
+    /// UID and flags of every message in the open folder with a UID of
+    /// `from` or above; with `changed_since`, only those changed after that
+    /// modification sequence.
+    pub async fn fetch_flags(&mut self, from: u32, changed_since: Option<u64>) -> Result<Vec<FlagState>> {
         let mut modifiers = Vec::new();
         if let Some(modseq) = changed_since.and_then(NonZeroU64::new) {
             modifiers.push(FetchModifier::ChangedSince(modseq));
         }
         let command = CommandBody::Fetch {
-            sequence_set: everything(),
+            sequence_set: from_uid(from),
             macro_or_item_names: vec![MessageDataItemName::Uid, MessageDataItemName::Flags].into(),
             uid: true,
             modifiers,
@@ -395,7 +414,9 @@ impl Session {
         self.conn
             .run(command, |untagged| {
                 if let Untagged::Data(Data::Fetch { items, .. }) = untagged {
-                    states.extend(flag_state(items.as_ref()));
+                    // `n:*` always includes the last message, even when its
+                    // UID is below n.
+                    states.extend(flag_state(items.as_ref()).filter(|s| s.uid >= from));
                 }
             })
             .await?;
@@ -522,6 +543,50 @@ impl Session {
         Ok(piece)
     }
 
+    /// Several whole messages in one request. Meant for small messages,
+    /// where a round trip each would dominate. UIDs that no longer exist are
+    /// simply absent from the result.
+    pub async fn fetch_whole(&mut self, uids: &[u32]) -> Result<Vec<(u32, Vec<u8>)>> {
+        let Some(sequence_set) = uid_set(uids) else {
+            return Ok(Vec::new());
+        };
+        let command = CommandBody::Fetch {
+            sequence_set,
+            macro_or_item_names: vec![
+                MessageDataItemName::Uid,
+                MessageDataItemName::BodyExt {
+                    section: None,
+                    partial: None,
+                    peek: true,
+                },
+            ]
+            .into(),
+            uid: true,
+            modifiers: Vec::new(),
+        };
+        let mut messages = Vec::new();
+        self.conn
+            .run(command, |untagged| {
+                let Untagged::Data(Data::Fetch { items, .. }) = untagged else { return };
+                let mut uid = 0;
+                let mut bytes = None;
+                for item in items.into_inner() {
+                    match item {
+                        MessageDataItem::Uid(n) => uid = n.get(),
+                        MessageDataItem::BodyExt { data, .. } => {
+                            bytes = Some(data.0.map(|d| d.into_inner().into_owned()).unwrap_or_default())
+                        }
+                        _ => {}
+                    }
+                }
+                if let (true, Some(bytes)) = (uid != 0, bytes) {
+                    messages.push((uid, bytes));
+                }
+            })
+            .await?;
+        Ok(messages)
+    }
+
     /// A whole message, fetched in pieces. `Ok(None)` if it is gone.
     pub async fn fetch_message(&mut self, uid: u32) -> Result<Option<Vec<u8>>> {
         let mut message = Vec::new();
@@ -543,7 +608,7 @@ impl Session {
     pub async fn idle(
         &mut self,
         limit: Duration,
-        wake: impl std::future::Future<Output = ()>,
+        wake: impl std::future::Future<Output = ()> + Send,
     ) -> Result<bool> {
         let seen = self.conn.idle(limit, wake).await?;
         Ok(seen.iter().any(|u| {

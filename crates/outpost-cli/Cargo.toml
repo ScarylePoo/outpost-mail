@@ -1,0 +1,17 @@
+[package]
+name = "outpost-cli"
+description = "Command-line access to Outpost Mail's sync engine, for testing against real accounts."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "outpost-sync"
+path = "src/main.rs"
+
+[dependencies]
+outpost-core = { path = "../outpost-core" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }
+rpassword = "7"

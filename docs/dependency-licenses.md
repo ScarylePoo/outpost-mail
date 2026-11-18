@@ -16,6 +16,11 @@ npm) and ship the notices with the app.
 | `tauri` | The shell | MIT or Apache-2.0 |
 | `rusqlite`, with SQLite bundled | The index and full-text search | MIT (SQLite: public domain) |
 | `mail-parser` | Reading message files | MIT or Apache-2.0 |
+| `imap-codec` | Parsing and writing the IMAP protocol | MIT or Apache-2.0 |
+| `tokio` | Networking and timers | MIT |
+| `tokio-rustls`, `rustls` | TLS | MIT, Apache-2.0 or ISC |
+| `ring` (through `rustls`) | Cryptography for TLS | Apache-2.0 and ISC |
+| `rustls-platform-verifier` | Checking certificates against the system's trust store | MIT or Apache-2.0 |
 | `solid-js` | Interface framework | MIT |
 | `@tauri-apps/api` | Interface side of the Tauri adapter | MIT or Apache-2.0 |
 | Inter (`@fontsource-variable/inter`) | Typeface | SIL Open Font License 1.1 |
@@ -27,3 +32,4 @@ npm) and ship the notices with the app.
 | `tauri-build`, `@tauri-apps/cli` | MIT or Apache-2.0 |
 | `vite`, `vite-plugin-solid` | MIT |
 | `typescript` | Apache-2.0 |
+| `rpassword` (in `outpost-sync` only) | Apache-2.0 |

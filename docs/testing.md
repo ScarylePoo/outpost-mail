@@ -30,7 +30,7 @@ All from the repository root.
 | To | Run |
 | --- | --- |
 | Install interface dependencies (once) | `npm install` |
-| Run the core's tests | `cargo test` |
+| Run all automated tests | `cargo test` |
 | Type-check the interface | `npm run typecheck` |
 | Run the app while developing | `npm run dev` |
 | Build the app (no installer) | `npm run build -- --no-bundle`, giving `target/release/outpost` |
@@ -40,11 +40,73 @@ Always build the app with that command, not with `cargo build`. A plain
 server, and shows "could not connect to localhost" when run on its own.
 | Work on the interface in a browser, no Rust | `npm run ui`, then open http://localhost:1420 |
 
-`cargo test` at the root tests the core only, so it works without any webview
-libraries installed. Add `--workspace` to compile the shell too.
+`cargo test` at the root tests everything except the shell, so it works
+without any webview libraries installed. Add `--workspace` to compile the
+shell too.
 
 Every push runs the core tests, the type-check and a shell build on Windows
 and Linux (`.github/workflows/ci.yml`).
+
+## Sync tests (milestone 2)
+
+The sync engine is tested against a real IMAP server. Each test starts its own
+private Dovecot, as your own user, on a free local port, in a temporary
+directory, and removes it afterwards. It never touches a system Dovecot or any
+real mail. A second, separately written mail client makes changes "from
+elsewhere", and a small proxy cuts the connection at chosen points.
+
+They need Dovecot 2.4 (`sudo apt install dovecot-imapd`) and `openssl`, so
+they run on Linux only. **Where Dovecot is missing (Windows) these tests print
+`SKIPPED` and count as passed.** They are not skipped in CI: the Linux job
+installs Dovecot and sets `OUTPOST_REQUIRE_DOVECOT=1`, which turns a missing
+server into a failure.
+
+What they cover: sign-in and its failures; folder names including non-ASCII;
+TLS with an accepted certificate, and refusal of an untrusted one, a wrong
+name and a different certificate; a first sync compared byte for byte with the
+server; proof that syncing changed no flag on the server; changes made by
+another client (new mail, deletions, flag changes) with and without fast
+resync; a connection cut during sign-in, the folder list, headers and bodies,
+then resumed with nothing duplicated; a folder the server renumbered; folders
+created and deleted elsewhere; push, polling and reconnecting in a running
+sync; and a rebuilt index not downloading anything again.
+
+## Syncing a real account from the command line (milestone 2)
+
+Until the app has account setup, `outpost-sync` runs the sync engine from a
+terminal. Build it with `cargo build --release -p outpost-cli`.
+
+**It is read-only.** It opens folders in read-only mode and fetches without
+marking anything read. It cannot change, move or delete mail on the server.
+
+First check the address and certificate, which needs no password:
+
+```sh
+target/release/outpost-sync check --host mail.example.com
+```
+
+Then a single pass, with a check that nothing changed on the server:
+
+```sh
+target/release/outpost-sync sync --once --data DATA --account home \
+    --host mail.example.com --user you@example.com
+```
+
+It asks for the password at a hidden prompt, uses it for that run and stores
+it nowhere. (`OUTPOST_PASSWORD` in the environment is read instead, for
+scripts.) Before and after the pass it records every message's flags on the
+server and reports any difference. Mail goes to `DATA/accounts/home`.
+
+A pass that is interrupted (Ctrl-C, a dropped connection, a closed laptop) is
+continued by running the same command again. Without `--once` it stays
+running: push for the inbox, a check of the other folders every ten minutes,
+and automatic reconnection.
+
+To browse the result in the app: `OUTPOST_DATA=DATA target/release/outpost`.
+
+Other options: `--port`, `--plaintext` (no encryption; only for a local test
+server), `--no-verify` (skip the before/after check, which reads every flag
+twice), `--all-mail` (include Gmail's All Mail folder).
 
 ## Performance tests (milestone 1)
 

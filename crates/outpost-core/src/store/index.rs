@@ -16,7 +16,7 @@ use std::sync::{Mutex, MutexGuard};
 type Result<T> = std::result::Result<T, StoreError>;
 
 /// Bump when the schema changes, and add a step to `migrate`.
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 
 const TABLES: &str = r#"
 CREATE TABLE folder (
@@ -27,17 +27,26 @@ CREATE TABLE folder (
     name          TEXT NOT NULL,
     total         INTEGER NOT NULL DEFAULT 0,
     unread        INTEGER NOT NULL DEFAULT 0,
-    -- Sync state, filled in by the sync engine (milestone 2).
-    uidvalidity   INTEGER,
-    uidnext       INTEGER,
-    highestmodseq INTEGER,
-    special_use   TEXT
+    -- What the server calls the folder, byte for byte. NULL for a folder
+    -- that exists only on this machine.
+    remote_name   BLOB,
+    delimiter     TEXT,
+    -- 0 for a name that only holds other folders.
+    selectable    INTEGER NOT NULL DEFAULT 1,
+    special_use   TEXT,
+    -- Sync state. See store/sync_state.rs.
+    uidvalidity   INTEGER NOT NULL DEFAULT 0,
+    uidnext       INTEGER NOT NULL DEFAULT 0,
+    highestmodseq INTEGER NOT NULL DEFAULT 0,
+    -- 1 once every message's list data has been fetched at least once.
+    headers_done  INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE message (
     id             INTEGER PRIMARY KEY,
     folder_id      INTEGER NOT NULL REFERENCES folder(id) ON DELETE CASCADE,
-    -- File name without the flag section. Never changes.
+    -- File name without the flag section. Never changes once set. Empty
+    -- while only the message's list data has been fetched from the server.
     base           TEXT NOT NULL,
     -- The flags currently in the file's name. With `base`, locates the file.
     file_flags     INTEGER NOT NULL,
@@ -84,11 +93,12 @@ const INDEXES: &[(&str, &str)] = &[
     // whole folder reads this index only.
     ("message_list", "CREATE INDEX IF NOT EXISTS message_list ON message(folder_id, sort_key DESC, preview_len)"),
     ("message_sort", "CREATE UNIQUE INDEX IF NOT EXISTS message_sort ON message(sort_key)"),
-    ("message_base", "CREATE UNIQUE INDEX IF NOT EXISTS message_base ON message(folder_id, base)"),
+    ("message_base", "CREATE UNIQUE INDEX IF NOT EXISTS message_base ON message(folder_id, base) WHERE base != ''"),
     ("message_uid", "CREATE UNIQUE INDEX IF NOT EXISTS message_uid ON message(folder_id, uid) WHERE uid IS NOT NULL"),
     ("message_msgid", "CREATE INDEX IF NOT EXISTS message_msgid ON message(message_id) WHERE message_id != ''"),
     ("message_unread", "CREATE INDEX IF NOT EXISTS message_unread ON message(folder_id) WHERE (flags & 1) = 0"),
-    ("message_rename", "CREATE INDEX IF NOT EXISTS message_rename ON message(id) WHERE flags != file_flags"),
+    ("message_rename", "CREATE INDEX IF NOT EXISTS message_rename ON message(id) WHERE flags != file_flags AND base != ''"),
+    ("message_nobody", "CREATE INDEX IF NOT EXISTS message_nobody ON message(folder_id, sort_key DESC) WHERE base = ''"),
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -191,12 +201,12 @@ impl Index {
         &self.path
     }
 
-    fn writer(&self) -> MutexGuard<'_, Connection> {
+    pub(super) fn writer(&self) -> MutexGuard<'_, Connection> {
         self.writer.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Runs `f` on a read-only connection from the pool.
-    fn read<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T> {
+    pub(super) fn read<T>(&self, f: impl FnOnce(&Connection) -> rusqlite::Result<T>) -> Result<T> {
         let pooled = self.readers.lock().unwrap_or_else(|e| e.into_inner()).pop();
         let conn = match pooled {
             Some(conn) => conn,
@@ -323,7 +333,7 @@ impl Index {
             conn.prepare_cached(
                 "SELECT m.id, f.path, m.base, m.file_flags, m.flags
                  FROM message m JOIN folder f ON f.id = m.folder_id
-                 WHERE m.flags != m.file_flags ORDER BY m.id LIMIT ?1",
+                 WHERE m.flags != m.file_flags AND m.base != '' ORDER BY m.id LIMIT ?1",
             )?
             .query_map([limit], |r| {
                 Ok(PendingRename {
@@ -389,6 +399,13 @@ impl Index {
             .optional()
         })?
         .ok_or(StoreError::NoSuchMessage(id))
+        .and_then(|at: Location| {
+            if at.base.is_empty() {
+                Err(StoreError::NotDownloaded(id))
+            } else {
+                Ok(at)
+            }
+        })
     }
 
     /// Full-text search, newest first. `folder_id` narrows it to one folder.
@@ -483,9 +500,12 @@ impl Drop for Bulk<'_> {
 impl Bulk<'_> {
     const BATCH: u32 = 20_000;
 
-    pub fn add_folder(&self, path: &str, name: &str) -> Result<i64> {
-        self.conn
-            .execute("INSERT INTO folder (path, name) VALUES (?1, ?2)", params![path, name])?;
+    /// `uid_validity` is what the folder's marker file says, or 0.
+    pub fn add_folder(&self, path: &str, name: &str, uid_validity: u32) -> Result<i64> {
+        self.conn.execute(
+            "INSERT INTO folder (path, name, uidvalidity) VALUES (?1, ?2, ?3)",
+            params![path, name, uid_validity],
+        )?;
         Ok(self.conn.last_insert_rowid())
     }
 

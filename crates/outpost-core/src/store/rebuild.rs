@@ -86,7 +86,8 @@ impl Store {
         let mut folder_ids = Vec::with_capacity(paths.len());
         for path in &paths {
             let name = segment_name(path.rsplit('/').next().unwrap_or(path));
-            folder_ids.push(bulk.add_folder(path, &name)?);
+            let validity = super::sync_state::read_uid_validity(&self.mail_root().join(path));
+            folder_ids.push(bulk.add_folder(path, &name, validity)?);
         }
 
         let total = jobs.len() as u64;

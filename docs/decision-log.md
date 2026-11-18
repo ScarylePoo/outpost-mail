@@ -7,7 +7,14 @@ started.
 Status words: **Decided** (owner agreed), **Proposal** (default in use, owner
 has not reviewed), **Finding** (a test result).
 
-## 2026-11-18 · Milestone 3 (in progress)
+## 2026-11-18 · Milestone 3 closed
+
+The owner added his real account in the Windows app and reports it working.
+He also asked that milestones no longer wait for his confirmation: work
+continues until his input is actually needed. The by-eye scrolling check and
+the Windows credential store were not separately reported on.
+
+## 2026-11-18 · Milestone 3
 
 **Proposals** unless marked otherwise.
 

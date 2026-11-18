@@ -87,7 +87,28 @@ pub enum Command {
         password: Secret,
         /// Keep the password in the operating system's credential store.
         remember: bool,
+        /// How to send mail from the account. Can be left out and set later.
+        #[serde(default)]
+        sending: Option<SendingSettings>,
     },
+    /// Sets or changes how an account sends mail.
+    SetSending { account: FolderId, sending: SendingSettings },
+    /// The starting point for a reply to, or a forward of, a message.
+    /// `mode` is `reply`, `replyAll` or `forward`.
+    ComposeReply { folder: FolderId, id: i64, mode: String },
+    /// A stored draft (or a message left in the outbox), for editing.
+    EditDraft { folder: FolderId, id: i64 },
+    /// Saves what the composer holds as a draft, here and on the server.
+    SaveDraft { account: FolderId, draft: DraftContent },
+    /// Puts a message in the outbox. It is sent after `delay_seconds`,
+    /// during which `CancelSend` takes it back.
+    SendMessage {
+        account: FolderId,
+        draft: DraftContent,
+        delay_seconds: u32,
+    },
+    /// Takes a message back out of the outbox and makes it a draft again.
+    CancelSend { account: FolderId, id: i64 },
     /// Supplies the password for an account that has none stored, or whose
     /// stored one was refused, and starts syncing it.
     ProvidePassword {
@@ -142,6 +163,20 @@ pub enum Response {
         path: String,
         /// The file name it was given.
         name: String,
+    },
+    Draft {
+        draft: DraftContent,
+    },
+    DraftSaved {
+        id: i64,
+    },
+    SendQueued {
+        /// The message's row in the outbox.
+        id: i64,
+    },
+    SendCancelled {
+        /// False if the message had already gone.
+        cancelled: bool,
     },
     Located {
         /// `None` if the message is no longer in the folder.
@@ -212,6 +247,22 @@ pub struct AccountInfo {
     pub host: String,
     pub username: String,
     pub status: SyncStatus,
+    /// How the account sends mail, if that has been set up.
+    pub sending: Option<SendingSettings>,
+}
+
+/// Who mail is from and which server sends it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendingSettings {
+    /// The name recipients see.
+    pub name: String,
+    /// The address mail is sent from.
+    pub address: String,
+    pub host: String,
+    pub port: u16,
+    /// `tls` (usually port 465), `starttls` (usually 587) or `plaintext`.
+    pub security: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

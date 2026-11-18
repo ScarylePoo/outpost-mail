@@ -35,6 +35,14 @@ pub struct Account {
     pub username: String,
 }
 
+/// The outgoing server for an account. It is signed in to with the same
+/// password as the incoming one.
+#[derive(Debug, Clone)]
+pub struct Sending {
+    pub server: crate::smtp::SmtpServer,
+    pub username: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Options {
     /// Headers fetched per request.
@@ -47,6 +55,8 @@ pub struct Options {
     /// During a long download in another folder, how often to stop and
     /// bring the inbox up to date.
     pub inbox_check: Duration,
+    /// How to send mail. `None` until the account has an outgoing server.
+    pub sending: Option<Sending>,
     /// Folders the server marks as "all mail" hold a second copy of every
     /// message (Gmail). Skipped unless this is set.
     pub include_all_mail: bool,
@@ -59,6 +69,7 @@ impl Default for Options {
             fast_resync: true,
             poll_interval: Duration::from_secs(10 * 60),
             inbox_check: Duration::from_secs(30),
+            sending: None,
             include_all_mail: false,
         }
     }
@@ -70,6 +81,14 @@ pub enum SyncError {
     Store(StoreError),
     /// Stopped on request.
     Stopped,
+    /// An action could not be carried out for now and should be tried
+    /// again later, without holding up the rest of the queue.
+    Deferred(String),
+    /// An action was refused for good.
+    Refused(String),
+    /// A message was handed to the outgoing server and the connection was
+    /// lost before it answered: it may or may not have been sent.
+    Uncertain(String),
 }
 
 impl std::fmt::Display for SyncError {
@@ -78,6 +97,7 @@ impl std::fmt::Display for SyncError {
             SyncError::Imap(e) => e.fmt(f),
             SyncError::Store(e) => e.fmt(f),
             SyncError::Stopped => write!(f, "sync was stopped"),
+            SyncError::Deferred(e) | SyncError::Refused(e) | SyncError::Uncertain(e) => f.write_str(e),
         }
     }
 }
@@ -571,13 +591,14 @@ async fn pass(
     session: &mut Session,
     store: &Store,
     options: &Options,
+    password: &str,
     stop: &Stop,
     progress: &mut (dyn FnMut(Progress) + Send),
 ) -> Result<Summary> {
     let mut summary = Summary::default();
     // What the user did comes first: the server must hear it before its
     // (older) view of those messages is read back.
-    actions::replay(session, store, progress, &mut summary).await?;
+    actions::replay(session, store, options, password, progress, &mut summary).await?;
     let folders = sync_folders(session, store, options).await?;
     summary.folders = folders.len();
     progress(Progress::Folders { count: folders.len() });
@@ -613,7 +634,7 @@ pub async fn sync_once(
 ) -> Result<Summary> {
     progress(Progress::Connecting);
     let mut session = Session::connect(&account.server, &account.username, password).await?;
-    let result = pass(&mut session, store, options, stop, &mut progress).await;
+    let result = pass(&mut session, store, options, password, stop, &mut progress).await;
     session.logout().await;
     result
 }
@@ -677,7 +698,7 @@ async fn connected(
     progress(Progress::Connecting);
     let mut session = Session::connect(&account.server, &account.username, password).await?;
     loop {
-        pass(&mut session, store, options, stop, progress).await?;
+        pass(&mut session, store, options, password, stop, progress).await?;
         // A pass that completed means the connection is healthy again.
         *retry_in = Duration::from_secs(2);
         progress(Progress::Idle);
@@ -724,17 +745,29 @@ async fn connected(
                         _ = signals.changes.notified() => acted.store(true, std::sync::atomic::Ordering::Relaxed),
                     }
                 };
-                // Anything the user did while we were busy goes first.
-                let pushed = if store.index().queued_action_count()? > 0 {
+                // Anything the user did while we were busy goes first, and
+                // the wait ends when a scheduled action (a message waiting
+                // out its "undo send" pause, a retry) comes due.
+                let limit = match store.index().next_action_due()? {
+                    Some(due) => {
+                        let wait = (due - crate::store::actions::now()).max(0) as u64 + 1;
+                        limit.min(Duration::from_secs(wait))
+                    }
+                    None => limit,
+                };
+                let pushed = if !store.index().queued_actions(1)?.is_empty() {
                     acted.store(true, std::sync::atomic::Ordering::Relaxed);
                     false
                 } else {
                     session.idle(limit, wake).await?
                 };
                 stop.check()?;
+                if !store.index().queued_actions(1)?.is_empty() {
+                    acted.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 if acted.load(std::sync::atomic::Ordering::Relaxed) {
                     let mut summary = Summary::default();
-                    actions::replay(&mut session, store, progress, &mut summary).await?;
+                    actions::replay(&mut session, store, options, password, progress, &mut summary).await?;
                     if !pushed {
                         continue;
                     }

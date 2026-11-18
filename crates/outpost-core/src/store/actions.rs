@@ -42,6 +42,8 @@ pub enum Action {
     Expunge { folder: i64, items: Vec<Item> },
     /// Upload a message that so far exists only here.
     Append { folder: i64, message: i64 },
+    /// Send a message waiting in the outbox.
+    Send { message: i64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,12 +54,26 @@ pub struct Queued {
 }
 
 fn enqueue(conn: &Connection, action: &Action) -> rusqlite::Result<()> {
+    enqueue_at(conn, action, 0)
+}
+
+fn enqueue_at(conn: &Connection, action: &Action, not_before: i64) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT INTO action (payload) VALUES (?1)",
-        [serde_json::to_string(action).expect("actions serialise")],
+        "INSERT INTO action (payload, not_before) VALUES (?1, ?2)",
+        params![serde_json::to_string(action).expect("actions serialise"), not_before],
     )?;
     Ok(())
 }
+
+pub fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
+/// The directory of the outbox: a folder that exists only on this computer,
+/// holding messages on their way out. The name is one no mail server uses.
+pub const OUTBOX: &str = "Outpost Outbox";
 
 fn recount(conn: &Connection, folder_id: i64) -> rusqlite::Result<()> {
     conn.execute(
@@ -137,11 +153,45 @@ impl Index {
         })
     }
 
-    /// The oldest queued actions, in the order they must be replayed.
+    /// The oldest actions that are due, in the order they must be replayed.
     pub fn queued_actions(&self, limit: u32) -> Result<Vec<Queued>> {
+        self.actions_where("not_before <= ?2", limit)
+    }
+
+    /// Every queued action, due or not.
+    pub fn all_actions(&self) -> Result<Vec<Queued>> {
+        self.actions_where("?2 = ?2", u32::MAX)
+    }
+
+    /// When the next action that is not yet due becomes due.
+    pub fn next_action_due(&self) -> Result<Option<i64>> {
         self.read(|conn| {
-            conn.prepare_cached("SELECT id, payload, attempts FROM action ORDER BY id LIMIT ?1")?
-                .query_map([limit], |r| {
+            conn.query_row("SELECT min(not_before) FROM action WHERE not_before > ?1", [now()], |r| r.get(0))
+        })
+    }
+
+    /// Makes every action that was put off after a failure due now. For
+    /// when the user asks for a sync: they expect waiting mail to be tried.
+    pub fn retry_deferred(&self) -> Result<()> {
+        self.writer().execute("UPDATE action SET not_before = 0 WHERE attempts > 0", [])?;
+        Ok(())
+    }
+
+    /// Puts an action off until `until`, noting why.
+    pub fn defer_action(&self, id: i64, until: i64, error: &str) -> Result<()> {
+        self.writer().execute(
+            "UPDATE action SET not_before = ?2, attempts = attempts + 1, last_error = ?3 WHERE id = ?1",
+            params![id, until, error],
+        )?;
+        Ok(())
+    }
+
+    fn actions_where(&self, condition: &str, limit: u32) -> Result<Vec<Queued>> {
+        self.read(|conn| {
+            conn.prepare_cached(&format!(
+                "SELECT id, payload, attempts FROM action WHERE {condition} ORDER BY id LIMIT ?1"
+            ))?
+                .query_map(params![limit, now()], |r| {
                     Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, u32>(2)?))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()
@@ -200,7 +250,7 @@ impl Index {
                 Action::Flags { folder, items, .. } => (*folder, Some(items)),
                 Action::Move { from, items, .. } => (*from, Some(items)),
                 Action::Expunge { folder, items } => (*folder, Some(items)),
-                Action::Append { .. } => (0, None),
+                Action::Append { .. } | Action::Send { .. } => (0, None),
             };
             let Some(items) = items else { continue };
             let mut changed = false;
@@ -226,12 +276,12 @@ impl Index {
     /// server's (not yet updated) view over it.
     pub fn pending_uids(&self, folder_id: i64) -> Result<HashSet<u32>> {
         let mut pending = HashSet::new();
-        for queued in self.queued_actions(u32::MAX)? {
+        for queued in self.all_actions()? {
             let (folder, items) = match &queued.action {
                 Action::Flags { folder, items, .. } => (*folder, items),
                 Action::Move { from, items, .. } => (*from, items),
                 Action::Expunge { folder, items } => (*folder, items),
-                Action::Append { .. } => continue,
+                Action::Append { .. } | Action::Send { .. } => continue,
             };
             if folder == folder_id {
                 pending.extend(items.iter().filter_map(|i| i.uid));
@@ -422,5 +472,115 @@ impl Store {
             self.remove_messages(folder, &[message])?;
         }
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The outbox
+// ---------------------------------------------------------------------------
+
+impl Store {
+    fn folder_with_role(&self, role: &str) -> Result<Option<i64>> {
+        Ok(self
+            .index()
+            .folders()?
+            .iter()
+            .find(|f| super::sync_state::role_of(&f.path, &f.name, f.special_use.as_deref()) == Some(role))
+            .map(|f| f.id))
+    }
+
+    /// Puts a finished message in the outbox, to be sent no sooner than
+    /// `send_at` (unix time). Returns its row.
+    pub fn queue_for_sending(&self, raw: &[u8], send_at: i64) -> Result<i64> {
+        let outbox = self.create_folder(&[OUTBOX])?;
+        let id = self.add_message(outbox, raw, Flags::SEEN, None)?;
+        let conn = self.index().writer();
+        enqueue_at(&conn, &Action::Send { message: id }, send_at)?;
+        Ok(id)
+    }
+
+    /// Takes a message back out of the outbox before it is sent, and makes
+    /// it a draft again. Returns false if it is too late.
+    pub fn cancel_sending(&self, message: i64) -> Result<bool> {
+        let wanted = serde_json::to_string(&Action::Send { message }).expect("actions serialise");
+        let cancelled = self.index().writer().execute("DELETE FROM action WHERE payload = ?1", [wanted])?;
+        if cancelled == 0 {
+            return Ok(false);
+        }
+        self.back_to_drafts(message)?;
+        Ok(true)
+    }
+
+    /// Removes a message's queued send, if it has one, leaving the message
+    /// where it is. Returns whether there was one.
+    pub fn cancel_pending_send(&self, message: i64) -> Result<bool> {
+        let wanted = serde_json::to_string(&Action::Send { message }).expect("actions serialise");
+        Ok(self.index().writer().execute("DELETE FROM action WHERE payload = ?1", [wanted])? > 0)
+    }
+
+    /// Moves a message between folders on this computer only, queuing
+    /// nothing. Returns false if the message is not there.
+    fn relocate(&self, message: i64, to: i64) -> Result<bool> {
+        let destination = self.dir_of(to)?;
+        let mut conn = self.index().writer();
+        let tx = conn.transaction()?;
+        let found: Option<(i64, String, u8, String)> = tx
+            .query_row(
+                "SELECT m.folder_id, m.base, m.file_flags, f.path FROM message m JOIN folder f ON f.id = m.folder_id WHERE m.id = ?1",
+                [message],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        let Some((from, base, file_flags, from_path)) = found else { return Ok(false) };
+        if !base.is_empty() {
+            let source = Maildir::at(self.mail_root().join(from_path));
+            std::fs::rename(source.file_path(&base, Flags(file_flags)), destination.file_path(&base, Flags(file_flags)))?;
+        }
+        tx.execute("UPDATE message SET folder_id = ?1, uid = NULL WHERE id = ?2", params![to, message])?;
+        recount(&tx, from)?;
+        recount(&tx, to)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// After a message has been sent: it leaves the outbox for the Sent
+    /// folder. With `upload`, the copy is queued for upload there; without
+    /// (servers that file sent mail themselves), the local copy is dropped
+    /// and the server's own copy arrives by sync. Returns the folders that
+    /// changed.
+    pub fn after_sent(&self, message: i64, upload: bool) -> Result<Vec<i64>> {
+        let outbox = self.index().brief(message)?.map(|b| b.folder);
+        let sent = self.folder_with_role("sent")?;
+        match (sent, upload) {
+            (Some(sent), true) => {
+                if self.relocate(message, sent)? {
+                    let conn = self.index().writer();
+                    enqueue(&conn, &Action::Append { folder: sent, message })?;
+                }
+                Ok(outbox.into_iter().chain([sent]).collect())
+            }
+            _ => {
+                self.drop_local_message(message)?;
+                Ok(outbox.into_iter().collect())
+            }
+        }
+    }
+
+    /// A message that could not be sent goes back to Drafts, where the user
+    /// will find it. Without a Drafts folder it stays in the outbox.
+    pub fn back_to_drafts(&self, message: i64) -> Result<Vec<i64>> {
+        let outbox = self.index().brief(message)?.map(|b| b.folder);
+        let Some(drafts) = self.folder_with_role("drafts")? else {
+            return Ok(Vec::new());
+        };
+        if self.relocate(message, drafts)? {
+            self.index().writer().execute(
+                "UPDATE message SET flags = flags | ?1 WHERE id = ?2",
+                params![Flags::DRAFT.0, message],
+            )?;
+            let conn = self.index().writer();
+            enqueue(&conn, &Action::Append { folder: drafts, message })?;
+        }
+        Ok(outbox.into_iter().chain([drafts]).collect())
     }
 }

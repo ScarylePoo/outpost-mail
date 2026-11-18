@@ -11,6 +11,33 @@ use super::parse::{self, Parsed};
 use super::{Result, Store, StoreError};
 use rusqlite::{params, OptionalExtension};
 
+/// What a folder is for: from the server's marker if it gave one, otherwise
+/// from the names mail servers and clients commonly use.
+pub fn role_of(path: &str, name: &str, special_use: Option<&str>) -> Option<&'static str> {
+    if path.eq_ignore_ascii_case("INBOX") {
+        return Some("inbox");
+    }
+    if path == super::actions::OUTBOX {
+        return Some("outbox");
+    }
+    match special_use {
+        Some("sent") => return Some("sent"),
+        Some("drafts") => return Some("drafts"),
+        Some("trash") => return Some("trash"),
+        Some("junk") => return Some("junk"),
+        Some("archive") | Some("all") => return Some("archive"),
+        _ => {}
+    }
+    match name.to_lowercase().as_str() {
+        "sent" | "sent items" | "sent mail" | "sent messages" => Some("sent"),
+        "drafts" | "draft" => Some("drafts"),
+        "trash" | "deleted items" | "deleted messages" | "bin" => Some("trash"),
+        "junk" | "spam" | "junk e-mail" | "junk email" | "bulk mail" => Some("junk"),
+        "archive" | "archives" => Some("archive"),
+        _ => None,
+    }
+}
+
 /// A folder as the server describes it, ready to be recorded locally.
 #[derive(Debug, Clone)]
 pub struct RemoteFolderInfo<'a> {

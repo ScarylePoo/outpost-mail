@@ -25,6 +25,25 @@ pub struct AccountConfig {
     /// False only if the user explicitly chose an unencrypted connection.
     pub encrypted: bool,
     pub username: String,
+    /// The name mail is sent under.
+    #[serde(default)]
+    pub name: String,
+    /// The address mail is sent from. Empty means the user name, if that
+    /// is an address.
+    #[serde(default)]
+    pub address: String,
+    /// The outgoing server. `None` until the user has set up sending.
+    #[serde(default)]
+    pub smtp: Option<SmtpSettings>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SmtpSettings {
+    pub host: String,
+    pub port: u16,
+    /// `tls` (port 465), `starttls` (port 587) or `plaintext`.
+    pub security: String,
 }
 
 impl AccountConfig {
@@ -35,6 +54,31 @@ impl AccountConfig {
             security: if self.encrypted { Security::Tls } else { Security::Plaintext },
             trusted_certificate: None,
         }
+    }
+
+    /// Who mail from this account is from, if it has an address.
+    pub fn identity(&self) -> Option<crate::compose::Identity> {
+        let address = if self.address.trim().is_empty() { &self.username } else { &self.address };
+        address.contains('@').then(|| crate::compose::Identity {
+            name: self.name.trim().to_string(),
+            address: address.trim().to_string(),
+        })
+    }
+
+    /// The outgoing server, if sending has been set up.
+    pub fn smtp_server(&self) -> Option<crate::smtp::SmtpServer> {
+        use crate::smtp::{SmtpSecurity, SmtpServer};
+        let smtp = self.smtp.as_ref()?;
+        Some(SmtpServer {
+            host: smtp.host.clone(),
+            port: smtp.port,
+            security: match smtp.security.as_str() {
+                "starttls" => SmtpSecurity::StartTls,
+                "plaintext" => SmtpSecurity::Plaintext,
+                _ => SmtpSecurity::Tls,
+            },
+            trusted_certificate: None,
+        })
     }
 
     /// The name this account's password is stored under.
@@ -154,6 +198,9 @@ mod tests {
             port: 993,
             encrypted: true,
             username: "me@example.com".into(),
+            name: String::new(),
+            address: String::new(),
+            smtp: None,
         };
         config.save(&dir).unwrap();
         assert_eq!(AccountConfig::load(&dir), Some(config.clone()));

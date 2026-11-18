@@ -53,6 +53,7 @@ fn add(core: &Core, server: &TestServer, user: &str, password: &str, remember: b
             username: user.into(),
             password: Secret(password.into()),
             remember,
+            sending: None,
         })
         .unwrap();
     assert_eq!(reply, Response::Accepted);
@@ -181,6 +182,7 @@ fn adding_an_account_needs_somewhere_to_keep_it() {
             username: "u".into(),
             password: Secret("p".into()),
             remember: false,
+            sending: None,
         })
         .unwrap_err();
     assert_eq!(refused.code, ErrorCode::NotPossible);
@@ -297,4 +299,239 @@ fn mail_that_is_only_browsed_cannot_be_changed() {
         assert_eq!(core.handle(command).unwrap_err().code, ErrorCode::NotPossible);
     }
     assert_eq!(subjects(&core, &inbox), ["kept"]);
+}
+
+mod sending {
+    use super::*;
+    use common::smtp::{Behaviour, SmtpSink};
+    use outpost_core::api::{DraftContent, SendingSettings};
+
+    fn until(what: &str, mut check: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !check() {
+            assert!(Instant::now() < deadline, "timed out waiting for: {what}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn folder_named(core: &Core, role_or_name: &str) -> Option<String> {
+        folders(core)
+            .into_iter()
+            .find(|f| f.role.as_deref() == Some(role_or_name) || f.name == role_or_name)
+            .map(|f| f.id)
+    }
+
+    fn send(core: &Core, draft: DraftContent, delay_seconds: u32) -> i64 {
+        match core.handle(Command::SendMessage { account: "acct/sam".into(), draft, delay_seconds }).unwrap() {
+            Response::SendQueued { id } => id,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn to(address: &str, subject: &str) -> DraftContent {
+        DraftContent {
+            to: address.into(),
+            subject: subject.into(),
+            body: format!("Body of {subject}.\n"),
+            ..DraftContent::default()
+        }
+    }
+
+    #[test]
+    fn mail_is_sent_filed_and_never_lost_or_doubled() {
+        let Some(server) = TestServer::start() else { return };
+        let sink = SmtpSink::start();
+        let mut other = server.other_client("sam");
+        other.append("INBOX", "", &message(1, "a question", "Can you make Friday?"));
+        let data = TempDir::new();
+        let (core, events) = start(&data, Arc::new(MemorySecrets::default()));
+        let sending = SendingSettings {
+            name: "Sam Sender".into(),
+            address: "sam@example.com".into(),
+            host: "127.0.0.1".into(),
+            port: sink.port,
+            security: "plaintext".into(),
+        };
+        core.handle(Command::AddAccount {
+            host: "127.0.0.1".into(),
+            port: server.port,
+            encrypted: false,
+            username: "sam".into(),
+            password: Secret(PASSWORD.into()),
+            remember: false,
+            sending: Some(sending.clone()),
+        })
+        .unwrap();
+        wait_for_state(&events, SyncState::UpToDate);
+        let Response::Accounts { accounts } = core.handle(Command::ListAccounts).unwrap() else { panic!() };
+        assert_eq!(accounts[0].sending, Some(sending));
+        let inbox = folder_named(&core, "inbox").unwrap();
+        let sent = folder_named(&core, "sent").unwrap();
+        let drafts = folder_named(&core, "drafts").unwrap();
+
+        // 1. A new message, with a blind copy.
+        let draft = DraftContent { cc: "Carol <carol@example.com>".into(), bcc: "secret@example.org".into(), ..to("Alice <alice@example.com>", "hello") };
+        send(&core, draft, 0);
+        until("the message to be sent", || sink.messages().len() == 1);
+        let got = &sink.messages()[0];
+        assert_eq!(got.from, "sam@example.com");
+        assert_eq!(got.recipients, ["alice@example.com", "carol@example.com", "secret@example.org"]);
+        let wire = String::from_utf8_lossy(&got.message).into_owned();
+        assert!(wire.contains("Subject: hello") && wire.contains("Sam Sender") && wire.contains("Body of hello."));
+        assert!(!wire.contains("secret@example.org"), "the blind copy is not revealed to recipients");
+        until("the copy in Sent, here and on the server", || {
+            subjects(&core, &sent) == ["hello"] && other.subjects_in("Sent").len() == 1
+        });
+        assert!(folder_named(&core, "Outbox").is_none(), "the outbox empties and disappears");
+
+        // 2. A reply: threaded, and the original is marked answered.
+        let question = match core.handle(Command::ListMessages { folder: inbox.clone(), offset: 0, limit: 10 }).unwrap() {
+            Response::Messages { rows, .. } => rows[0].id,
+            other => panic!("{other:?}"),
+        };
+        let Response::Draft { draft } =
+            core.handle(Command::ComposeReply { folder: inbox.clone(), id: question, mode: "reply".into() }).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!((draft.to.as_str(), draft.subject.as_str()), ("Sender 1 <sender1@example.com>", "Re: a question"));
+        assert!(draft.body.contains("> Can you make Friday?"));
+        send(&core, DraftContent { body: format!("Yes.{}", draft.body), ..draft }, 0);
+        until("the reply to be sent", || sink.messages().len() == 2);
+        let wire = String::from_utf8_lossy(&sink.messages()[1].message).into_owned();
+        assert!(wire.contains("In-Reply-To: <1.10@example.com>"), "{wire}");
+        until("the original to be marked answered on the server", || {
+            other.subjects_in("INBOX") == [("a question".to_string(), "\\Answered".to_string())]
+        });
+
+        // 3. Undo: taken back before it goes, it is a draft again.
+        let pending = send(&core, to("alice@example.com", "second thoughts"), 60);
+        assert_eq!(subjects(&core, &folder_named(&core, "Outbox").unwrap()), ["second thoughts"]);
+        let Response::SendCancelled { cancelled } =
+            core.handle(Command::CancelSend { account: "acct/sam".into(), id: pending }).unwrap()
+        else {
+            panic!()
+        };
+        assert!(cancelled);
+        assert_eq!(subjects(&core, &drafts), ["second thoughts"]);
+        until("the draft to reach the server", || other.subjects_in("Drafts").len() == 1);
+        assert_eq!(sink.messages().len(), 2, "it was not sent");
+
+        // 4. A recipient the server refuses: back to Drafts, with a notice.
+        send(&core, to("nobody@example.com", "undeliverable"), 0);
+        let notice = wait_for(&events, "a notice about the refusal", |e| match e {
+            Event::Notice { text, .. } => Some(text.clone()),
+            _ => None,
+        });
+        assert!(notice.contains("nobody@example.com") && notice.contains("Drafts"), "{notice}");
+        until("it to be back in Drafts", || subjects(&core, &drafts).contains(&"undeliverable".to_string()));
+        assert_eq!(sink.messages().len(), 2);
+
+        // 5. The outgoing server is busy: the message waits, and other
+        //    things the user does are not held up behind it.
+        sink.behave(Behaviour::Busy);
+        send(&core, to("alice@example.com", "patient"), 0);
+        std::thread::sleep(Duration::from_millis(800));
+        core.handle(Command::ChangeFlags { folder: inbox.clone(), ids: vec![question], seen: Some(true), flagged: Some(true) }).unwrap();
+        until("the flag to reach the server despite the stuck message", || {
+            other.subjects_in("INBOX") == [("a question".to_string(), "\\Answered \\Flagged \\Seen".to_string())]
+        });
+        assert_eq!(sink.messages().len(), 2);
+        assert_eq!(subjects(&core, &folder_named(&core, "Outbox").unwrap()), ["patient"]);
+        sink.behave(Behaviour::Normal);
+        core.handle(Command::SyncNow { account: "acct/sam".into() }).unwrap();
+        until("the waiting message to go once the server recovers", || sink.messages().len() == 3);
+        until("it to be filed in Sent", || subjects(&core, &sent).contains(&"patient".to_string()));
+
+        // 6. The connection is lost after the message was handed over. It
+        //    may have gone (here it did), so it is never sent again by
+        //    itself; it waits in the outbox for the user.
+        sink.behave(Behaviour::VanishAfterMessage);
+        send(&core, to("alice@example.com", "maybe"), 0);
+        let notice = wait_for(&events, "a notice about the uncertain send", |e| match e {
+            Event::Notice { text, .. } => Some(text.clone()),
+            _ => None,
+        });
+        assert!(notice.contains("Outbox"), "{notice}");
+        assert_eq!(sink.messages().len(), 4);
+        sink.behave(Behaviour::Normal);
+        core.handle(Command::SyncNow { account: "acct/sam".into() }).unwrap();
+        std::thread::sleep(Duration::from_millis(1500));
+        assert_eq!(sink.messages().len(), 4, "not sent a second time");
+        assert_eq!(subjects(&core, &folder_named(&core, "Outbox").unwrap()), ["maybe"]);
+
+        // Nothing was doubled on the way.
+        let mut in_sent = subjects(&core, &sent);
+        in_sent.sort();
+        assert_eq!(in_sent, ["Re: a question", "hello", "patient"]);
+        until("Sent on the server to match", || other.subjects_in("Sent").len() == 3);
+    }
+
+    #[test]
+    fn drafts_are_saved_reopened_and_replaced() {
+        let Some(server) = TestServer::start() else { return };
+        let sink = SmtpSink::start();
+        let mut other = server.other_client("sam");
+        let data = TempDir::new();
+        let (core, events) = start(&data, Arc::new(MemorySecrets::default()));
+        add(&core, &server, "sam", PASSWORD, false);
+        wait_for_state(&events, SyncState::UpToDate);
+        let account: String = "acct/sam".into();
+
+        // Without sending set up, nothing can be written or sent.
+        let refused = core.handle(Command::SaveDraft { account: account.clone(), draft: to("a@example.com", "x") });
+        assert_eq!(refused.unwrap_err().code, ErrorCode::NotPossible, "the account has no address yet");
+        let bad = SendingSettings { name: "Sam".into(), address: "not an address".into(), host: "h".into(), port: 465, security: "tls".into() };
+        assert_eq!(
+            core.handle(Command::SetSending { account: account.clone(), sending: bad }).unwrap_err().code,
+            ErrorCode::NotPossible
+        );
+        let sending = SendingSettings {
+            name: "Sam Sender".into(),
+            address: "sam@example.com".into(),
+            host: "127.0.0.1".into(),
+            port: sink.port,
+            security: "plaintext".into(),
+        };
+        core.handle(Command::SetSending { account: account.clone(), sending }).unwrap();
+        let saved = std::fs::read_to_string(data.path().join("accounts/sam/account.json")).unwrap();
+        assert!(saved.contains("sam@example.com") && !saved.contains(PASSWORD), "{saved}");
+
+        let drafts = folder_named(&core, "drafts").unwrap();
+        let Response::DraftSaved { id } =
+            core.handle(Command::SaveDraft { account: account.clone(), draft: to("alice@example.com", "first version") }).unwrap()
+        else {
+            panic!()
+        };
+        until("the draft on the server", || other.subjects_in("Drafts").len() == 1);
+
+        // Reopen, change, save again: the new one replaces the old.
+        let Response::Draft { draft } = core.handle(Command::EditDraft { folder: drafts.clone(), id }).unwrap() else { panic!() };
+        assert_eq!((draft.to.as_str(), draft.subject.as_str(), draft.replaces), ("alice@example.com", "first version", Some(id)));
+        let changed = DraftContent { subject: "second version".into(), ..draft };
+        let Response::DraftSaved { id: second } =
+            core.handle(Command::SaveDraft { account: account.clone(), draft: changed }).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(subjects(&core, &drafts), ["second version"]);
+        until("only the new draft on the server", || {
+            other.subjects_in("Drafts").iter().map(|d| d.0.clone()).collect::<Vec<_>>() == ["second version"]
+        });
+
+        // Sending a draft removes it from Drafts.
+        let Response::Draft { draft } = core.handle(Command::EditDraft { folder: drafts.clone(), id: second }).unwrap() else { panic!() };
+        send(&core, draft, 0);
+        until("it to be sent", || sink.messages().len() == 1);
+        until("Drafts to be empty, here and there", || {
+            subjects(&core, &drafts).is_empty() && other.subjects_in("Drafts").is_empty()
+        });
+
+        // A message with nobody to go to, or a bad address, is not accepted.
+        for bad in [to("", "nobody"), to("not-an-address", "bad")] {
+            let refused = core.handle(Command::SendMessage { account: account.clone(), draft: bad, delay_seconds: 0 });
+            assert_eq!(refused.unwrap_err().code, ErrorCode::NotPossible);
+        }
+        assert_eq!(sink.messages().len(), 1);
+    }
 }

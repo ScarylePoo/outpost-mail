@@ -16,7 +16,7 @@ use std::sync::{Mutex, MutexGuard};
 type Result<T> = std::result::Result<T, StoreError>;
 
 /// Bump when the schema changes, and add a step to `migrate`.
-const SCHEMA_VERSION: i32 = 4;
+const SCHEMA_VERSION: i32 = 5;
 
 const TABLES: &str = r#"
 CREATE TABLE folder (
@@ -82,6 +82,9 @@ CREATE TABLE message (
 CREATE TABLE action (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     payload    TEXT NOT NULL,
+    -- Unix time before which the action is not to be tried: the pause
+    -- before a message is sent, and the wait after a failed attempt.
+    not_before INTEGER NOT NULL DEFAULT 0,
     attempts   INTEGER NOT NULL DEFAULT 0,
     last_error TEXT
 );

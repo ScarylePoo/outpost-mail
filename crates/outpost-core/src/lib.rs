@@ -70,7 +70,7 @@ struct Account {
     name: String,
     store: Arc<Store>,
     /// `None` for mail that is only browsed (no server details saved).
-    config: Option<AccountConfig>,
+    config: RwLock<Option<AccountConfig>>,
     live: Mutex<Live>,
     /// Prods the running sync: a full pass now, or replay what the user did.
     signals: Arc<sync::Signals>,
@@ -83,6 +83,48 @@ struct Live {
     /// Stops the running sync when dropped or told to.
     running: Option<StopHandle>,
     status: SyncStatus,
+}
+
+impl Account {
+    fn config(&self) -> Option<AccountConfig> {
+        self.config.read().unwrap().clone()
+    }
+}
+
+/// The sending half of an account's settings, as the interface sees it.
+fn sending_settings(config: &AccountConfig) -> Option<api::SendingSettings> {
+    let smtp = config.smtp.as_ref()?;
+    let identity = config.identity()?;
+    Some(api::SendingSettings {
+        name: identity.name,
+        address: identity.address,
+        host: smtp.host.clone(),
+        port: smtp.port,
+        security: smtp.security.clone(),
+    })
+}
+
+/// Checks sending settings and puts them into an account's configuration.
+fn with_sending(mut config: AccountConfig, sending: api::SendingSettings) -> Result<AccountConfig, CoreError> {
+    let refuse = |why: &str| Err(CoreError::new(ErrorCode::NotPossible, why));
+    let address = sending.address.trim();
+    if compose::parse_recipients(address).map(|r| r.len()).unwrap_or(0) != 1 {
+        return refuse("the address to send from is not an email address");
+    }
+    if sending.host.trim().is_empty() || sending.port == 0 {
+        return refuse("the outgoing server and its port are both needed");
+    }
+    if !["tls", "starttls", "plaintext"].contains(&sending.security.as_str()) {
+        return refuse("the outgoing server's security must be tls, starttls or plaintext");
+    }
+    config.name = sending.name.trim().to_string();
+    config.address = address.to_string();
+    config.smtp = Some(accounts::SmtpSettings {
+        host: sending.host.trim().to_string(),
+        port: sending.port,
+        security: sending.security,
+    });
+    Ok(config)
 }
 
 /// What a folder id refers to.
@@ -157,7 +199,7 @@ impl Core {
             }),
         };
         for account in core.accounts() {
-            if let Some(config) = &account.config {
+            if let Some(config) = account.config() {
                 let stored = core.inner.secrets.get(&config.secret_key(&account.name));
                 account.live.lock().unwrap().password = stored;
             }
@@ -209,7 +251,7 @@ impl Core {
     /// Starts an account's sync if it can sync, or says what it is waiting
     /// for.
     fn begin(&self, account: &Arc<Account>) {
-        if account.config.is_none() {
+        if account.config().is_none() {
             self.set_status(account, status(SyncState::NotSyncing, ""));
         } else if account.live.lock().unwrap().password.is_none() {
             self.set_status(account, status(SyncState::NeedsPassword, ""));
@@ -247,7 +289,7 @@ impl Core {
 
     /// Starts (or restarts) an account's sync with the password it holds.
     fn start_sync(&self, account: &Arc<Account>) {
-        let Some(config) = account.config.clone() else { return };
+        let Some(config) = account.config() else { return };
         let (handle, stop) = sync::stop_signal();
         let password = {
             let mut live = account.live.lock().unwrap();
@@ -269,11 +311,18 @@ impl Core {
                 let (core, account) = (core.clone(), account.clone());
                 move |progress: Progress| core.report(&account, progress)
             };
+            let options = sync::Options {
+                sending: config.smtp_server().map(|server| sync::Sending {
+                    server,
+                    username: config.username.clone(),
+                }),
+                ..sync::Options::default()
+            };
             sync::run(
                 &account.store,
                 &server_account,
                 &password,
-                &sync::Options::default(),
+                &options,
                 stop,
                 &account.signals,
                 report,
@@ -511,9 +560,10 @@ impl Core {
                     .map(|a| AccountInfo {
                         id: a.id.clone(),
                         name: a.name.clone(),
-                        host: a.config.as_ref().map(|c| c.host.clone()).unwrap_or_default(),
-                        username: a.config.as_ref().map(|c| c.username.clone()).unwrap_or_default(),
+                        host: a.config().map(|c| c.host).unwrap_or_default(),
+                        username: a.config().map(|c| c.username).unwrap_or_default(),
                         status: a.live.lock().unwrap().status.clone(),
+                        sending: a.config().and_then(|c| sending_settings(&c)),
                     })
                     .collect(),
             }),
@@ -524,6 +574,7 @@ impl Core {
                 username,
                 password,
                 remember,
+                sending,
             } => {
                 let Some(data_dir) = self.inner.data_dir.clone() else {
                     return Err(CoreError::new(
@@ -536,6 +587,13 @@ impl Core {
                     port,
                     encrypted,
                     username: username.trim().to_string(),
+                    name: String::new(),
+                    address: String::new(),
+                    smtp: None,
+                };
+                let config = match sending {
+                    Some(sending) => with_sending(config, sending)?,
+                    None => config,
                 };
                 if config.host.is_empty() || config.username.is_empty() || password.0.is_empty() {
                     return Err(CoreError::new(
@@ -553,13 +611,109 @@ impl Core {
                 });
                 Ok(Response::Accepted)
             }
+            Command::SetSending { account, sending } => {
+                let account = self.syncing_account(&account)?;
+                let config = with_sending(account.config().expect("checked above"), sending)?;
+                let dir = account.store.mail_root().parent().map(Path::to_path_buf).unwrap_or_default();
+                config
+                    .save(&dir)
+                    .map_err(|e| CoreError::new(ErrorCode::Internal, format!("could not save the settings: {e}")))?;
+                *account.config.write().unwrap() = Some(config);
+                // The running sync was started with the old settings.
+                self.start_sync(&account);
+                Ok(Response::Accepted)
+            }
+            Command::ComposeReply { folder, id, mode } => {
+                let account = self.account(&folder)?;
+                let mode = match mode.as_str() {
+                    "reply" => compose::ReplyMode::Reply,
+                    "replyAll" => compose::ReplyMode::ReplyAll,
+                    "forward" => compose::ReplyMode::Forward,
+                    other => return Err(CoreError::new(ErrorCode::BadCommand, format!("unknown mode {other:?}"))),
+                };
+                let raw = self.read(&account, id)?;
+                let own: Vec<String> = account
+                    .config()
+                    .map(|c| [c.identity().map(|i| i.address), Some(c.username)].into_iter().flatten().collect())
+                    .unwrap_or_default();
+                let mine = |address: &str| own.iter().any(|o| o.eq_ignore_ascii_case(address));
+                let draft = compose::respond(&raw, id, mode, &mine)
+                    .ok_or_else(|| CoreError::new(ErrorCode::Internal, "the message could not be read"))?;
+                Ok(Response::Draft { draft })
+            }
+            Command::EditDraft { folder, id } => {
+                let account = self.account(&folder)?;
+                let raw = self.read(&account, id)?;
+                let draft = compose::reopen(&raw, id)
+                    .ok_or_else(|| CoreError::new(ErrorCode::Internal, "the draft could not be read"))?;
+                Ok(Response::Draft { draft })
+            }
+            Command::SaveDraft { account, draft } => {
+                let account = self.syncing_account(&account)?;
+                let built = self.build(&account, &draft)?;
+                let drafts = self.folder_with_role(&account, "drafts")?.ok_or_else(|| {
+                    CoreError::new(ErrorCode::NotPossible, "this account has no drafts folder")
+                })?;
+                let id = account
+                    .store
+                    .add_local_message(drafts, &built, Flags::DRAFT.with(Flags::SEEN))
+                    .map_err(internal)?;
+                let mut touched = vec![drafts];
+                touched.extend(self.discard_replaced(&account, &draft)?);
+                self.acted(&account, touched);
+                Ok(Response::DraftSaved { id })
+            }
+            Command::SendMessage {
+                account,
+                draft,
+                delay_seconds,
+            } => {
+                let account = self.syncing_account(&account)?;
+                if account.config().and_then(|c| c.smtp_server()).is_none() {
+                    return Err(CoreError::new(
+                        ErrorCode::NotPossible,
+                        "no outgoing mail server has been set up for this account",
+                    ));
+                }
+                let recipients = [&draft.to, &draft.cc, &draft.bcc]
+                    .iter()
+                    .map(|list| compose::parse_recipients(list).map(|r| r.len()))
+                    .sum::<Result<usize, String>>()
+                    .map_err(|e| CoreError::new(ErrorCode::NotPossible, e))?;
+                if recipients == 0 {
+                    return Err(CoreError::new(ErrorCode::NotPossible, "the message has nobody to go to"));
+                }
+                let built = self.build(&account, &draft)?;
+                let send_at = store::actions::now() + delay_seconds.min(3600) as i64;
+                let id = account.store.queue_for_sending(&built, send_at).map_err(internal)?;
+                let mut touched: Vec<i64> = account.store.index().brief(id).map_err(internal)?.map(|b| b.folder).into_iter().collect();
+                touched.extend(self.discard_replaced(&account, &draft)?);
+                // The message being answered or passed on is marked as such.
+                for (original, flag) in [(draft.reply_to_message, Flags::ANSWERED), (draft.forward_of, Flags::FORWARDED)] {
+                    if let Some(original) = original {
+                        touched.extend(account.store.change_flags(&[original], flag, Flags::default()).map_err(internal)?);
+                    }
+                }
+                self.acted(&account, touched);
+                Ok(Response::SendQueued { id })
+            }
+            Command::CancelSend { account, id } => {
+                let account = self.syncing_account(&account)?;
+                let outbox = account.store.index().brief(id).map_err(internal)?.map(|b| b.folder);
+                let cancelled = account.store.cancel_sending(id).map_err(internal)?;
+                if cancelled {
+                    let drafts = self.folder_with_role(&account, "drafts")?;
+                    self.acted(&account, outbox.into_iter().chain(drafts));
+                }
+                Ok(Response::SendCancelled { cancelled })
+            }
             Command::ProvidePassword {
                 account,
                 password,
                 remember,
             } => {
                 let account = self.account(&account)?;
-                let Some(config) = &account.config else {
+                let Some(config) = account.config() else {
                     return Err(CoreError::new(ErrorCode::NotPossible, "this account has no server"));
                 };
                 if remember {
@@ -573,7 +727,7 @@ impl Core {
             }
             Command::SyncNow { account } => {
                 let account = self.account(&account)?;
-                if account.config.is_none() {
+                if account.config().is_none() {
                     return Err(CoreError::new(ErrorCode::NotPossible, "this account has no server"));
                 }
                 let (running, has_password) = {
@@ -583,6 +737,7 @@ impl Core {
                 if !has_password {
                     return Err(CoreError::new(ErrorCode::NotPossible, "the account needs its password first"));
                 }
+                account.store.index().retry_deferred().map_err(internal)?;
                 if running {
                     account.signals.now.notify_one();
                 } else {
@@ -602,13 +757,64 @@ impl Core {
     }
 
     fn must_sync(&self, account: &Account) -> Result<(), CoreError> {
-        if account.config.is_none() {
+        if account.config().is_none() {
             return Err(CoreError::new(
                 ErrorCode::NotPossible,
                 "this mail is only stored here, with no server to change it on",
             ));
         }
         Ok(())
+    }
+
+    fn read(&self, account: &Account, id: i64) -> Result<Vec<u8>, CoreError> {
+        account.store.read_message(id).map_err(|e| match e {
+            StoreError::NoSuchMessage(_) | StoreError::NotDownloaded(_) => {
+                CoreError::new(ErrorCode::UnknownMessage, e.to_string())
+            }
+            other => internal(other),
+        })
+    }
+
+    /// Builds the message a draft describes, from this account's identity,
+    /// carrying the attachments of a message being forwarded.
+    fn build(&self, account: &Account, draft: &api::DraftContent) -> Result<Vec<u8>, CoreError> {
+        let identity = account.config().and_then(|c| c.identity()).ok_or_else(|| {
+            CoreError::new(ErrorCode::NotPossible, "this account has no address to send from yet")
+        })?;
+        let mut carried = Vec::new();
+        if let Some(original) = draft.forward_of {
+            let raw = self.read(account, original)?;
+            let mut index = 0;
+            while let Some((name, data)) = store::parse::attachment(&raw, index) {
+                let mime_type = store::parse::display(&raw)
+                    .attachments
+                    .get(index)
+                    .map(|a| a.mime_type.clone())
+                    .unwrap_or_default();
+                carried.push((name, mime_type, data));
+                index += 1;
+            }
+        }
+        compose::build(&identity, draft, &carried)
+            .map(|built| built.raw)
+            .map_err(|e| CoreError::new(ErrorCode::NotPossible, e))
+    }
+
+    /// Removes the stored draft that a saved or sent message replaces.
+    /// Only a draft or an outbox message can be replaced this way.
+    fn discard_replaced(&self, account: &Account, draft: &api::DraftContent) -> Result<Vec<i64>, CoreError> {
+        let Some(old) = draft.replaces else { return Ok(Vec::new()) };
+        let Some(brief) = account.store.index().brief(old).map_err(internal)? else {
+            return Ok(Vec::new());
+        };
+        let folders = account.store.index().folders().map_err(internal)?;
+        let role = folders.iter().find(|f| f.id == brief.folder).and_then(role_of);
+        if !matches!(role, Some("drafts") | Some("outbox")) {
+            return Ok(Vec::new());
+        }
+        // A message still waiting in the outbox must not go as well.
+        account.store.cancel_pending_send(old).map_err(internal)?;
+        Ok(account.store.expunge_messages(&[old]).map_err(internal)?.into_iter().collect())
     }
 
     /// The account's folder with the given role, if it has one.
@@ -639,7 +845,7 @@ impl Core {
         remember: bool,
     ) -> Result<FolderId, String> {
         let duplicate = self.accounts().iter().any(|a| {
-            a.config.as_ref().is_some_and(|c| {
+            a.config().is_some_and(|c| {
                 c.host.eq_ignore_ascii_case(&config.host) && c.username.eq_ignore_ascii_case(&config.username)
             })
         });
@@ -667,7 +873,7 @@ impl Core {
                 id: format!("acct/{name}"),
                 name,
                 store: Arc::new(store),
-                config: Some(config),
+                config: RwLock::new(Some(config)),
                 live: Mutex::new(Live {
                     password: Some(password),
                     running: None,
@@ -755,28 +961,8 @@ impl Drop for Inner {
     }
 }
 
-/// What a folder is for: from the server's marker if it gave one, otherwise
-/// from the names mail servers and clients commonly use.
 fn role_of(folder: &store::index::FolderRow) -> Option<&'static str> {
-    if folder.path.eq_ignore_ascii_case("INBOX") {
-        return Some("inbox");
-    }
-    match folder.special_use.as_deref() {
-        Some("sent") => return Some("sent"),
-        Some("drafts") => return Some("drafts"),
-        Some("trash") => return Some("trash"),
-        Some("junk") => return Some("junk"),
-        Some("archive") | Some("all") => return Some("archive"),
-        _ => {}
-    }
-    match folder.name.to_lowercase().as_str() {
-        "sent" | "sent items" | "sent mail" | "sent messages" => Some("sent"),
-        "drafts" | "draft" => Some("drafts"),
-        "trash" | "deleted items" | "deleted messages" | "bin" => Some("trash"),
-        "junk" | "spam" | "junk e-mail" | "junk email" | "bulk mail" => Some("junk"),
-        "archive" | "archives" => Some("archive"),
-        _ => None,
-    }
+    store::sync_state::role_of(&folder.path, &folder.name, folder.special_use.as_deref())
 }
 
 /// Lays an account's folders out as the tree shows them: the inbox first,
@@ -788,11 +974,12 @@ fn folder_tree(account_id: &str, rows: Vec<store::index::FolderRow>) -> Vec<Fold
         match role {
             Some("inbox") => 0,
             Some("drafts") => 1,
-            Some("sent") => 2,
-            Some("archive") => 3,
-            Some("junk") => 4,
-            Some("trash") => 5,
-            _ => 6,
+            Some("outbox") => 2,
+            Some("sent") => 3,
+            Some("archive") => 4,
+            Some("junk") => 5,
+            Some("trash") => 6,
+            _ => 7,
         }
     }
     fn parent(path: &str) -> &str {
@@ -819,7 +1006,11 @@ fn folder_tree(account_id: &str, rows: Vec<store::index::FolderRow>) -> Vec<Fold
             let role = role_of(row);
             out.push(FolderInfo {
                 id: format!("{account_id}/{}", row.id),
-                name: if role == Some("inbox") { "Inbox".into() } else { row.name.clone() },
+                name: match role {
+                    Some("inbox") => "Inbox".into(),
+                    Some("outbox") => "Outbox".into(),
+                    _ => row.name.clone(),
+                },
                 depth,
                 total: row.total,
                 unread: row.unread,
@@ -830,7 +1021,16 @@ fn folder_tree(account_id: &str, rows: Vec<store::index::FolderRow>) -> Vec<Fold
             }
         }
     }
-    let top: Vec<&store::index::FolderRow> = rows.iter().filter(|r| parent(&r.path).is_empty()).collect();
+    // The outbox is shown only while something is in it, and does not
+    // count as one of the server's folders.
+    let rows: Vec<store::index::FolderRow> = rows
+        .into_iter()
+        .filter(|r| role_of(r) != Some("outbox") || r.total > 0)
+        .collect();
+    let top: Vec<&store::index::FolderRow> = rows
+        .iter()
+        .filter(|r| parent(&r.path).is_empty() && role_of(r) != Some("outbox"))
+        .collect();
     let only_inbox = top.len() == 1 && top[0].path.eq_ignore_ascii_case("INBOX") && rows.len() > 1;
     let mut out = Vec::with_capacity(rows.len());
     place(account_id, &rows, "", 1, only_inbox, &mut out);
@@ -979,7 +1179,7 @@ fn open_accounts(data_dir: &Path) -> Result<Vec<Arc<Account>>, StoreError> {
             Ok(Arc::new(Account {
                 id: format!("acct/{name}"),
                 store: Arc::new(Store::open(&dir)?),
-                config: AccountConfig::load(&dir),
+                config: RwLock::new(AccountConfig::load(&dir)),
                 name,
                 live: Mutex::new(Live {
                     password: None,

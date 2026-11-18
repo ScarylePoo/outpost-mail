@@ -61,6 +61,7 @@ fn commands_decode_from_the_documented_json() {
                 username: "me@example.com".into(),
                 password: Secret("hunter2".into()),
                 remember: true,
+                sending: None,
             },
         ),
         (
@@ -138,6 +139,7 @@ fn passwords_do_not_appear_in_debug_output() {
         username: "u".into(),
         password: Secret("hunter2".into()),
         remember: false,
+        sending: None,
     };
     let shown = format!("{command:?}");
     assert!(!shown.contains("hunter2") && shown.contains("***"), "{shown}");

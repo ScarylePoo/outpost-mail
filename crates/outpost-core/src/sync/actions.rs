@@ -13,7 +13,8 @@
 //! An action the server refuses is not retried. Its local effect is undone
 //! where that is possible, the user is told, and the queue moves on.
 
-use super::{Progress, Result, Summary, SyncError};
+use super::{Options, Progress, Result, Summary, SyncError};
+use crate::smtp::SendError;
 use crate::imap::{ImapError, Session};
 use crate::store::actions::{Action, Item};
 use crate::store::maildir::Flags;
@@ -26,6 +27,8 @@ use std::collections::{HashMap, HashSet};
 pub(super) async fn replay(
     session: &mut Session,
     store: &Store,
+    options: &Options,
+    password: &str,
     progress: &mut (dyn FnMut(Progress) + Send),
     summary: &mut Summary,
 ) -> Result<()> {
@@ -39,7 +42,7 @@ pub(super) async fn replay(
         let folders: HashMap<i64, SyncFolder> =
             store.index().remote_folders()?.into_iter().map(|f| (f.id, f)).collect();
         for entry in queued {
-            match carry_out(session, store, &folders, &entry.action).await {
+            match carry_out(session, store, &folders, options, password, &entry.action).await {
                 Ok(touched) => {
                     store.index().finish_action(entry.id)?;
                     summary.actions_replayed += 1;
@@ -49,6 +52,23 @@ pub(super) async fn replay(
                 }
                 Err(SyncError::Imap(e)) if e.is_transient() => return Err(SyncError::Imap(e)),
                 Err(SyncError::Stopped) => return Err(SyncError::Stopped),
+                Err(SyncError::Deferred(reason)) => {
+                    // Not now. Try again after a growing pause (30 s, then
+                    // a minute, up to 15), and get on with the rest.
+                    let pause = (30i64 << entry.attempts.min(5)).min(15 * 60);
+                    store.index().defer_action(entry.id, crate::store::actions::now() + pause, &reason)?;
+                }
+                Err(SyncError::Uncertain(reason)) => {
+                    // Never retried, never undone: the message stays in the
+                    // outbox and the user decides.
+                    store.index().finish_action(entry.id)?;
+                    progress(Progress::ActionFailed {
+                        what: describe(&entry.action),
+                        error: format!(
+                            "{reason}. It has been left in the Outbox. Check with the recipient before sending it again"
+                        ),
+                    });
+                }
                 Err(e) => {
                     // Refused, or impossible. Undo what can be undone and
                     // say so; do not block everything queued behind it.
@@ -77,6 +97,7 @@ fn describe(action: &Action) -> String {
         Action::Move { items, .. } => format!("Moving {}", count(items)),
         Action::Expunge { items, .. } => format!("Deleting {}", count(items)),
         Action::Append { .. } => "Saving a message to the server".to_string(),
+        Action::Send { .. } => "Sending a message".to_string(),
     }
 }
 
@@ -92,6 +113,8 @@ fn undo(store: &Store, action: &Action) -> Result<Vec<i64>> {
         Action::Flags { folder, .. } | Action::Expunge { folder, .. } => vec![*folder],
         // The message stays here, where the user can still see it.
         Action::Append { .. } => Vec::new(),
+        // Back to Drafts, where the user can fix it and try again.
+        Action::Send { message } => store.back_to_drafts(*message)?,
     })
 }
 
@@ -111,10 +134,37 @@ async fn carry_out(
     session: &mut Session,
     store: &Store,
     folders: &HashMap<i64, SyncFolder>,
+    options: &Options,
+    password: &str,
     action: &Action,
 ) -> Result<Vec<i64>> {
     let index = store.index();
     match action {
+        Action::Send { message } => {
+            if index.brief(*message)?.is_none() {
+                // Deleted from the outbox before its turn came.
+                return Ok(Vec::new());
+            }
+            let Some(sending) = &options.sending else {
+                return Err(SyncError::Refused("no outgoing mail server has been set up for this account".into()));
+            };
+            let raw = store.read_message(*message)?;
+            let Some((from, recipients)) = crate::compose::envelope(&raw) else {
+                return Err(SyncError::Refused("the message has no sender address".into()));
+            };
+            let on_the_wire = crate::compose::without_bcc(&raw);
+            match crate::smtp::send(&sending.server, &sending.username, password, &from, &recipients, &on_the_wire).await {
+                Ok(()) => {
+                    // Gmail files what it sends by itself; uploading a copy
+                    // as well would leave two.
+                    let server_files_sent_mail = session.has("X-GM-EXT-1");
+                    Ok(store.after_sent(*message, !server_files_sent_mail)?)
+                }
+                Err(SendError::Unavailable(e)) => Err(SyncError::Deferred(e)),
+                Err(SendError::Refused(e)) => Err(SyncError::Refused(format!("{e}. The message is back in Drafts"))),
+                Err(SendError::Uncertain(e)) => Err(SyncError::Uncertain(e)),
+            }
+        }
         Action::Flags { folder: id, items, add, remove } => {
             let uids = uids(items);
             if uids.is_empty() {

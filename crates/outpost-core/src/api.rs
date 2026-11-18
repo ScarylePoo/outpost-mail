@@ -247,6 +247,40 @@ pub struct MessageRow {
     pub has_attachment: bool,
 }
 
+/// What the composer holds. The same shape is used for a new message, a
+/// reply prepared by the core, and a draft reopened for editing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DraftContent {
+    /// Recipients as typed: `Name <address>` or bare addresses, separated
+    /// by commas or semicolons.
+    pub to: String,
+    pub cc: String,
+    pub bcc: String,
+    pub subject: String,
+    /// Plain text.
+    pub body: String,
+    /// The Message-ID being replied to, without angle brackets.
+    pub in_reply_to: Option<String>,
+    pub references: Vec<String>,
+    pub attachments: Vec<DraftAttachment>,
+    /// The message this is a reply to. It is marked answered on sending.
+    pub reply_to_message: Option<i64>,
+    /// The message being forwarded. Its attachments go with it, and it is
+    /// marked forwarded on sending.
+    pub forward_of: Option<i64>,
+    /// The stored draft this replaces when saved or sent.
+    pub replaces: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct DraftAttachment {
+    pub name: String,
+    pub mime_type: String,
+    pub data_base64: String,
+}
+
 /// A message as the reading pane shows it.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

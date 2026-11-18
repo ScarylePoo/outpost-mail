@@ -16,6 +16,7 @@
 
 pub mod accounts;
 pub mod api;
+pub mod compose;
 pub mod imap;
 pub mod render;
 pub mod smtp;

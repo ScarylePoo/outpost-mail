@@ -12,6 +12,7 @@ serde_json.workspace = true
 rusqlite = { version = "0.43", features = ["bundled"] }
 mail-parser = "1"
 ammonia = "4"
+mail-builder = "2"
 # The operating system's credential store.
 keyring = "4"
 # IMAP parsing and serialising. An alpha series whose API moves between

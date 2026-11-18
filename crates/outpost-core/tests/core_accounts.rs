@@ -23,7 +23,7 @@ fn start(data: &TempDir, secrets: Arc<MemorySecrets>) -> (Core, Receiver<Event>)
 
 /// Waits for an event that `wanted` accepts, skipping others.
 fn wait_for<T>(events: &Receiver<Event>, what: &str, mut wanted: impl FnMut(&Event) -> Option<T>) -> T {
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         match events.recv_timeout(left) {

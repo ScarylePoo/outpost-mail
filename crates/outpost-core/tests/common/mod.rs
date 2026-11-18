@@ -101,6 +101,7 @@ first_valid_uid = 1
 {ssl}
 auth_allow_cleartext = yes
 auth_mechanisms = plain login
+auth_failure_delay = 0
 mail_driver = maildir
 mail_home = {d}/home/%{{user}}
 mail_path = ~/Maildir

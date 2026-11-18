@@ -53,7 +53,7 @@ fn commands_decode_from_the_documented_json() {
         (json!({"type": "listAccounts"}), Command::ListAccounts),
         (
             json!({"type": "addAccount", "host": "mail.example.com", "port": 993, "encrypted": true,
-                   "username": "me@example.com", "password": "hunter2", "remember": true}),
+                   "username": "me@example.com", "password": "hunter2", "remember": true, "sending": null}),
             Command::AddAccount {
                 host: "mail.example.com".into(),
                 port: 993,

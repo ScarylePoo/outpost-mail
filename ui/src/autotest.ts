@@ -116,6 +116,15 @@ async function probe(details: string): Promise<string> {
     // Long enough for the undo pause to run out and the message to go.
     await sleep(14_000);
     lines.push(`tree after sending: ${text(".folders .folder-name").join(" | ")}`);
+
+    // The reply and the message it answers are now one conversation.
+    const top = document.querySelector(".list-holder .row:not(.idle)");
+    lines.push(`conversation row: ${top?.querySelector(".row-sender")?.textContent} / ${top?.querySelector(".row-subject")?.textContent}`);
+    top?.querySelector(".row-toggle")?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    await sleep(900);
+    lines.push(`opened into a tree of: ${text(".tree-line .tree-sender").join(" > ")}`);
+    lines.push(`reading pane shows: ${text(".turn .turn-who strong").join(" then ")} (${text(".modes button.on").join("")})`);
+    lines.push(`reduced text of the reply: ${text(".turn .turn-text").at(-1)?.slice(0, 40)}`);
   } catch (e) {
     lines.push(`FAILED: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
   }

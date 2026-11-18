@@ -12,6 +12,7 @@ export type Command =
   | { type: "folderLayout"; folder: FolderId }
   | { type: "listMessages"; folder: FolderId; offset: number; limit: number }
   | { type: "openMessage"; folder: FolderId; id: number }
+  | { type: "openThread"; folder: FolderId; id: number }
   | { type: "search"; scope: FolderId; text: string; limit: number }
   | { type: "changeFlags"; folder: FolderId; ids: number[]; seen: boolean | null; flagged: boolean | null }
   | { type: "moveMessages"; ids: number[]; to: FolderId }
@@ -83,6 +84,35 @@ export interface MessageView {
   downloaded: boolean;
 }
 
+/** One message of a conversation, reduced to what its sender wrote. */
+export interface ThreadMessage {
+  id: number;
+  folder: FolderId;
+  folderName: string;
+  parent: number | null;
+  /** The link to `parent` was inferred from the subject. */
+  guessed: boolean;
+  senderName: string;
+  senderAddress: string;
+  recipients: string;
+  date: number;
+  unread: boolean;
+  flagged: boolean;
+  downloaded: boolean;
+  text: string;
+  quoted: string;
+  quotedLines: number;
+  signature: string;
+  attachments: { name: string; mimeType: string; size: number }[];
+  added: string[];
+  dropped: string[];
+}
+
+export interface ThreadView {
+  subject: string;
+  messages: ThreadMessage[];
+}
+
 export type SyncState =
   | "notSyncing"
   | "indexing"
@@ -138,6 +168,7 @@ export type Response =
   | { type: "messages"; folder: FolderId; offset: number; total: number; rows: MessageRow[] }
   | { type: "searchResults"; rows: MessageRow[] }
   | { type: "message"; message: MessageView }
+  | { type: "thread"; thread: ThreadView }
   | { type: "attachmentSaved"; path: string; name: string }
   | { type: "draft"; draft: DraftContent }
   | { type: "draftSaved"; id: number }
@@ -169,6 +200,7 @@ type ResponseFor = {
   listMessages: "messages";
   search: "searchResults";
   openMessage: "message";
+  openThread: "thread";
   changeFlags: "accepted";
   moveMessages: "accepted";
   archiveMessages: "accepted";

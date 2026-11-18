@@ -119,6 +119,47 @@ function answer(command: Command): Response {
         },
       };
     }
+    case "openThread": {
+      // Every fifth message is a conversation, so both views can be seen.
+      const r = row(command.id);
+      const one = {
+        id: command.id,
+        folder: command.folder,
+        folderName: "Inbox",
+        parent: null as number | null,
+        guessed: false,
+        senderName: r.senderName,
+        senderAddress: r.senderAddress,
+        recipients: "You <you@example.com>, Sam Okafor <sam@example.com>",
+        date: r.date,
+        unread: r.unread,
+        flagged: r.flagged,
+        downloaded: true,
+        text: r.preview,
+        quoted: "",
+        quotedLines: 0,
+        signature: "",
+        attachments: [] as { name: string; mimeType: string; size: number }[],
+        added: [] as string[],
+        dropped: [] as string[],
+      };
+      if (command.id % 5 !== 0) return { type: "thread", thread: { subject: r.subject, messages: [one] } };
+      const day = 86_400;
+      return {
+        type: "thread",
+        thread: {
+          subject: "Mail server cutover window",
+          messages: [
+            { ...one, id: 9001, senderName: "Dana Whitaker", senderAddress: "dana@example.com", date: r.date - 6 * day, unread: false, text: "Proposing Saturday 11/14, 10 PM to 2 AM, for the cutover. Checklist attached.\n\nShout if that window is a problem for anyone.", signature: "Dana Whitaker\nIT Operations", attachments: [{ name: "cutover-checklist.pdf", mimeType: "application/pdf", size: 48_213 }] },
+            { ...one, id: 9002, parent: 9001, senderName: "You", senderAddress: "you@example.com", folderName: "Sent", date: r.date - 6 * day + 1500, unread: false, text: "Saturday works. Can we lower the DNS TTLs on Thursday so the switch propagates fast?", quoted: "> Proposing Saturday 11/14, 10 PM to 2 AM.", quotedLines: 11 },
+            { ...one, id: 9003, parent: 9001, senderName: "Sam Okafor", senderAddress: "sam@example.com", date: r.date - 6 * day + 8000, unread: false, text: "Saturday collides with the payroll export. It runs at 11 PM and relays through this server.\n\nPriya, copying you since it is your job that would break.", quoted: "> Proposing Saturday.", quotedLines: 11, signature: "Sam", added: ["Priya Raman"] },
+            { ...one, id: command.id, parent: 9003, senderName: "Priya Raman", senderAddress: "priya@example.com", date: r.date - 5 * day, text: "Payroll can run Friday night instead. I need a yes by Wednesday so I can warn finance.", quoted: "> Saturday collides with the payroll export.", quotedLines: 24, signature: "Priya Raman\nFinance\nThis email is confidential." },
+            { ...one, id: 9005, parent: 9001, senderName: "Dana Whitaker", senderAddress: "dana@example.com", date: r.date - 2 * day, unread: false, text: "Confirmed: Saturday 10 PM. Payroll moves to Friday. Final checklist attached.", quotedLines: 38, quoted: "> ...", dropped: ["Luis Ortega"], attachments: [{ name: "checklist-final.pdf", mimeType: "application/pdf", size: 51_002 }] },
+            { ...one, id: 9006, parent: 9005, guessed: true, senderName: "Dana Whitaker", senderAddress: "dana@example.com", date: r.date, text: "Cutover finished at 1:20 AM. All mailboxes verified." },
+          ],
+        },
+      };
+    }
     case "saveAttachment":
       return { type: "attachmentSaved", path: "/downloads/report.pdf", name: "report.pdf" };
     case "locateMessage":

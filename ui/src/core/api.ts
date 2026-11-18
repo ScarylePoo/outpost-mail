@@ -28,6 +28,14 @@ export type Command =
   | { type: "saveTask"; account: FolderId; collection: number; id: number | null; task: TaskContent }
   | { type: "saveContact"; account: FolderId; collection: number; id: number | null; contact: ContactContent }
   | { type: "deleteDavItem"; account: FolderId; id: number }
+  | {
+      type: "answerInvitation";
+      folder: FolderId;
+      id: number;
+      answer: "accepted" | "tentative" | "declined" | "remove";
+      account: FolderId;
+      collection: number;
+    }
   | { type: "getGeneral" }
   | { type: "setGeneral"; general: General; password?: string | null }
   | { type: "updateAccount"; account: FolderId; host: string; port: number; encrypted: boolean; signature: string; password?: string | null }
@@ -280,6 +288,18 @@ export interface MessageView {
   trusted: boolean;
   /** Pictures on the internet were left in for this sender. */
   remoteImagesShown: boolean;
+  /** The meeting invitation or cancellation the message carries. */
+  invitation: InvitationView | null;
+}
+
+export interface InvitationView {
+  kind: "request" | "cancel";
+  event: EventContent;
+  recurring: boolean;
+  organizer: string;
+  organizerName: string;
+  /** The event is already in one of the user's calendars. */
+  inCalendar: boolean;
 }
 
 /** One message of a conversation, reduced to what its sender wrote. */
@@ -439,6 +459,7 @@ type ResponseFor = {
   saveTask: "davSaved";
   saveContact: "davSaved";
   deleteDavItem: "accepted";
+  answerInvitation: "accepted";
   getGeneral: "general";
   setGeneral: "general";
   updateAccount: "accepted";

@@ -206,6 +206,25 @@ function answer(command: Command): Response {
           restricted: checkOf(command.id) === "failed" && protection.disableFailed && !trusted.has(command.id),
           trusted: trusted.has(command.id),
           remoteImagesShown: false,
+          // Message 3 carries an invitation.
+          invitation:
+            command.id === 3
+              ? {
+                  kind: "request",
+                  event: {
+                    summary: "Budget review",
+                    location: "Room 4",
+                    description: "",
+                    start: Math.floor(Date.now() / 1000 / 86_400) * 86_400 + 2 * 86_400 + 14 * 3600,
+                    end: Math.floor(Date.now() / 1000 / 86_400) * 86_400 + 2 * 86_400 + 15 * 3600,
+                    allDay: false,
+                  },
+                  recurring: false,
+                  organizer: r.senderAddress,
+                  organizerName: r.senderName,
+                  inCalendar: false,
+                }
+              : null,
         },
       };
     }

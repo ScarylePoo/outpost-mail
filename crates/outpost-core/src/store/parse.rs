@@ -114,6 +114,25 @@ pub struct Attachment {
     pub size: u64,
 }
 
+/// The calendar file a message carries, if it carries one: a meeting
+/// invitation, as a `text/calendar` part or an `.ics` attachment.
+pub fn calendar_part(raw: &[u8]) -> Option<String> {
+    let message = MessageParser::default().parse(raw)?;
+    let found = message.parts().find_map(|part| {
+        let is_calendar = part.content_type().is_some_and(|c| {
+            c.ctype().eq_ignore_ascii_case("text") && c.subtype().is_some_and(|s| s.eq_ignore_ascii_case("calendar"))
+                || c.subtype().is_some_and(|s| s.eq_ignore_ascii_case("ics"))
+        });
+        let named = part.attachment_name().is_some_and(|n| n.to_ascii_lowercase().ends_with(".ics"));
+        if !is_calendar && !named {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&part.decoded()).into_owned();
+        text.contains("BEGIN:VCALENDAR").then_some(text)
+    });
+    found
+}
+
 pub fn display(raw: &[u8]) -> Displayed {
     let Some(message) = MessageParser::default().parse(raw) else {
         return Displayed {

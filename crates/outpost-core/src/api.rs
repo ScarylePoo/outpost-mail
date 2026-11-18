@@ -186,6 +186,19 @@ pub enum Command {
         id: Option<i64>,
         contact: ContactContent,
     },
+    /// Answers the meeting invitation a message carries: `accepted`,
+    /// `tentative` or `declined`. Unless declined, the event goes into the
+    /// given calendar (replacing an earlier copy of the same event); the
+    /// answer is mailed to the organiser from the message's own account.
+    /// `remove` takes a cancelled event out of the calendar and mails
+    /// nothing.
+    AnswerInvitation {
+        folder: FolderId,
+        id: i64,
+        answer: String,
+        account: FolderId,
+        collection: i64,
+    },
     /// Deletes an event, task or contact. The interface asks first.
     DeleteDavItem { account: FolderId, id: i64 },
     /// The general settings.
@@ -606,6 +619,21 @@ pub struct MessageView {
     /// Pictures on the internet were left in, to be loaded: this sender is
     /// allowed them.
     pub remote_images_shown: bool,
+    /// The meeting invitation or cancellation the message carries.
+    pub invitation: Option<InvitationView>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InvitationView {
+    /// `request` for an invitation, `cancel` for a cancellation.
+    pub kind: String,
+    pub event: EventContent,
+    pub recurring: bool,
+    pub organizer: String,
+    pub organizer_name: String,
+    /// The event is already in one of the user's calendars.
+    pub in_calendar: bool,
 }
 
 /// What is known about whether a message is from who it says.

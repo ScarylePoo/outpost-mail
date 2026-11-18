@@ -10,6 +10,7 @@ import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from
 import { core, type FolderId, type MessageView } from "../core";
 import { protection, protectionVersion, saveProtection } from "../core/protection";
 import { SenderCheckPanel } from "./SenderCheck";
+import { InvitationCard } from "./InvitationCard";
 
 /** Nothing from the network, unless this sender's pictures are allowed. */
 const framePolicy = (pictures: boolean) =>
@@ -199,6 +200,17 @@ export function MessageBody(props: {
             }
           >
             <SenderCheckPanel folder={props.folder} view={v()} onChanged={() => setAgain((n) => n + 1)} />
+            <Show when={v().invitation}>
+              {(invitation) => (
+                <InvitationCard
+                  folder={props.folder}
+                  message={v().id}
+                  invitation={invitation()}
+                  locked={v().restricted}
+                  onChanged={() => setAgain((n) => n + 1)}
+                />
+              )}
+            </Show>
             <Show when={v().remoteContentBlocked}>
               <div class="message-note">
                 Pictures from the internet were not loaded.

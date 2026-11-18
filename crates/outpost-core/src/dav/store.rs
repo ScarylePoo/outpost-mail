@@ -518,6 +518,16 @@ impl DavStore {
         self.conn().query_row("SELECT collection_id FROM item WHERE id = ?1", [id], |r| r.get(0)).optional()?.ok_or(StoreError::Missing)
     }
 
+    /// The item with this UID, if the account has one: (id, collection).
+    pub fn find_uid(&self, uid: &str) -> Result<Option<(i64, i64)>> {
+        Ok(self
+            .conn()
+            .query_row("SELECT id, collection_id FROM item WHERE uid = ?1 AND dirty != 2 ORDER BY id LIMIT 1", [uid], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()?)
+    }
+
     /// Saves an item the user made (`id` is `None`) or changed. It shows at
     /// once and waits to be sent. Returns its id.
     pub fn save_local(&self, collection: i64, id: Option<i64>, data: &str) -> Result<i64> {

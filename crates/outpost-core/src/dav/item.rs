@@ -638,6 +638,179 @@ pub fn write_card(text: Option<&str>, uid: &str, edit: &ContactEdit) -> Option<S
     Some(out)
 }
 
+// ---- invitations ----------------------------------------------------------------
+
+/// A meeting invitation (or its cancellation) that arrived by mail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Invitation {
+    /// `REQUEST` for an invitation, `CANCEL` for a cancellation. Other
+    /// kinds (a reply to an invitation of the user's own) are not handled.
+    pub method: String,
+    pub event: Event,
+    /// The organiser's address and name.
+    pub organizer: String,
+    pub organizer_name: String,
+    /// Everyone invited, as addresses.
+    pub attendees: Vec<String>,
+}
+
+/// How the user answers an invitation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    Accepted,
+    Tentative,
+    Declined,
+}
+
+impl Answer {
+    fn word(self) -> &'static str {
+        match self {
+            Answer::Accepted => "ACCEPTED",
+            Answer::Tentative => "TENTATIVE",
+            Answer::Declined => "DECLINED",
+        }
+    }
+}
+
+fn address_of(value: &str) -> String {
+    let value = value.trim();
+    let bare = if value.len() >= 7 && value[..7].eq_ignore_ascii_case("mailto:") { &value[7..] } else { value };
+    bare.trim().to_ascii_lowercase()
+}
+
+/// A parameter's value from the raw text between a line's name and its
+/// colon (`;CN="Dana Dubois";ROLE=CHAIR`), quotes removed.
+fn parameter(raw_line: &str, name: &str) -> Option<String> {
+    let (name_end, colon) = split_points(raw_line)?;
+    parameters(&raw_line[name_end..colon])
+        .into_iter()
+        .find_map(|p| p.split_once('=').filter(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.trim_matches('"').to_string()))
+}
+
+/// Where a line's name ends and where its value starts.
+fn split_points(line: &str) -> Option<(usize, usize)> {
+    let mut quoted = false;
+    let mut name_end = None;
+    for (i, c) in line.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            ';' if !quoted && name_end.is_none() => name_end = Some(i),
+            ':' if !quoted => return Some((name_end.unwrap_or(i), i)),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The parameters in `;A=1;B="x;y"`, as `A=1`, `B="x;y"`.
+fn parameters(raw: &str) -> Vec<String> {
+    let mut parts = vec![String::new()];
+    let mut quoted = false;
+    for c in raw.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                parts.last_mut().unwrap().push(c);
+            }
+            ';' if !quoted => parts.push(String::new()),
+            c => parts.last_mut().unwrap().push(c),
+        }
+    }
+    parts.into_iter().filter(|p| !p.is_empty()).collect()
+}
+
+/// Reads an invitation: a calendar file with a method and an event.
+pub fn read_invitation(text: &str, tz: &str) -> Option<Invitation> {
+    let lines = unfold(text);
+    let method = lines.iter().filter_map(|l| parse_line(l)).find(|l| l.name == "METHOD")?.value.trim().to_ascii_uppercase();
+    let Some(Item::Event(event)) = read_calendar(text, tz) else { return None };
+    let (_, _, own) = component(&lines, "VEVENT")?;
+    let raw = |name: &str| own.iter().find(|(_, l)| l.name == name).map(|(i, _)| lines[*i].as_str());
+    let organizer_line = raw("ORGANIZER");
+    Some(Invitation {
+        method,
+        event,
+        organizer: own.iter().find(|(_, l)| l.name == "ORGANIZER").map(|(_, l)| address_of(&l.value)).unwrap_or_default(),
+        organizer_name: organizer_line.and_then(|l| parameter(l, "CN")).unwrap_or_default(),
+        attendees: own.iter().filter(|(_, l)| l.name == "ATTENDEE").map(|(_, l)| address_of(&l.value)).filter(|a| !a.is_empty()).collect(),
+    })
+}
+
+/// Answers an invitation as `address` (one of the user's own). Returns the
+/// event as it goes in the user's calendar, with their answer recorded on
+/// it, and the reply to send to the organiser. `None` if the text is not
+/// an invitation.
+pub fn answer_invitation(text: &str, address: &str, name: &str, answer: Answer, now: i64) -> Option<(String, String)> {
+    let lines = unfold(text);
+    let (start, finish, own) = component(&lines, "VEVENT")?;
+    let me = address.trim().to_ascii_lowercase();
+
+    // The calendar copy: the invitation without its method (a stored event
+    // has none), with the user's answer on their own attendee line.
+    let mut copy = String::with_capacity(text.len());
+    for (i, line) in lines.iter().enumerate() {
+        let Some(parsed) = parse_line(line) else {
+            copy.push_str(&fold(line));
+            continue;
+        };
+        if parsed.name == "METHOD" {
+            continue;
+        }
+        if parsed.name == "ATTENDEE" && address_of(&parsed.value) == me {
+            let (name_end, colon) = split_points(line)?;
+            let mut kept: Vec<String> = parameters(&line[name_end..colon])
+                .into_iter()
+                .filter(|p| {
+                    let key = p.split('=').next().unwrap_or("").to_ascii_uppercase();
+                    key != "PARTSTAT" && key != "RSVP"
+                })
+                .collect();
+            kept.push(format!("PARTSTAT={}", answer.word()));
+            copy.push_str(&fold(&format!("{};{}{}", &line[..name_end], kept.join(";"), &line[colon..])));
+            continue;
+        }
+        let _ = i;
+        copy.push_str(&fold(line));
+    }
+
+    // The reply: the same event, identified the same way, with only the
+    // user's own attendee line.
+    let raw = |name: &str| own.iter().find(|(_, l)| l.name == name).map(|(i, _)| lines[*i].clone());
+    let mut reply = String::new();
+    let mut push = |line: &str| reply.push_str(&fold(line));
+    push("BEGIN:VCALENDAR");
+    push("VERSION:2.0");
+    push("PRODID:-//Outpost Mail//EN");
+    push("METHOD:REPLY");
+    // Time zone definitions the event's times refer to.
+    let mut in_zone = false;
+    for line in &lines[..start] {
+        if line.eq_ignore_ascii_case("BEGIN:VTIMEZONE") {
+            in_zone = true;
+        }
+        if in_zone {
+            push(line);
+        }
+        if line.eq_ignore_ascii_case("END:VTIMEZONE") {
+            in_zone = false;
+        }
+    }
+    push("BEGIN:VEVENT");
+    push(&raw("UID")?);
+    push(&format!("DTSTAMP:{}", stamp(now)));
+    for name in ["SEQUENCE", "RECURRENCE-ID", "DTSTART", "DTEND", "DURATION", "SUMMARY", "ORGANIZER"] {
+        if let Some(line) = raw(name) {
+            push(&line);
+        }
+    }
+    let who = if name.trim().is_empty() { String::new() } else { format!(";CN=\"{}\"", name.trim().replace('"', "")) };
+    push(&format!("ATTENDEE;PARTSTAT={}{who}:mailto:{}", answer.word(), address.trim()));
+    push("END:VEVENT");
+    push("END:VCALENDAR");
+    let _ = finish;
+    Some((copy, reply))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -798,6 +971,60 @@ mod tests {
         assert!(text.contains("DTSTART;VALUE=DATE:20261224\r\n") && text.contains("DTEND;VALUE=DATE:20261225\r\n"), "{text}");
         let Some(Item::Event(e)) = read_calendar(&text, BERLIN) else { panic!() };
         assert_eq!((e.summary, e.all_day, e.end - e.start), (long, true, 86_400));
+    }
+
+    #[test]
+    fn an_invitation_is_read_answered_and_filed() {
+        let invite = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Other//EN\r\nMETHOD:REQUEST\r\nBEGIN:VTIMEZONE\r\nTZID:Europe/Berlin\r\nBEGIN:STANDARD\r\nDTSTART:19701025T030000\r\nTZOFFSETFROM:+0200\r\nTZOFFSETTO:+0100\r\nEND:STANDARD\r\nEND:VTIMEZONE\r\nBEGIN:VEVENT\r\nUID:meeting-1@example.com\r\nDTSTAMP:20261118T100000Z\r\nSEQUENCE:1\r\nDTSTART;TZID=Europe/Berlin:20261120T140000\r\nDTEND;TZID=Europe/Berlin:20261120T150000\r\nSUMMARY:Budget review\r\nLOCATION:Room 4\r\nORGANIZER;CN=\"Dubois; Dana\":mailto:dana@example.com\r\nATTENDEE;CN=Ann;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:Ann@Example.com\r\nATTENDEE;CN=Sam;PARTSTAT=ACCEPTED:mailto:sam@example.com\r\nX-KEEP:this\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let inv = read_invitation(invite, "UTC").unwrap();
+        assert_eq!((inv.method.as_str(), inv.event.summary.as_str(), inv.event.location.as_str()), ("REQUEST", "Budget review", "Room 4"));
+        assert_eq!((inv.event.start, inv.event.end), (at(2026, 11, 20, 13, 0), at(2026, 11, 20, 14, 0)));
+        assert_eq!((inv.organizer.as_str(), inv.organizer_name.as_str()), ("dana@example.com", "Dubois; Dana"));
+        assert_eq!(inv.attendees, ["ann@example.com", "sam@example.com"]);
+        // An ordinary calendar file is not an invitation.
+        assert_eq!(read_invitation(&ics("BEGIN:VEVENT\nUID:a\nDTSTART:20261120T090000Z\nSUMMARY:x\nEND:VEVENT"), "UTC"), None);
+
+        let now = at(2026, 11, 18, 12, 0);
+        // Long lines are folded when written; compare them joined up again.
+        let flat = |text: &str| unfold(text).join("\r\n") + "\r\n";
+        let (written, reply) = answer_invitation(invite, "ann@example.com", "Ann Example", Answer::Accepted, now).unwrap();
+        assert!(written.lines().all(|l| l.len() <= 75), "{written}");
+        let (copy, reply) = (flat(&written), flat(&reply));
+        // In the calendar: no method, the user's answer recorded, everyone
+        // else and everything else as it was.
+        assert!(!copy.contains("METHOD"), "{copy}");
+        assert!(copy.contains("ATTENDEE;CN=Ann;ROLE=REQ-PARTICIPANT;PARTSTAT=ACCEPTED:mailto:Ann@Example.com\r\n"), "{copy}");
+        assert!(copy.contains("ATTENDEE;CN=Sam;PARTSTAT=ACCEPTED:mailto:sam@example.com\r\n") && copy.contains("X-KEEP:this\r\n"), "{copy}");
+        assert!(copy.contains("BEGIN:VTIMEZONE") && ICalendar::parse(&written).is_ok());
+        let Some(Item::Event(e)) = read_calendar(&written, "UTC") else { panic!() };
+        assert_eq!((e.summary.as_str(), e.start), ("Budget review", at(2026, 11, 20, 13, 0)));
+
+        // The reply names the same event and carries only the user's line.
+        for wanted in [
+            "METHOD:REPLY\r\n",
+            "UID:meeting-1@example.com\r\n",
+            "SEQUENCE:1\r\n",
+            "DTSTART;TZID=Europe/Berlin:20261120T140000\r\n",
+            "ORGANIZER;CN=\"Dubois; Dana\":mailto:dana@example.com\r\n",
+            "ATTENDEE;PARTSTAT=ACCEPTED;CN=\"Ann Example\":mailto:ann@example.com\r\n",
+            "DTSTAMP:20261118T120000Z\r\n",
+            "BEGIN:VTIMEZONE\r\n",
+        ] {
+            assert!(reply.contains(wanted), "no {wanted:?} in\n{reply}");
+        }
+        assert_eq!(reply.matches("ATTENDEE").count(), 1);
+        assert!(!reply.contains("sam@example.com") && !reply.contains("X-KEEP") && !reply.contains("LOCATION"), "{reply}");
+        assert!(ICalendar::parse(&reply).is_ok());
+        assert_eq!(read_invitation(&reply, "UTC").unwrap().method, "REPLY");
+
+        let (copy, reply) = answer_invitation(invite, "ann@example.com", "", Answer::Declined, now).unwrap();
+        let (copy, reply) = (flat(&copy), flat(&reply));
+        assert!(copy.contains("PARTSTAT=DECLINED:mailto:Ann@Example.com") && reply.contains("ATTENDEE;PARTSTAT=DECLINED:mailto:ann@example.com\r\n"));
+        // Someone not on the list (the invitation was forwarded): the
+        // calendar copy is unchanged, the reply still says who answers.
+        let (copy, reply) = answer_invitation(invite, "other@example.com", "", Answer::Tentative, now).unwrap();
+        let (copy, reply) = (flat(&copy), flat(&reply));
+        assert!(copy.contains("PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:Ann@Example.com") && reply.contains("PARTSTAT=TENTATIVE:mailto:other@example.com"));
     }
 
     #[test]

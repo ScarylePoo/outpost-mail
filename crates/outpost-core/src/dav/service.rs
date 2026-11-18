@@ -150,6 +150,11 @@ impl Core {
             .ok_or_else(|| CoreError::new(ErrorCode::UnknownFolder, format!("no calendar account {id:?}")))
     }
 
+    /// Whether any calendar here already holds the event with this UID.
+    pub(crate) fn dav_has_uid(&self, uid: &str) -> bool {
+        !uid.is_empty() && self.dav_accounts().iter().any(|a| matches!(a.store.find_uid(uid), Ok(Some(_))))
+    }
+
     fn dav_changed(&self, account: &DavAccount) {
         self.inner.sink.emit(Event::DavChanged { account: account.id.clone() });
     }
@@ -479,6 +484,46 @@ impl Core {
                 let data = item::write_card(existing.as_deref(), &sync::new_id(), &edit).ok_or_else(|| store_error(StoreError::Unreadable))?;
                 self.save_dav(&account, collection, id, &data)
             }),
+            Command::AnswerInvitation { folder, id, answer, account, collection } => (|| {
+                let calendar = self.dav_account(&account)?;
+                if answer == "remove" {
+                    // A cancelled event: out of the calendar, nothing mailed.
+                    let invitation = self.stored_invitation(&folder, id)?;
+                    if let Some((existing, _)) = calendar.store.find_uid(&invitation.event.uid).map_err(store_error)? {
+                        calendar.store.delete_local(existing).map_err(store_error)?;
+                        self.dav_changed(&calendar);
+                        self.start_dav_sync(&calendar);
+                    }
+                    return Ok(Response::Accepted);
+                }
+                let answer = match answer.as_str() {
+                    "accepted" => item::Answer::Accepted,
+                    "tentative" => item::Answer::Tentative,
+                    "declined" => item::Answer::Declined,
+                    other => return Err(CoreError::new(ErrorCode::BadCommand, format!("unknown answer {other:?}"))),
+                };
+                // The calendar must be able to take it before anything is
+                // mailed: an answer that was sent cannot be taken back.
+                let place = calendar.store.collection(collection).map_err(store_error)?;
+                if !matches!(place.kind, Kind::Calendar { events: true, .. }) {
+                    return Err(CoreError::new(ErrorCode::NotPossible, "that is not a calendar for events"));
+                }
+                let (copy, invitation) = self.send_invitation_reply(&folder, id, answer)?;
+                let existing = calendar.store.find_uid(&invitation.event.uid).map_err(store_error)?;
+                match (answer, existing) {
+                    (item::Answer::Declined, Some((existing, _))) => calendar.store.delete_local(existing).map_err(store_error)?,
+                    (item::Answer::Declined, None) => {}
+                    (_, Some((existing, in_collection))) => {
+                        calendar.store.save_local(in_collection, Some(existing), &copy).map_err(store_error)?;
+                    }
+                    (_, None) => {
+                        calendar.store.save_local(collection, None, &copy).map_err(store_error)?;
+                    }
+                }
+                self.dav_changed(&calendar);
+                self.start_dav_sync(&calendar);
+                Ok(Response::Accepted)
+            })(),
             Command::DeleteDavItem { account, id } => self.dav_account(&account).and_then(|account| {
                 account.store.delete_local(id).map_err(store_error)?;
                 self.dav_changed(&account);

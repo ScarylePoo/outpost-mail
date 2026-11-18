@@ -169,6 +169,40 @@ pub fn build(
     Ok(Built { raw, message_id })
 }
 
+/// Builds the reply to a meeting invitation: a short message for people,
+/// with the calendar reply (`ics`) beside it as the alternative that
+/// calendar programs read.
+pub fn build_invitation_reply(from: &Identity, to: &str, subject: &str, text: &str, ics: &str) -> Result<Built, String> {
+    use mail_builder::headers::content_type::ContentType;
+    use mail_builder::mime::MimePart;
+    let to = parse_recipients(to)?;
+    if to.is_empty() {
+        return Err("the invitation does not say who to answer".into());
+    }
+    let domain = from.address.split_once('@').map_or("localhost", |(_, d)| d);
+    let message_id = format!("{}@{domain}", unique_token());
+    let body = MimePart::new(
+        ContentType::new("multipart/alternative"),
+        vec![
+            MimePart::new(ContentType::new("text/plain").attribute("charset", "utf-8"), text.replace('\n', "\r\n")),
+            MimePart::new(
+                ContentType::new("text/calendar").attribute("charset", "utf-8").attribute("method", "REPLY"),
+                ics.to_string(),
+            ),
+        ],
+    );
+    let raw = MessageBuilder::new()
+        .from(Address::new_address((!from.name.is_empty()).then_some(from.name.as_str()), from.address.as_str()))
+        .to(addresses(&to))
+        .subject(subject)
+        .date(now())
+        .message_id(message_id.clone())
+        .body(body)
+        .write_to_vec()
+        .map_err(|e| e.to_string())?;
+    Ok(Built { raw, message_id })
+}
+
 /// Who a stored message is from and everyone it is to (To, Cc and Bcc), as
 /// bare addresses: the envelope for sending it.
 pub fn envelope(raw: &[u8]) -> Option<(String, Vec<String>)> {

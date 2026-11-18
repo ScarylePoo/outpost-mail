@@ -67,6 +67,7 @@ export function answerOrganizer(command: Command, changed: () => void): Response
     case "provideDavPassword":
     case "removeDavAccount":
     case "syncDav":
+    case "answerInvitation":
       return { type: "accepted" };
     case "setDavCollection": {
       const c = account.collections.find((c) => c.id === command.collection);

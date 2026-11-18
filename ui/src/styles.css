@@ -2155,3 +2155,56 @@ button.danger {
 .setting-line .grow {
   flex: 1;
 }
+
+/* Invitations */
+
+.invitation {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 0 10px;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent-soft);
+  user-select: text;
+}
+
+.invitation.cancelled {
+  border-left-color: var(--text-3);
+  background: var(--surface);
+}
+
+.invitation-kind {
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.invitation-title {
+  font-size: 15px;
+}
+
+.invitation-from {
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.invitation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+button.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
+button.primary:disabled {
+  opacity: 0.5;
+}

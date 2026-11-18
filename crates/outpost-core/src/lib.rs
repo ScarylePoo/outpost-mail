@@ -573,6 +573,7 @@ impl Core {
                             .unwrap_or_default();
                         let mine = own.iter().any(|o| o.eq_ignore_ascii_case(&view.sender_address));
                         if view.downloaded && !mine {
+                            view.invitation = self.invitation_in(&account, id);
                             if let Some(history) = account.store.index().sender_history(id).map_err(internal)? {
                                 let check = &mut view.sender_check;
                                 let first_time = !history.known_address;
@@ -851,6 +852,7 @@ impl Core {
             | Command::SaveEvent { .. }
             | Command::SaveTask { .. }
             | Command::SaveContact { .. }
+            | Command::AnswerInvitation { .. }
             | Command::DeleteDavItem { .. } => Err(CoreError::new(ErrorCode::Internal, "a calendar command was not handled")),
             Command::GetGeneral => Ok(Response::General { general: self.inner.settings.general() }),
             Command::SetGeneral { general, password } => {
@@ -1176,6 +1178,88 @@ impl Core {
 
     /// Builds the message a draft describes, from this account's identity,
     /// carrying the attachments of a message being forwarded.
+    /// The meeting invitation a stored message carries, if any.
+    fn invitation_in(&self, account: &Account, id: i64) -> Option<api::InvitationView> {
+        let raw = account.store.read_message(id).ok()?;
+        let text = store::parse::calendar_part(&raw)?;
+        let invitation = dav::item::read_invitation(&text, &dav::service::local_zone())?;
+        let kind = match invitation.method.as_str() {
+            "REQUEST" => "request",
+            "CANCEL" => "cancel",
+            _ => return None,
+        };
+        Some(api::InvitationView {
+            kind: kind.into(),
+            in_calendar: self.dav_has_uid(&invitation.event.uid),
+            event: api::EventContent {
+                summary: invitation.event.summary,
+                location: invitation.event.location,
+                description: invitation.event.description,
+                start: invitation.event.start,
+                end: invitation.event.end,
+                all_day: invitation.event.all_day,
+            },
+            recurring: invitation.event.recurring,
+            organizer: invitation.organizer,
+            organizer_name: invitation.organizer_name,
+        })
+    }
+
+    /// Queues the reply to an invitation for sending, from the account the
+    /// invitation arrived in. Used by `dav/service.rs`.
+    pub(crate) fn send_invitation_reply(
+        &self,
+        folder: &FolderId,
+        message: i64,
+        answer: dav::item::Answer,
+    ) -> Result<(String, dav::item::Invitation), CoreError> {
+        let account = self.syncing_account(folder)?;
+        let raw = self.read(&account, message)?;
+        let not_one = || CoreError::new(ErrorCode::NotPossible, "this message carries no meeting invitation");
+        let text = store::parse::calendar_part(&raw).ok_or_else(not_one)?;
+        let invitation = dav::item::read_invitation(&text, &dav::service::local_zone()).ok_or_else(not_one)?;
+        let identity = account
+            .config()
+            .filter(|c| c.smtp_server().is_some())
+            .and_then(|c| c.identity())
+            .ok_or_else(|| CoreError::new(ErrorCode::NotPossible, "set up sending for this account first, so the organiser can be answered"))?;
+        // Answer as whichever of the user's addresses was invited.
+        let own: Vec<String> = [Some(identity.address.clone()), account.config().map(|c| c.username)].into_iter().flatten().collect();
+        let me = invitation.attendees.iter().find(|a| own.iter().any(|o| o.eq_ignore_ascii_case(a))).cloned().unwrap_or(identity.address.clone());
+        let (copy, reply) = dav::item::answer_invitation(&text, &me, &identity.name, answer, store::actions::now()).ok_or_else(not_one)?;
+        if invitation.organizer.is_empty() {
+            return Err(CoreError::new(ErrorCode::NotPossible, "the invitation does not say who organised it"));
+        }
+        let (word, verb) = match answer {
+            dav::item::Answer::Accepted => ("Accepted", "has accepted"),
+            dav::item::Answer::Tentative => ("Tentative", "has tentatively accepted"),
+            dav::item::Answer::Declined => ("Declined", "has declined"),
+        };
+        let who = if identity.name.is_empty() { identity.address.clone() } else { identity.name.clone() };
+        let built = compose::build_invitation_reply(
+            &identity,
+            &invitation.organizer,
+            &format!("{word}: {}", invitation.event.summary),
+            &format!("{who} {verb} the invitation to \"{}\".\n", invitation.event.summary),
+            &reply,
+        )
+        .map_err(|e| CoreError::new(ErrorCode::NotPossible, e))?;
+        let id = account.store.queue_for_sending(&built.raw, store::actions::now()).map_err(internal)?;
+        let mut touched: Vec<i64> = account.store.index().brief(id).map_err(internal)?.map(|b| b.folder).into_iter().collect();
+        touched.extend(account.store.change_flags(&[message], Flags::ANSWERED, Flags::default()).map_err(internal)?);
+        self.acted(&account, touched);
+        Ok((copy, invitation))
+    }
+
+    /// The calendar file a stored message carries, read as an invitation.
+    pub(crate) fn stored_invitation(&self, folder: &FolderId, message: i64) -> Result<dav::item::Invitation, CoreError> {
+        let account = self.account(folder)?;
+        let raw = self.read(&account, message)?;
+        store::parse::calendar_part(&raw)
+            .and_then(|text| dav::item::read_invitation(&text, &dav::service::local_zone()))
+            .ok_or_else(|| CoreError::new(ErrorCode::NotPossible, "this message carries no meeting invitation"))
+    }
+
     fn build(&self, account: &Account, draft: &api::DraftContent) -> Result<Vec<u8>, CoreError> {
         let identity = account.config().and_then(|c| c.identity()).ok_or_else(|| {
             CoreError::new(ErrorCode::NotPossible, "this account has no address to send from yet")
@@ -1611,6 +1695,7 @@ fn open_message(
         date: shown.date.unwrap_or(0),
         remote_content_blocked: safe.as_ref().is_some_and(|s| s.remote_content_blocked),
         remote_images_shown: safe.as_ref().is_some_and(|s| s.remote_images_kept),
+        invitation: None,
         restricted,
         trusted,
         html: safe.map(|s| s.html),

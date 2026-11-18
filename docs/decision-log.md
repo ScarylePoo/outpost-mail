@@ -82,7 +82,6 @@ messages. Results in `docs/performance-results.md`.
 ### Not done yet in milestone 5
 
 - Not tried on real, messy conversations (needs the owner's mail).
-- Open conversations close when the folder refreshes (new mail arrives).
 - Keyboard movement inside an open tree; arrow keys move between rows only.
 - Actions on a conversation row (delete, move, mark) apply to the message
   shown for it, not to the whole conversation.

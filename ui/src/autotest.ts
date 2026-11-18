@@ -125,6 +125,16 @@ async function probe(details: string): Promise<string> {
     lines.push(`opened into a tree of: ${text(".tree-line .tree-sender").join(" > ")}`);
     lines.push(`reading pane shows: ${text(".turn .turn-who strong").join(" then ")} (${text(".modes button.on").join("")})`);
     lines.push(`reduced text of the reply: ${text(".turn .turn-text").at(-1)?.slice(0, 40)}`);
+
+    // Pick the reply inside the tree (it is in Sent) and flag it: the change
+    // refreshes the folder, and the conversation must stay open.
+    document.querySelectorAll(".tree-line")[1]?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    await sleep(500);
+    press("Flag");
+    await sleep(1500);
+    lines.push(
+      `after flagging the reply in the tree: ${text(".tree-line").length} lines still open, picked: ${text(".tree-line.selected .tree-sender").join("")}`,
+    );
   } catch (e) {
     lines.push(`FAILED: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
   }

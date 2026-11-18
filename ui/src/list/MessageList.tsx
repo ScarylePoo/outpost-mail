@@ -272,11 +272,29 @@ export function MessageList(props: {
       ]);
       if (gen !== generation) return;
 
-      // Positions shift when a folder changes, so open conversations are
-      // closed rather than left attached to the wrong rows.
-      setOpened(new Map());
-      setInTree(undefined);
-      const nextLayout = buildLayout(fresh.previewLens, width);
+      // Positions shift when a folder changes, so each open conversation is
+      // found again (by one of its messages) and read afresh. One that has
+      // left the folder closes.
+      const reopened = new Map<number, ThreadView>();
+      await Promise.all(
+        [...opened().values()].map(async (thread) => {
+          const id = thread.messages[0]?.id;
+          if (id === undefined) return;
+          try {
+            const [at, again] = await Promise.all([
+              locate(id),
+              core.send({ type: "openThread", folder, id }),
+            ]);
+            if (at !== null && again.thread.messages.length > 1) reopened.set(at, again.thread);
+          } catch {
+            // Gone; it closes.
+          }
+        }),
+      );
+      if (gen !== generation) return;
+      const extra = new Map<number, number>();
+      for (const [index, thread] of reopened) extra.set(index, treeHeight(thread));
+      const nextLayout = buildLayout(fresh.previewLens, width, extra);
       const n = nextLayout.lines.length;
       let nextTop = 0;
       if (anchor && anchorIndex !== null && anchorIndex < n) {
@@ -308,6 +326,11 @@ export function MessageList(props: {
       pending = new Set();
       previewLens = fresh.previewLens;
       layout = nextLayout;
+      const within = inTree()?.id;
+      if (within !== undefined && ![...reopened.values()].some((t) => t.messages.some((m) => m.id === within))) {
+        setInTree(undefined);
+      }
+      setOpened(reopened);
       setTotal(n);
       resize();
       setLayoutTick((t) => t + 1);

@@ -49,6 +49,8 @@ export function Reader(props: { folder: FolderId; row: MessageRow | undefined })
   const [error, setError] = createSignal("");
   const [link, setLink] = createSignal("");
   const [copied, setCopied] = createSignal(false);
+  const [saved, setSaved] = createSignal<{ path: string; name: string }>();
+  const [saveError, setSaveError] = createSignal("");
   let request = 0;
 
   createEffect(
@@ -59,6 +61,8 @@ export function Reader(props: { folder: FolderId; row: MessageRow | undefined })
         setView(undefined);
         setError("");
         setLink("");
+        setSaved(undefined);
+        setSaveError("");
         if (id === undefined) return;
         core
           .send({ type: "openMessage", folder: props.folder, id })
@@ -96,6 +100,20 @@ export function Reader(props: { folder: FolderId; row: MessageRow | undefined })
   async function copyLink() {
     await navigator.clipboard.writeText(link());
     setCopied(true);
+  }
+
+  function openLink() {
+    core.openLink(link()).catch((e) => setError(`Could not open the link: ${e?.message ?? e}`));
+  }
+
+  function save(index: number) {
+    const id = props.row?.id;
+    if (id === undefined) return;
+    setSaveError("");
+    core
+      .send({ type: "saveAttachment", folder: props.folder, id, index })
+      .then((r) => setSaved({ path: r.path, name: r.name }))
+      .catch((e) => setSaveError(String(e?.message ?? e)));
   }
 
   return (
@@ -139,14 +157,28 @@ export function Reader(props: { folder: FolderId; row: MessageRow | undefined })
                 <Show when={v().attachments.length > 0}>
                   <ul class="attachments">
                     <For each={v().attachments}>
-                      {(a) => (
+                      {(a, index) => (
                         <li title={a.mimeType}>
                           <span class="attachment-name">{a.name}</span>
                           <span class="attachment-size">{formatSize(a.size)}</span>
+                          <button onClick={() => save(index())}>Save</button>
                         </li>
                       )}
                     </For>
                   </ul>
+                </Show>
+                <Show when={saved()}>
+                  {(s) => (
+                    <div class="message-note">
+                      Saved to your Downloads folder as <strong>{s().name}</strong>.{" "}
+                      <button class="inline" onClick={() => void core.revealDownload(s().path)}>
+                        Show in folder
+                      </button>
+                    </div>
+                  )}
+                </Show>
+                <Show when={saveError()}>
+                  <div class="message-note message-error">Could not save the attachment: {saveError()}</div>
                 </Show>
                 <Show
                   when={v().html !== null}
@@ -168,6 +200,9 @@ export function Reader(props: { folder: FolderId; row: MessageRow | undefined })
             <div class="link-bar" role="status">
               <span class="link-label">This link goes to</span>
               <span class="link-target">{link()}</span>
+              <Show when={/^(https?:|mailto:)/i.test(link().trim())}>
+                <button onClick={openLink}>Open</button>
+              </Show>
               <button onClick={copyLink}>{copied() ? "Copied" : "Copy"}</button>
               <button onClick={() => setLink("")}>Dismiss</button>
             </div>

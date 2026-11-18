@@ -37,6 +37,37 @@ const STYLE: &[&str] = &[
     "list-style", "list-style-type", "table-layout", "direction",
 ];
 
+/// Replaces references to pictures carried inside the message (`cid:…`)
+/// with the pictures themselves, so they display without any network
+/// access. Call before [`safe_html`].
+pub fn embed_inline_images(html: &str, images: &[(String, String, Vec<u8>)]) -> String {
+    let mut out = html.to_string();
+    for (content_id, mime_type, data) in images {
+        let reference = format!("cid:{content_id}");
+        if out.contains(&reference) {
+            out = out.replace(&reference, &format!("data:{mime_type};base64,{}", base64(data)));
+        }
+    }
+    out
+}
+
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        for i in 0..4 {
+            if i > chunk.len() {
+                out.push('=');
+            } else {
+                out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
+            }
+        }
+    }
+    out
+}
+
 pub fn safe_html(html: &str) -> SafeHtml {
     let blocked = Arc::new(AtomicBool::new(false));
     let seen = blocked.clone();
@@ -142,6 +173,22 @@ mod tests {
         assert!(out.html.contains("data:image/png;base64,iVBORw0KGgo="), "{}", out.html);
 
         assert!(!safe_html("<p>just text</p>").remote_content_blocked);
+    }
+
+    #[test]
+    fn embedded_pictures_are_shown_without_the_network() {
+        let png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let html = r#"<p>Logo: <img src="cid:logo@x" alt="logo"> and <img src="cid:missing@x"></p>"#;
+        let embedded = embed_inline_images(html, &[("logo@x".into(), "image/png".into(), png)]);
+        let out = safe_html(&embedded);
+        assert!(out.html.contains("data:image/png;base64,iVBORw0KGgo="), "{}", out.html);
+        assert!(!out.html.contains("cid:"), "an unresolved reference is dropped: {}", out.html);
+        assert_eq!(base64(b"f"), "Zg==");
+        assert_eq!(base64(b"fo"), "Zm8=");
+        assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+        // Only real pictures can be embedded this way.
+        let sneaky = embed_inline_images(r#"<img src="cid:x">"#, &[("x".into(), "text/html".into(), b"<script>".to_vec())]);
+        assert!(!safe_html(&sneaky).html.contains("data:"), "{}", safe_html(&sneaky).html);
     }
 
     #[test]

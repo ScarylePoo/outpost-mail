@@ -485,6 +485,25 @@ input[type="checkbox"] {
   color: var(--text-3);
 }
 
+.attachments li {
+  align-items: center;
+}
+
+.attachments button,
+button.inline {
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--pane);
+  font-size: 12px;
+}
+
+.attachments button:hover,
+button.inline:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 .link-bar {
   position: sticky;
   bottom: 0;

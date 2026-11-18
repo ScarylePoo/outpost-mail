@@ -13,6 +13,7 @@ export type Command =
   | { type: "listMessages"; folder: FolderId; offset: number; limit: number }
   | { type: "openMessage"; folder: FolderId; id: number }
   | { type: "search"; scope: FolderId; text: string; limit: number }
+  | { type: "saveAttachment"; folder: FolderId; id: number; index: number }
   | { type: "locateMessage"; folder: FolderId; id: number }
   | { type: "listAccounts" }
   | {
@@ -98,6 +99,7 @@ export type Response =
   | { type: "messages"; folder: FolderId; offset: number; total: number; rows: MessageRow[] }
   | { type: "searchResults"; rows: MessageRow[] }
   | { type: "message"; message: MessageView }
+  | { type: "attachmentSaved"; path: string; name: string }
   | { type: "located"; index: number | null }
   | { type: "accounts"; accounts: AccountInfo[] }
   | { type: "accepted" };
@@ -122,6 +124,7 @@ type ResponseFor = {
   listMessages: "messages";
   search: "searchResults";
   openMessage: "message";
+  saveAttachment: "attachmentSaved";
   locateMessage: "located";
   listAccounts: "accounts";
   addAccount: "accepted";
@@ -140,4 +143,8 @@ export interface Transport {
   send<C extends Command>(command: C): Promise<ResponseTo<C>>;
   /** Returns a function that stops listening. */
   onEvent(listener: (event: CoreEvent) => void): () => void;
+  /** Opens a web or mail link outside the app. A shell service, not the core's. */
+  openLink(url: string): Promise<void>;
+  /** Shows a saved attachment in the system's file manager. */
+  revealDownload(path: string): Promise<void>;
 }

@@ -9,6 +9,12 @@ export const tauriTransport: Transport = {
   send<C extends Command>(command: C) {
     return invoke<ResponseTo<C>>("core_command", { command });
   },
+  openLink(url) {
+    return invoke("open_link", { url });
+  },
+  revealDownload(path) {
+    return invoke("reveal_download", { path });
+  },
   onEvent(listener) {
     let stop: (() => void) | undefined;
     let stopped = false;

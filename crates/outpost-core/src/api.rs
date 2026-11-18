@@ -45,6 +45,9 @@ pub enum Command {
         text: String,
         limit: u32,
     },
+    /// Writes one of a message's attachments to the downloads folder,
+    /// under a name that does not replace anything there.
+    SaveAttachment { folder: FolderId, id: i64, index: u32 },
     /// Where a message now is in a folder's list, so the list can keep its
     /// place when the folder changes underneath it.
     LocateMessage { folder: FolderId, id: i64 },
@@ -112,6 +115,12 @@ pub enum Response {
     },
     Message {
         message: MessageView,
+    },
+    AttachmentSaved {
+        /// Where it was written.
+        path: String,
+        /// The file name it was given.
+        name: String,
     },
     Located {
         /// `None` if the message is no longer in the folder.

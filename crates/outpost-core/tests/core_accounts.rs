@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 fn start(data: &TempDir, secrets: Arc<MemorySecrets>) -> (Core, Receiver<Event>) {
     let (tx, rx) = mpsc::channel();
-    let config = Config { data_dir: Some(data.path().to_path_buf()) };
+    let config = Config { data_dir: Some(data.path().to_path_buf()), downloads_dir: None };
     let core = Core::start_with_secrets(config, secrets, move |event| {
         let _ = tx.send(event);
     })

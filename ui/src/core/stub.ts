@@ -118,6 +118,8 @@ function answer(command: Command): Response {
         },
       };
     }
+    case "saveAttachment":
+      return { type: "attachmentSaved", path: "/downloads/report.pdf", name: "report.pdf" };
     case "locateMessage":
       return { type: "located", index: command.id };
     case "listAccounts":
@@ -150,6 +152,10 @@ export const stubTransport: Transport = {
       }, 3);
     });
   },
+  async openLink(url) {
+    window.open(url, "_blank", "noopener");
+  },
+  async revealDownload() {},
   onEvent(listener) {
     listeners.add(listener);
     return () => listeners.delete(listener);

@@ -51,6 +51,8 @@ pub struct Config {
     /// account. `None` means no stored mail: the synthetic account is shown
     /// and accounts cannot be added.
     pub data_dir: Option<PathBuf>,
+    /// Where saved attachments go. `None` means attachments cannot be saved.
+    pub downloads_dir: Option<PathBuf>,
 }
 
 struct SyntheticFolder {
@@ -97,6 +99,7 @@ pub struct Core {
 struct Inner {
     sink: Box<dyn EventSink>,
     data_dir: Option<PathBuf>,
+    downloads_dir: Option<PathBuf>,
     accounts: RwLock<Vec<Arc<Account>>>,
     synthetic: Vec<SyntheticFolder>,
     secrets: Arc<dyn Secrets>,
@@ -144,6 +147,7 @@ impl Core {
             inner: Arc::new(Inner {
                 sink: Box::new(sink),
                 data_dir: config.data_dir,
+                downloads_dir: config.downloads_dir,
                 accounts: RwLock::new(accounts),
                 synthetic: synthetic_folders(),
                 secrets,
@@ -407,6 +411,26 @@ impl Core {
                 };
                 Ok(Response::SearchResults {
                     rows: message_rows(rows, 0),
+                })
+            }
+            Command::SaveAttachment { folder, id, index } => {
+                let account = self.account(&folder)?;
+                let Some(downloads) = &self.inner.downloads_dir else {
+                    return Err(CoreError::new(ErrorCode::NotPossible, "there is no downloads folder to save to"));
+                };
+                let raw = account.store.read_message(id).map_err(|e| match e {
+                    StoreError::NoSuchMessage(_) | StoreError::NotDownloaded(_) => {
+                        CoreError::new(ErrorCode::UnknownMessage, e.to_string())
+                    }
+                    other => internal(other),
+                })?;
+                let (name, data) = store::parse::attachment(&raw, index as usize)
+                    .ok_or_else(|| CoreError::new(ErrorCode::UnknownMessage, "the message has no such attachment"))?;
+                let (path, name) = save_download(downloads, &name, &data)
+                    .map_err(|e| CoreError::new(ErrorCode::Internal, format!("could not save the file: {e}")))?;
+                Ok(Response::AttachmentSaved {
+                    path: path.to_string_lossy().into_owned(),
+                    name,
                 })
             }
             Command::LocateMessage { folder, id } => {
@@ -738,7 +762,15 @@ fn open_message(store: &Store, id: i64) -> Result<MessageView, CoreError> {
         Err(e) => return Err(internal(e)),
     };
     let shown = store::parse::display(&raw);
-    let safe = shown.html.as_deref().map(render::safe_html);
+    let images: Vec<(String, String, Vec<u8>)> = shown
+        .inline_images
+        .into_iter()
+        .map(|i| (i.content_id, i.mime_type, i.data))
+        .collect();
+    let safe = shown
+        .html
+        .as_deref()
+        .map(|html| render::safe_html(&render::embed_inline_images(html, &images)));
     Ok(MessageView {
         id,
         subject: shown.subject,
@@ -761,6 +793,57 @@ fn open_message(store: &Store, id: i64) -> Result<MessageView, CoreError> {
             .collect(),
         downloaded: true,
     })
+}
+
+/// A file name from a message, made safe to create: no directories, no
+/// control characters, nothing Windows reserves, not hidden, not too long.
+/// The extension is kept, because it decides what opens the file.
+pub fn safe_file_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| if c.is_control() || matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c })
+        .collect();
+    let mut cleaned = cleaned.trim().trim_start_matches('.').trim_end_matches(['.', ' ']).to_string();
+    if cleaned.chars().count() > 120 {
+        let extension: String = match cleaned.rsplit_once('.') {
+            Some((_, e)) if e.chars().count() <= 10 => format!(".{e}"),
+            _ => String::new(),
+        };
+        let keep = 120 - extension.chars().count();
+        cleaned = cleaned.chars().take(keep).collect::<String>() + &extension;
+    }
+    let stem = cleaned.split('.').next().unwrap_or("").to_ascii_lowercase();
+    let reserved = ["con", "prn", "aux", "nul"].contains(&stem.as_str())
+        || (stem.len() == 4 && (stem.starts_with("com") || stem.starts_with("lpt")) && stem.ends_with(|c: char| c.is_ascii_digit()));
+    if cleaned.is_empty() || reserved {
+        cleaned = format!("attachment {cleaned}").trim().to_string();
+    }
+    cleaned
+}
+
+/// Writes `data` into `dir` as `name`, or as `name (2)`, `name (3)`… if that
+/// exists. Never replaces a file. Returns the path and the name used.
+fn save_download(dir: &Path, name: &str, data: &[u8]) -> std::io::Result<(PathBuf, String)> {
+    use std::io::Write;
+    std::fs::create_dir_all(dir)?;
+    let name = safe_file_name(name);
+    let (stem, extension) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
+        _ => (name.clone(), String::new()),
+    };
+    for n in 1..10_000 {
+        let candidate = if n == 1 { name.clone() } else { format!("{stem} ({n}){extension}") };
+        let path = dir.join(&candidate);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                file.write_all(data)?;
+                return Ok((path, candidate));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::other("too many files with that name"))
 }
 
 fn message_rows(rows: Vec<ListRow>, first_index: u32) -> Vec<MessageRow> {

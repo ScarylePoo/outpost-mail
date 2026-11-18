@@ -87,6 +87,15 @@ pub struct Displayed {
     pub html: Option<String>,
     pub text: Option<String>,
     pub attachments: Vec<Attachment>,
+    /// Pictures the HTML refers to by content ID (`cid:`).
+    pub inline_images: Vec<InlineImage>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct InlineImage {
+    pub content_id: String,
+    pub mime_type: String,
+    pub data: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -121,17 +130,31 @@ pub fn display(raw: &[u8]) -> Displayed {
     });
     let html = has_html.then(|| message.body_html(0).map(|h| h.into_owned())).flatten();
     let text = message.body_text(0).map(|t| t.into_owned());
+    let mime_of = |part: &mail_parser::MessagePart| {
+        part.content_type()
+            .map(|c| match c.subtype() {
+                Some(sub) => format!("{}/{}", c.ctype(), sub).to_ascii_lowercase(),
+                None => c.ctype().to_ascii_lowercase(),
+            })
+            .unwrap_or_else(|| "application/octet-stream".into())
+    };
+    let inline_images = message
+        .attachments()
+        .filter_map(|part| {
+            let id = part.content_id()?.trim_matches(['<', '>']).to_string();
+            let mime_type = mime_of(&part);
+            (mime_type.starts_with("image/") && part.decoded_len() <= INLINE_IMAGE_LIMIT).then(|| InlineImage {
+                content_id: id,
+                mime_type,
+                data: part.decoded().into_owned(),
+            })
+        })
+        .collect();
     let attachments = message
         .attachments()
         .map(|part| Attachment {
             name: part.attachment_name().unwrap_or("(unnamed)").to_string(),
-            mime_type: part
-                .content_type()
-                .map(|c| match c.subtype() {
-                    Some(sub) => format!("{}/{}", c.ctype(), sub).to_ascii_lowercase(),
-                    None => c.ctype().to_ascii_lowercase(),
-                })
-                .unwrap_or_else(|| "application/octet-stream".into()),
+            mime_type: mime_of(&part),
             size: part.decoded_len() as u64,
         })
         .collect();
@@ -145,7 +168,22 @@ pub fn display(raw: &[u8]) -> Displayed {
         html,
         text,
         attachments,
+        inline_images,
     }
+}
+
+/// Embedded pictures larger than this are left as attachments.
+const INLINE_IMAGE_LIMIT: usize = 3 * 1024 * 1024;
+
+/// The name and contents of a message's attachment, by its position in
+/// [`Displayed::attachments`].
+pub fn attachment(raw: &[u8], index: usize) -> Option<(String, Vec<u8>)> {
+    let message = MessageParser::default().parse(raw)?;
+    let part = message.attachments().nth(index)?;
+    Some((
+        part.attachment_name().unwrap_or("attachment").to_string(),
+        part.decoded().into_owned(),
+    ))
 }
 
 fn first_address(address: &AddressList) -> (String, String) {
@@ -349,6 +387,23 @@ JVBERi0xLjQK\r\n--b--\r\n";
         assert_eq!(shown.attachments[0].name, "report.pdf");
         assert_eq!(shown.attachments[0].mime_type, "application/pdf");
         assert_eq!(shown.attachments[0].size, 9);
+        let (name, bytes) = attachment(raw, 0).unwrap();
+        assert_eq!((name.as_str(), bytes.as_slice()), ("report.pdf", &b"%PDF-1.4\n"[..]));
+        assert_eq!(attachment(raw, 1), None);
+    }
+
+    #[test]
+    fn pictures_embedded_by_content_id_are_found() {
+        let raw = b"From: a@example.com\r\nSubject: logo\r\nMIME-Version: 1.0\r\n\
+Content-Type: multipart/related; boundary=\"r\"\r\n\r\n\
+--r\r\nContent-Type: text/html\r\n\r\n<p>Hi</p><img src=\"cid:logo@x\">\r\n\
+--r\r\nContent-Type: image/png\r\nContent-ID: <logo@x>\r\nContent-Disposition: inline\r\n\
+Content-Transfer-Encoding: base64\r\n\r\niVBORw0KGgo=\r\n--r--\r\n";
+        let shown = display(raw);
+        assert_eq!(shown.inline_images.len(), 1);
+        assert_eq!(shown.inline_images[0].content_id, "logo@x");
+        assert_eq!(shown.inline_images[0].mime_type, "image/png");
+        assert_eq!(shown.inline_images[0].data, b"\x89PNG\r\n\x1a\n");
     }
 
     #[test]

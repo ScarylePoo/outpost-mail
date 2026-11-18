@@ -256,7 +256,7 @@ mod stored_mail {
             store.add_message(nested, &mail(40, "the alpha plan"), Flags::SEEN, None).unwrap();
         }
 
-        let core = Core::start_with(Config { data_dir: Some(data.clone()) }, |_| {}).unwrap();
+        let core = Core::start_with(Config { data_dir: Some(data.clone()), downloads_dir: None }, |_| {}).unwrap();
         let Response::Folders { folders } = core.handle(Command::ListFolders).unwrap() else {
             panic!("wrong response")
         };
@@ -346,8 +346,66 @@ mod stored_mail {
         assert!(html.contains("<b>you</b>") && !html.contains("steal") && !html.contains("t.example"), "{html}");
         assert!(message.remote_content_blocked);
 
+        // Saving an attachment: needs a downloads folder, never replaces
+        // a file, and cannot be steered outside the folder by its name.
+        assert_eq!(
+            core.handle(Command::SaveAttachment { folder: inbox.clone(), id: html_id, index: 0 }).unwrap_err().code,
+            ErrorCode::NotPossible
+        );
+        drop(core);
+        let downloads = data.join("downloads");
+        let core = Core::start_with(
+            Config { data_dir: Some(data.clone()), downloads_dir: Some(downloads.clone()) },
+            |_| {},
+        )
+        .unwrap();
+        let with_file = {
+            let store = Store::open(data.join("accounts/home")).unwrap();
+            let folder = store.index().folders().unwrap().into_iter().find(|f| f.path == "Inbox").unwrap();
+            let raw = b"From: x@example.com\r\nSubject: file\r\nMIME-Version: 1.0\r\n\
+Content-Type: multipart/mixed; boundary=\"b\"\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nsee file\r\n\
+--b\r\nContent-Type: text/plain; name=\"../../evil.txt\"\r\n\
+Content-Disposition: attachment; filename=\"../../evil.txt\"\r\n\r\npayload\r\n--b--\r\n";
+            store.add_message(folder.id, raw, Flags::SEEN, None).unwrap()
+        };
+        let save = || match core.handle(Command::SaveAttachment { folder: inbox.clone(), id: with_file, index: 0 }).unwrap() {
+            Response::AttachmentSaved { path, name } => (std::path::PathBuf::from(path), name),
+            other => panic!("{other:?}"),
+        };
+        let (first, name) = save();
+        assert_eq!(name, "_.._evil.txt");
+        assert_eq!(first.parent().unwrap(), downloads);
+        assert_eq!(std::fs::read_to_string(&first).unwrap().trim(), "payload");
+        let (second, name) = save();
+        assert_eq!(name, "_.._evil (2).txt");
+        assert!(first.exists() && second.exists());
+        assert!(!data.join("evil.txt").exists() && !data.parent().unwrap().join("evil.txt").exists());
+        assert_eq!(
+            core.handle(Command::SaveAttachment { folder: inbox.clone(), id: with_file, index: 5 }).unwrap_err().code,
+            ErrorCode::UnknownMessage
+        );
+
         drop(core);
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn file_names_from_mail_are_made_safe() {
+        use outpost_core::safe_file_name as safe;
+        assert_eq!(safe("report.pdf"), "report.pdf");
+        assert_eq!(safe("Übersicht 2026.xlsx"), "Übersicht 2026.xlsx");
+        assert_eq!(safe("../../etc/passwd"), "_.._etc_passwd");
+        assert_eq!(safe("C:\\Windows\\x.dll"), "C__Windows_x.dll");
+        assert_eq!(safe(".bashrc"), "bashrc");
+        assert_eq!(safe("con.txt"), "attachment con.txt");
+        assert_eq!(safe("COM1"), "attachment COM1");
+        assert_eq!(safe(""), "attachment");
+        assert_eq!(safe("   "), "attachment");
+        assert_eq!(safe("trailing. . "), "trailing");
+        assert_eq!(safe("a\u{0}b\nc"), "a_b_c");
+        let long = format!("{}.pdf", "x".repeat(400));
+        assert_eq!(safe(&long).chars().count(), 120);
+        assert!(safe(&long).ends_with(".pdf"));
     }
 }
 
@@ -365,7 +423,7 @@ mod folder_tree {
                 store.create_folder(folder).unwrap();
             }
         }
-        let core = Core::start_with(Config { data_dir: Some(data.clone()) }, |_| {}).unwrap();
+        let core = Core::start_with(Config { data_dir: Some(data.clone()), downloads_dir: None }, |_| {}).unwrap();
         let Response::Folders { folders } = core.handle(Command::ListFolders).unwrap() else { panic!() };
         drop(core);
         let _ = std::fs::remove_dir_all(&data);

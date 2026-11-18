@@ -116,7 +116,11 @@ First check the address and certificate, which needs no password:
 
 ```sh
 target/release/outpost-sync check --host mail.example.com
+target/release/outpost-sync check-smtp --host mail.example.com   # the outgoing server
 ```
+
+`check-smtp` tries port 465 (TLS) and 587 (STARTTLS) and says which work. It
+signs in to nothing and sends nothing.
 
 Then a single pass, with a check that nothing changed on the server:
 

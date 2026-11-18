@@ -193,27 +193,17 @@ fn wire_form(message: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Sends one message. `from` and `recipients` are bare addresses: the
-/// envelope, which is separate from the headers inside `message`.
-pub async fn send(
-    server: &SmtpServer,
-    username: &str,
-    password: &str,
-    from: &str,
-    recipients: &[String],
-    message: &[u8],
-) -> Result<(), SendError> {
-    if recipients.is_empty() {
-        return Err(SendError::Refused("the message has no recipients".into()));
-    }
-    for address in recipients.iter().map(String::as_str).chain([from]) {
-        // An address is put between angle brackets on a command line; one
-        // that could break out of them is never sent.
-        if address.is_empty() || address.contains(['<', '>', '\r', '\n', ' ']) {
-            return Err(SendError::Refused(format!("{address:?} is not a usable address")));
-        }
-    }
+/// Connects, secures the connection as asked, and returns what the server
+/// says it supports, without signing in or sending anything. A way to check
+/// an outgoing server's address, port and certificate.
+pub async fn probe(server: &SmtpServer) -> Result<Vec<String>, SendError> {
+    let (mut smtp, ehlo) = greet(server).await?;
+    let _ = smtp.write(b"QUIT\r\n").await;
+    Ok(ehlo.lines.into_iter().skip(1).collect())
+}
 
+/// Connects and gets as far as an encrypted (if asked for) greeting.
+async fn greet(server: &SmtpServer) -> Result<(Conversation, Reply), SendError> {
     let tcp = tokio::time::timeout(STEP_TIMEOUT, TcpStream::connect((server.host.as_str(), server.port)))
         .await
         .map_err(|_| unavailable("connecting timed out"))?
@@ -240,6 +230,31 @@ pub async fn send(
         smtp = Conversation { stream: secure(stream, server).await?, buffer: Vec::new() };
         ehlo = smtp.command(HELLO, 250).await?;
     }
+    Ok((smtp, ehlo))
+}
+
+/// Sends one message. `from` and `recipients` are bare addresses: the
+/// envelope, which is separate from the headers inside `message`.
+pub async fn send(
+    server: &SmtpServer,
+    username: &str,
+    password: &str,
+    from: &str,
+    recipients: &[String],
+    message: &[u8],
+) -> Result<(), SendError> {
+    if recipients.is_empty() {
+        return Err(SendError::Refused("the message has no recipients".into()));
+    }
+    for address in recipients.iter().map(String::as_str).chain([from]) {
+        // An address is put between angle brackets on a command line; one
+        // that could break out of them is never sent.
+        if address.is_empty() || address.contains(['<', '>', '\r', '\n', ' ']) {
+            return Err(SendError::Refused(format!("{address:?} is not a usable address")));
+        }
+    }
+
+    let (mut smtp, ehlo) = greet(server).await?;
 
     // Sign in. Without a way to sign in, only a local unencrypted server
     // (a test server) is used as it is.

@@ -84,14 +84,46 @@ Outlook's where they exist: Ctrl+N new, Ctrl+R reply, Ctrl+Shift+R reply all,
 Ctrl+F forward, Del delete, Backspace archive, Ctrl+Q read, Ctrl+U unread,
 Insert flag. Opening a message marks it read.
 
+### Several messages at once
+
+Ctrl-click, Shift-click, Shift with the arrow keys, and Ctrl+A select several
+messages; delete, archive, move, read/unread and flag then apply to all of
+them (up to 5,000 at a time). Reply and forward act on the current one. A
+selection of several does not survive the list refreshing, which every action
+causes; the row now in the same place is selected instead, so Delete can be
+pressed repeatedly.
+
+### Folders
+
+A folder can be created (the `+` beside the account name) and an ordinary,
+empty-of-subfolders folder deleted (a button in the list header, after a
+yes-or-no question). Both go through the queue, so they work offline, and
+mail can be filed into a new folder before the server has heard of it. On
+servers that keep every folder inside the inbox, a new top-level folder is
+created inside the inbox, where it will appear beside the others. Not built:
+renaming or moving a folder, creating one inside another from the interface,
+and subscription management.
+
+### Found while testing the window end to end
+
+Two interface bugs that no core test could see, both fixed: clearing a search
+left the toolbar acting on nothing although a message looked selected; and the
+reading pane reloaded the open message on every list refresh, which silently
+marked it read again a moment after the user marked it unread.
+
+### Finding: the outgoing path works against real servers as far as the greeting
+
+`outpost-sync check-smtp` connects, secures the connection and reads the
+server's capabilities without signing in. Against a public provider and the
+owner's host, both TLS on port 465 and the STARTTLS upgrade on 587 work with
+certificates accepted. Signing in and sending for real are still untested.
+
 ### Still to do in milestone 4
 
-- Acting on several messages at once (the list selects one).
-- Creating, renaming and deleting folders.
-- **Real servers.** The outgoing path has only met the fake server: real
-  TLS and STARTTLS submission, and a real provider's quirks, are untested.
-  Moving, deleting and flagging have only met Dovecot.
-- The owner's "full day on his main account, including offline".
+- **The owner's "full day on his main account, including offline".** This is
+  the milestone's "done when", and the first time any of this meets a real
+  server: sending for real, and moving, deleting and flagging real mail.
+- Renaming folders; saving drafts as you type; rich text; drag-and-drop.
 - **Upgrades lose the queue.** The index is still discarded and rebuilt when
   its format changes, and the queue lives in it. Mail is never lost (unsent
   messages stay in the outbox as files) but queued changes would be. A real

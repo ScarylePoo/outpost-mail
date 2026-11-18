@@ -38,6 +38,7 @@ struct Args {
 
 const USAGE: &str = "usage:
   outpost-sync check --host HOST [--port 993] [--plaintext]
+  outpost-sync check-smtp --host HOST [--port 465|587]
   outpost-sync sync  --data DIR --account NAME --host HOST --user USER
                      [--port 993] [--plaintext] [--once] [--no-verify] [--all-mail]";
 
@@ -102,6 +103,28 @@ async fn check(args: &Args) -> Result<(), String> {
     let missing: Vec<&str> = wanted.iter().copied().filter(|c| !capabilities.iter().any(|x| x == c)).collect();
     if !missing.is_empty() {
         println!("Not advertised yet (servers often add more after sign-in): {}", missing.join(" "));
+    }
+    Ok(())
+}
+
+/// Checks an outgoing server without signing in or sending anything.
+async fn check_smtp(args: &Args) -> Result<(), String> {
+    use outpost_core::smtp::{probe, SmtpSecurity, SmtpServer};
+    let host = args.host.clone().ok_or("--host is required")?;
+    // Unless a port was given, try the two usual ones.
+    let attempts: Vec<(u16, SmtpSecurity, &str)> = match args.port {
+        993 => vec![(465, SmtpSecurity::Tls, "tls"), (587, SmtpSecurity::StartTls, "starttls")],
+        587 => vec![(587, SmtpSecurity::StartTls, "starttls")],
+        port => vec![(port, SmtpSecurity::Tls, "tls")],
+    };
+    for (port, security, name) in attempts {
+        let server = SmtpServer { host: host.clone(), port, security, trusted_certificate: None };
+        match probe(&server).await {
+            Ok(capabilities) => {
+                println!("Port {port} ({name}): works, certificate accepted. The server offers: {}", capabilities.join(", "));
+            }
+            Err(e) => println!("Port {port} ({name}): {e}"),
+        }
     }
     Ok(())
 }
@@ -232,6 +255,7 @@ async fn main() -> ExitCode {
     };
     let result = match args.command.as_str() {
         "check" => check(&args).await,
+        "check-smtp" => check_smtp(&args).await,
         "sync" => run_sync(&args).await,
         other => Err(format!("unknown command {other}\n\n{USAGE}")),
     };

@@ -120,7 +120,16 @@ export async function runScrollTest(
       longestBlank,
     });
   }
+  // Can the very last message be reached? (It could not, in folders taller
+  // than the engine's maximum element height, before the list was scaled.)
+  scroller.scrollTop = scroller.scrollHeight;
+  await nextFrame();
+  await nextFrame();
+  const lastSeen = list.visibleRange()[1];
   scroller.scrollTop = 0;
+  await nextFrame();
+  await nextFrame();
+  const firstSeen = list.visibleRange()[0];
 
   const ms = (n: number) => n.toFixed(1).padStart(6);
   const lines = [
@@ -144,6 +153,7 @@ export async function runScrollTest(
     "",
     `Slow frames: ${slow} of ${frames} (${((100 * slow) / Math.max(1, frames)).toFixed(1)}%).  Frames with a blank row: ${blank}.`,
     "Times are ms per frame. 'slow' = more than 1.5 display intervals.",
+    `Ends reachable: top ${firstSeen === 0 ? "yes" : "NO"}, bottom ${lastSeen === list.rowCount() - 1 ? "yes" : `NO (stopped at row ${lastSeen + 1} of ${list.rowCount()})`}.`,
   );
   return lines.join("\n");
 }

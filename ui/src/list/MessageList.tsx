@@ -14,12 +14,16 @@ const PAGE = 200;
 /** Rows kept rendered above and below the visible ones. */
 const OVERSCAN = 12;
 const MAX_CACHED_PAGES = 80;
+/** The tallest scrollable area used. Well inside every engine's limit. */
+const MAX_SCROLL_HEIGHT = 8_000_000;
 
 export interface ListHandle {
   scroller: HTMLElement;
   /** Visible rows whose data has not arrived yet. Should be 0. */
   blankVisible(): number;
   rowCount(): number;
+  /** First and last row positions currently in view. */
+  visibleRange(): [number, number];
   /** Selects the row at this position and scrolls it into view. */
   select(index: number): void;
   /**
@@ -49,6 +53,17 @@ export function MessageList(props: {
   let refreshing = false;
   let refreshAgain = false;
   let lastTop = 0;
+  // Where the view is in the content. Usually just the scroll position, but
+  // browser engines cannot make an element taller than about 33 million
+  // pixels, which a folder of a few hundred thousand messages exceeds. Past
+  // MAX_SCROLL_HEIGHT the scrollbar covers a shorter stand-in height and
+  // `virtualTop` is the real position, with rows shifted to match.
+  let virtualTop = 0;
+  let scaled = false;
+  let lastNative = 0;
+  let expectedNative = -1;
+  let fineUntil = 0;
+  let resync: ReturnType<typeof setTimeout> | undefined;
   let visFirst = 0;
   let visLast = -1;
 
@@ -62,6 +77,8 @@ export function MessageList(props: {
   /** Bumped when row positions change. */
   const [layoutTick, setLayoutTick] = createSignal(0);
   const [selected, setSelected] = createSignal(-1);
+  /** Native scroll position minus `virtualTop`. 0 unless the list is scaled. */
+  const [shift, setShift] = createSignal(0);
   /** Row count, for the parts of the view that react to it. */
   const [total, setTotal] = createSignal(0);
 
@@ -99,6 +116,62 @@ export function MessageList(props: {
     for (const p of far.slice(0, pages.size - MAX_CACHED_PAGES)) pages.delete(p);
   }
 
+  const contentHeight = () => layout.offsets[count()] ?? 0;
+  const maxVirtual = () => Math.max(0, contentHeight() - scroller.clientHeight);
+  const maxNative = () => Math.max(0, Math.min(contentHeight(), MAX_SCROLL_HEIGHT) - scroller.clientHeight);
+
+  /** Call after the layout changes: sizes the scrollable area. */
+  function resize() {
+    scaled = contentHeight() > MAX_SCROLL_HEIGHT;
+    setHeight(Math.min(contentHeight(), MAX_SCROLL_HEIGHT));
+  }
+
+  /** Moves the view to a position in the content. */
+  function setTop(position: number) {
+    virtualTop = Math.max(0, Math.min(maxVirtual(), position));
+    const native = scaled && maxVirtual() > 0 ? (virtualTop * maxNative()) / maxVirtual() : virtualTop;
+    scroller.scrollTop = native;
+    lastNative = scroller.scrollTop;
+    expectedNative = lastNative;
+    setShift(scaled ? lastNative - virtualTop : 0);
+  }
+
+  function onScroll() {
+    const native = scroller.scrollTop;
+    if (!scaled) {
+      virtualTop = native;
+    } else if (Math.abs(native - expectedNative) < 1) {
+      // Our own setTop: virtualTop is already right.
+    } else {
+      if (performance.now() < fineUntil) {
+        // Wheel, touch and keys move the content by exactly what they
+        // moved the scrollbar, so scrolling feels the same at any size.
+        virtualTop += native - lastNative;
+      } else {
+        // Dragging the scrollbar covers the whole folder proportionally.
+        virtualTop = maxNative() > 0 ? (native * maxVirtual()) / maxNative() : 0;
+      }
+      if (native <= 0) virtualTop = 0;
+      if (native >= maxNative() - 0.5) virtualTop = maxVirtual();
+      virtualTop = Math.max(0, Math.min(maxVirtual(), virtualTop));
+      // Once scrolling pauses, put the scrollbar where the content is.
+      clearTimeout(resync);
+      resync = setTimeout(() => {
+        setTop(virtualTop);
+        update();
+      }, 150);
+    }
+    expectedNative = -1;
+    lastNative = native;
+    setShift(scaled ? native - virtualTop : 0);
+    update();
+  }
+
+  /** Marks the scrolling that follows as fine-grained (not a scrollbar drag). */
+  function fine() {
+    fineUntil = performance.now() + 250;
+  }
+
   function update() {
     const n = count();
     if (n === 0) {
@@ -107,7 +180,7 @@ export function MessageList(props: {
       setSlots([]);
       return;
     }
-    const top = scroller.scrollTop;
+    const top = virtualTop;
     const viewHeight = scroller.clientHeight;
     visFirst = rowAt(layout, top);
     visLast = rowAt(layout, top + viewHeight);
@@ -131,14 +204,14 @@ export function MessageList(props: {
   /** Recomputes row positions, keeping the top visible row where it is. */
   function relayout() {
     const anchor = visFirst;
-    const into = count() > 0 ? scroller.scrollTop - layout.offsets[anchor]! : 0;
+    const into = count() > 0 ? virtualTop - layout.offsets[anchor]! : 0;
     layout = buildLayout(previewLens, width);
     setTotal(count());
-    setHeight(layout.offsets[count()]!);
+    resize();
     setLayoutTick((t) => t + 1);
     if (count() > 0) {
-      // The spacer must have its new height before scrollTop can be set.
-      scroller.scrollTop = layout.offsets[Math.min(anchor, count() - 1)]! + Math.max(0, into);
+      // The spacer must have its new height before the position can be set.
+      setTop(layout.offsets[Math.min(anchor, count() - 1)]! + Math.max(0, into));
     }
     update();
   }
@@ -155,7 +228,7 @@ export function MessageList(props: {
     try {
       // Remember what is at the top of the view, by message rather than by
       // position: positions shift when mail arrives above it.
-      const top = scroller.scrollTop;
+      const top = virtualTop;
       let anchor: { id: number; into: number } | undefined;
       if (top > 4) {
         for (let i = visFirst; i <= visLast; i++) {
@@ -210,10 +283,10 @@ export function MessageList(props: {
       previewLens = fresh.previewLens;
       layout = nextLayout;
       setTotal(n);
-      setHeight(layout.offsets[n]!);
+      resize();
       setLayoutTick((t) => t + 1);
-      scroller.scrollTop = nextTop;
-      lastTop = nextTop;
+      setTop(nextTop);
+      lastTop = virtualTop;
       if (selectedIndex === null) selectedId = undefined;
       setSelected(selectedIndex ?? -1);
       setDataTick((t) => t + 1);
@@ -236,10 +309,10 @@ export function MessageList(props: {
     if (!reveal) return;
     const top = layout.offsets[i]!;
     const bottom = layout.offsets[i + 1]!;
-    if (top < scroller.scrollTop) scroller.scrollTop = top;
-    else if (bottom > scroller.scrollTop + scroller.clientHeight) {
-      scroller.scrollTop = bottom - scroller.clientHeight;
-    }
+    if (top < virtualTop) setTop(top);
+    else if (bottom > virtualTop + scroller.clientHeight) setTop(bottom - scroller.clientHeight);
+    else return;
+    update();
   }
 
   function onKeyDown(e: KeyboardEvent) {
@@ -256,6 +329,7 @@ export function MessageList(props: {
     const target = to[e.key];
     if (target === undefined) return;
     e.preventDefault();
+    fine();
     select(Math.max(0, Math.min(count() - 1, target)), true);
   }
 
@@ -273,6 +347,9 @@ export function MessageList(props: {
         visFirst = 0;
         visLast = -1;
         lastTop = 0;
+        virtualTop = 0;
+        scaled = false;
+        setShift(0);
         setSelected(-1);
         setSlots([]);
         setTotal(0);
@@ -284,7 +361,6 @@ export function MessageList(props: {
           .then((r) => {
             if (gen !== generation) return;
             previewLens = r.previewLens;
-            scroller.scrollTop = 0;
             relayout();
             setStatus("ready");
           })
@@ -318,10 +394,14 @@ export function MessageList(props: {
       }
     });
     observer.observe(scroller);
-    onCleanup(() => observer.disconnect());
+    onCleanup(() => {
+      observer.disconnect();
+      clearTimeout(resync);
+    });
     props.handle?.({
       scroller,
       rowCount: count,
+      visibleRange: () => [visFirst, visLast],
       select: (index) => select(index, true),
       refresh: () => void refresh(),
       blankVisible() {
@@ -339,7 +419,9 @@ export function MessageList(props: {
       tabindex="0"
       role="listbox"
       aria-label="Messages"
-      onScroll={update}
+      onScroll={onScroll}
+      onWheel={fine}
+      onTouchMove={fine}
       onKeyDown={onKeyDown}
     >
       <div class="list-spacer" style={{ height: `${height()}px` }}>
@@ -349,7 +431,7 @@ export function MessageList(props: {
               dataTick();
               return index() >= 0 ? getRow(index()) : undefined;
             });
-            const top = () => (layoutTick(), index() >= 0 ? layout.offsets[index()]! : 0);
+            const top = () => (layoutTick(), index() >= 0 ? layout.offsets[index()]! + shift() : 0);
             const lines = () => (layoutTick(), index() >= 0 ? layout.lines[index()]! : 0);
             return (
               <div

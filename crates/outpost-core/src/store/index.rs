@@ -16,7 +16,7 @@ use std::sync::{Mutex, MutexGuard};
 type Result<T> = std::result::Result<T, StoreError>;
 
 /// Bump when the schema changes, and add a step to `migrate`.
-const SCHEMA_VERSION: i32 = 6;
+const SCHEMA_VERSION: i32 = 7;
 
 const TABLES: &str = r#"
 CREATE TABLE folder (
@@ -78,6 +78,10 @@ CREATE TABLE message (
     link_guessed   INTEGER NOT NULL DEFAULT 0,
     -- The subject without reply and forward prefixes, lower-cased.
     subject_key    TEXT NOT NULL DEFAULT '',
+    -- 1 for the newest message of its conversation within its folder: the
+    -- one that stands for the conversation in the folder's list. Kept up
+    -- to date by triggers (see TRIGGERS).
+    is_head        INTEGER NOT NULL DEFAULT 0,
     preview        TEXT NOT NULL,
     preview_len    INTEGER NOT NULL,
     -- Sender-check verdict (milestone 6). 0 = not checked.
@@ -92,9 +96,6 @@ CREATE TABLE reference_to (
 );
 CREATE INDEX reference_ref ON reference_to(ref);
 CREATE INDEX reference_message ON reference_to(message);
-CREATE TRIGGER message_gone AFTER DELETE ON message BEGIN
-    DELETE FROM reference_to WHERE message = OLD.id;
-END;
 
 -- What the user has done that the server has not been told yet, in order.
 -- See store/actions.rs.
@@ -129,6 +130,10 @@ const INDEXES: &[(&str, &str)] = &[
     ("message_msgid", "CREATE INDEX IF NOT EXISTS message_msgid ON message(message_id) WHERE message_id != ''"),
     ("message_unread", "CREATE INDEX IF NOT EXISTS message_unread ON message(folder_id) WHERE (flags & 1) = 0"),
     ("message_rename", "CREATE INDEX IF NOT EXISTS message_rename ON message(id) WHERE flags != file_flags AND base != ''"),
+    // Serves the conversation list exactly as message_list serves the
+    // message list: one entry per conversation in the folder.
+    ("message_heads", "CREATE INDEX IF NOT EXISTS message_heads ON message(folder_id, sort_key DESC, preview_len) WHERE is_head = 1"),
+    ("message_folder_thread", "CREATE INDEX IF NOT EXISTS message_folder_thread ON message(folder_id, thread_id, sort_key)"),
     ("message_thread", "CREATE INDEX IF NOT EXISTS message_thread ON message(thread_id)"),
     ("message_subject", "CREATE INDEX IF NOT EXISTS message_subject ON message(subject_key, date) WHERE subject_key != ''"),
     ("message_nobody", "CREATE INDEX IF NOT EXISTS message_nobody ON message(folder_id, sort_key DESC) WHERE base = ''"),
@@ -144,6 +149,33 @@ pub struct FolderRow {
     /// What the server says the folder is for (`sent`, `trash`, …), if it says.
     pub special_use: Option<String>,
 }
+
+/// Keeps `is_head` true for exactly the newest message of each conversation
+/// in each folder, whatever happens to a message: it arrives, is linked into
+/// a conversation, moves to another folder, or goes. Dropped during a bulk
+/// load, which sets every head at once at the end.
+const TRIGGERS: &[(&str, &str)] = &[
+    (
+        "message_moved",
+        "CREATE TRIGGER IF NOT EXISTS message_moved AFTER UPDATE OF thread_id, folder_id ON message BEGIN
+            UPDATE message SET is_head = (sort_key = (SELECT max(sort_key) FROM message
+                WHERE folder_id = OLD.folder_id AND thread_id IS OLD.thread_id))
+              WHERE folder_id = OLD.folder_id AND thread_id IS OLD.thread_id;
+            UPDATE message SET is_head = (sort_key = (SELECT max(sort_key) FROM message
+                WHERE folder_id = NEW.folder_id AND thread_id IS NEW.thread_id))
+              WHERE folder_id = NEW.folder_id AND thread_id IS NEW.thread_id;
+         END",
+    ),
+    (
+        "message_gone",
+        "CREATE TRIGGER IF NOT EXISTS message_gone AFTER DELETE ON message BEGIN
+            DELETE FROM reference_to WHERE message = OLD.id;
+            UPDATE message SET is_head = (sort_key = (SELECT max(sort_key) FROM message
+                WHERE folder_id = OLD.folder_id AND thread_id IS OLD.thread_id))
+              WHERE folder_id = OLD.folder_id AND thread_id IS OLD.thread_id;
+         END",
+    ),
+];
 
 /// A message to add to the index.
 #[derive(Debug, Clone)]
@@ -190,6 +222,19 @@ fn list_row(row: &rusqlite::Row) -> rusqlite::Result<ListRow> {
         flags: Flags(row.get(8)?),
         has_attachment: row.get(9)?,
     })
+}
+
+/// A conversation as a folder's list shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConversationRow {
+    /// Its newest message in the folder.
+    pub head: ListRow,
+    /// How many messages the whole conversation has, in every folder.
+    pub count: u32,
+    /// How many of them are unread.
+    pub unread: u32,
+    /// Who wrote in it, earliest first: (name, address).
+    pub senders: Vec<(String, String)>,
 }
 
 /// Where a message's file is.
@@ -432,6 +477,91 @@ impl Index {
         })
     }
 
+    // ---- conversations ----------------------------------------------------
+
+    /// The preview length of the message standing for each conversation in
+    /// a folder, in list order.
+    pub fn conversation_lens(&self, folder_id: i64) -> Result<Vec<u16>> {
+        self.read(|conn| {
+            conn.prepare_cached(
+                "SELECT preview_len FROM message WHERE folder_id = ?1 AND is_head = 1 ORDER BY sort_key DESC",
+            )?
+            .query_map([folder_id], |r| r.get(0))?
+            .collect()
+        })
+    }
+
+    /// How many conversations a folder holds.
+    pub fn conversation_total(&self, folder_id: i64) -> Result<u32> {
+        self.read(|conn| {
+            conn.prepare_cached("SELECT count(*) FROM message WHERE folder_id = ?1 AND is_head = 1")?
+                .query_row([folder_id], |r| r.get(0))
+        })
+    }
+
+    /// One page of a folder's conversations, newest first: for each, its
+    /// newest message in the folder, with what the list shows about the
+    /// conversation as a whole.
+    pub fn conversation_page(&self, folder_id: i64, offset: u32, limit: u32) -> Result<Vec<ConversationRow>> {
+        self.read(|conn| {
+            let heads: Vec<(ListRow, Option<i64>)> = conn
+                .prepare_cached(&format!(
+                    "SELECT {LIST_COLUMNS}, m.thread_id FROM message m
+                     WHERE m.folder_id = ?1 AND m.is_head = 1
+                     ORDER BY m.sort_key DESC LIMIT ?2 OFFSET ?3"
+                ))?
+                .query_map(params![folder_id, limit, offset], |r| Ok((list_row(r)?, r.get(10)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let mut counts = conn.prepare_cached(
+                // A copy of a message kept in another folder counts once.
+                "SELECT count(DISTINCT CASE WHEN message_id = '' THEN id ELSE message_id END),
+                        count(DISTINCT CASE WHEN (flags & 1) = 0 THEN
+                              CASE WHEN message_id = '' THEN id ELSE message_id END END)
+                 FROM message WHERE thread_id = ?1",
+            )?;
+            let mut people = conn.prepare_cached(
+                "SELECT from_name, from_addr FROM message WHERE thread_id = ?1 ORDER BY date, id LIMIT 60",
+            )?;
+            let mut out = Vec::with_capacity(heads.len());
+            for (head, thread) in heads {
+                let Some(thread) = thread else {
+                    out.push(ConversationRow { senders: vec![(head.from_name.clone(), head.from_addr.clone())], head, count: 1, unread: 0 });
+                    continue;
+                };
+                let (count, unread): (u32, u32) = counts.query_row([thread], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                let mut senders: Vec<(String, String)> = Vec::new();
+                if count > 1 {
+                    let all = people.query_map([thread], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+                    for sender in all {
+                        let sender = sender?;
+                        if !senders.iter().any(|s| s.1.eq_ignore_ascii_case(&sender.1)) {
+                            senders.push(sender);
+                        }
+                    }
+                } else {
+                    senders.push((head.from_name.clone(), head.from_addr.clone()));
+                }
+                out.push(ConversationRow { head, count, unread, senders });
+            }
+            Ok(out)
+        })
+    }
+
+    /// Where the conversation a message belongs to is in its folder's
+    /// conversation list (0 is the top).
+    pub fn conversation_position(&self, folder_id: i64, id: i64) -> Result<Option<u32>> {
+        self.read(|conn| {
+            conn.prepare_cached(
+                "SELECT (SELECT count(*) FROM message WHERE folder_id = ?1 AND is_head = 1 AND sort_key > h.sort_key)
+                 FROM message m JOIN message h
+                   ON h.folder_id = ?1 AND h.thread_id IS m.thread_id AND h.is_head = 1
+                 WHERE m.id = ?2 LIMIT 1",
+            )?
+            .query_row(params![folder_id, id], |r| r.get(0))
+            .optional()
+        })
+    }
+
     /// The preview length of every message in a folder, in list order.
     pub fn preview_lens(&self, folder_id: i64) -> Result<Vec<u16>> {
         self.read(|conn| {
@@ -515,6 +645,9 @@ impl Index {
         for (name, _) in INDEXES {
             conn.execute_batch(&format!("DROP INDEX IF EXISTS {name}"))?;
         }
+        for (name, _) in TRIGGERS {
+            conn.execute_batch(&format!("DROP TRIGGER IF EXISTS {name}"))?;
+        }
         // Rows are loaded into a staging table in a scratch file, in whatever
         // order they arrive, and copied into place in list order at the end.
         let staging = staging_path(&self.path);
@@ -552,7 +685,7 @@ impl Drop for Bulk<'_> {
         let _ = self.conn.execute_batch("ROLLBACK");
         let _ = self.conn.execute_batch("DETACH DATABASE load");
         let _ = std::fs::remove_file(&self.staging);
-        for (_, sql) in INDEXES {
+        for (_, sql) in INDEXES.iter().chain(TRIGGERS) {
             let _ = self.conn.execute_batch(sql);
         }
     }
@@ -612,6 +745,16 @@ impl Bulk<'_> {
         // before the indexes that their columns feed are built.
         super::thread::link_all(&self.conn, |_, _| {})?;
         for (_, sql) in INDEXES {
+            self.conn.execute_batch(sql)?;
+        }
+        // The newest message of each conversation in each folder stands for
+        // it in that folder's list.
+        self.conn.execute_batch(
+            "UPDATE message SET is_head = 0 WHERE is_head != 0;
+             UPDATE message SET is_head = 1 WHERE sort_key IN
+               (SELECT max(sort_key) FROM message GROUP BY folder_id, thread_id)",
+        )?;
+        for (_, sql) in TRIGGERS {
             self.conn.execute_batch(sql)?;
         }
         self.conn.execute_batch(
@@ -748,7 +891,7 @@ fn migrate(conn: &Connection) -> Result<bool> {
         0 => {
             conn.execute_batch("BEGIN")?;
             conn.execute_batch(TABLES)?;
-            for (_, sql) in INDEXES {
+            for (_, sql) in INDEXES.iter().chain(TRIGGERS) {
                 conn.execute_batch(sql)?;
             }
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;

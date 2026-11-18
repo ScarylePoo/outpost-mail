@@ -15,17 +15,19 @@ fn commands_decode_from_the_documented_json() {
         (json!({"type": "ping"}), Command::Ping),
         (json!({"type": "listFolders"}), Command::ListFolders),
         (
-            json!({"type": "folderLayout", "folder": "demo/inbox"}),
+            json!({"type": "folderLayout", "folder": "demo/inbox", "conversations": false}),
             Command::FolderLayout {
                 folder: "demo/inbox".into(),
+                conversations: false,
             },
         ),
         (
-            json!({"type": "listMessages", "folder": "demo/inbox", "offset": 5, "limit": 2}),
+            json!({"type": "listMessages", "folder": "demo/inbox", "offset": 5, "limit": 2, "conversations": false}),
             Command::ListMessages {
                 folder: "demo/inbox".into(),
                 offset: 5,
                 limit: 2,
+                conversations: false,
             },
         ),
         (
@@ -44,10 +46,11 @@ fn commands_decode_from_the_documented_json() {
             },
         ),
         (
-            json!({"type": "locateMessage", "folder": "demo/inbox", "id": 7}),
+            json!({"type": "locateMessage", "folder": "demo/inbox", "id": 7, "conversations": false}),
             Command::LocateMessage {
                 folder: "demo/inbox".into(),
                 id: 7,
+                conversations: false,
             },
         ),
         (json!({"type": "listAccounts"}), Command::ListAccounts),
@@ -104,7 +107,10 @@ fn a_message_row_has_exactly_the_fields_the_interface_expects() {
             "preview",
             "senderAddress",
             "senderName",
+            "senders",
             "subject",
+            "threadCount",
+            "threadUnread",
             "unread"
         ]
     );
@@ -153,6 +159,7 @@ fn pages_are_clamped_to_the_folder_and_to_max_page() {
             folder: "demo/inbox".into(),
             offset,
             limit,
+            conversations: false,
         })
         .unwrap()
     {
@@ -187,6 +194,7 @@ fn layout_agrees_with_the_rows() {
     } = core
         .handle(Command::FolderLayout {
             folder: "demo/small".into(),
+            conversations: false,
         })
         .unwrap()
     else {
@@ -197,6 +205,7 @@ fn layout_agrees_with_the_rows() {
             folder: "demo/small".into(),
             offset: 0,
             limit: 1000,
+            conversations: false,
         })
         .unwrap()
     else {
@@ -218,6 +227,7 @@ fn errors_are_reported_not_panicked() {
             folder: "nope".into(),
             offset: 0,
             limit: 1,
+            conversations: false,
         })
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::UnknownFolder);
@@ -275,14 +285,14 @@ mod stored_mail {
         let inbox = folders[1].id.clone();
 
         let Response::FolderLayout { total, preview_lens, .. } =
-            core.handle(Command::FolderLayout { folder: inbox.clone() }).unwrap()
+            core.handle(Command::FolderLayout { folder: inbox.clone(), conversations: false }).unwrap()
         else {
             panic!("wrong response")
         };
         assert_eq!((total, preview_lens.len()), (30, 30));
 
         let Response::Messages { offset, total, rows, .. } = core
-            .handle(Command::ListMessages { folder: inbox.clone(), offset: 25, limit: 50 })
+            .handle(Command::ListMessages { folder: inbox.clone(), offset: 25, limit: 50, conversations: false })
             .unwrap()
         else {
             panic!("wrong response")
@@ -315,7 +325,7 @@ mod stored_mail {
             "mail that is only browsed has no server to sync with"
         );
         let Response::Located { index } =
-            core.handle(Command::LocateMessage { folder: inbox.clone(), id: rows[4].id }).unwrap()
+            core.handle(Command::LocateMessage { folder: inbox.clone(), id: rows[4].id, conversations: false }).unwrap()
         else {
             panic!("wrong response")
         };
@@ -325,7 +335,7 @@ mod stored_mail {
         assert_eq!((accounts[0].name.as_str(), accounts[0].status.state), ("home", SyncState::NotSyncing));
 
         for bad in ["acct/home/999", "acct/nobody", "acct/home/x"] {
-            let err = core.handle(Command::FolderLayout { folder: bad.into() }).unwrap_err();
+            let err = core.handle(Command::FolderLayout { folder: bad.into(), conversations: false }).unwrap_err();
             assert_eq!(err.code, ErrorCode::UnknownFolder, "{bad}");
         }
         // Reading: text and (made safe) HTML, and what is not there.
@@ -438,13 +448,39 @@ mod conversations {
         let Response::Folders { folders } = core.handle(Command::ListFolders).unwrap() else { panic!() };
         let inbox = folders.iter().find(|f| f.role.as_deref() == Some("inbox")).unwrap().id.clone();
         let Response::Messages { rows, .. } =
-            core.handle(Command::ListMessages { folder: inbox.clone(), offset: 0, limit: 10 }).unwrap()
+            core.handle(Command::ListMessages { folder: inbox.clone(), offset: 0, limit: 10, conversations: false }).unwrap()
         else {
             panic!()
         };
         let Response::Thread { thread } = core.handle(Command::OpenThread { folder: inbox, id: rows[0].id }).unwrap() else {
             panic!()
         };
+        // The inbox as conversations: one row for the three messages, shown
+        // by its newest message there, with the user's own reply counted.
+        let inbox_id = folders.iter().find(|f| f.role.as_deref() == Some("inbox")).unwrap().id.clone();
+        let Response::Messages { rows: conversations, total, .. } = core
+            .handle(Command::ListMessages { folder: inbox_id.clone(), offset: 0, limit: 10, conversations: true })
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!((total, conversations.len()), (1, 1));
+        assert_eq!(conversations[0].subject, "Re: Cutover window");
+        assert_eq!((conversations[0].thread_count, conversations[0].thread_unread), (3, 1));
+        assert_eq!(conversations[0].senders, "Dana, Ben");
+        let Response::FolderLayout { total, .. } =
+            core.handle(Command::FolderLayout { folder: inbox_id.clone(), conversations: true }).unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(total, 1);
+        let Response::Located { index } = core
+            .handle(Command::LocateMessage { folder: inbox_id, id: rows[1].id, conversations: true })
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(index, Some(0));
         assert_eq!(thread.subject, "Cutover window");
         let m = &thread.messages;
         assert_eq!(m.len(), 3);

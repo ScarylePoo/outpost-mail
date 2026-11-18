@@ -82,6 +82,25 @@ pub fn measure(account_dir: &Path, seed: u64) -> Result<bool, String> {
         }
     }
 
+    // The same folders as conversations: one row per conversation.
+    for folder in [inbox, largest] {
+        let (first, typical, (rows, _)) = time(15, || {
+            let lens = index.conversation_lens(folder.id).unwrap();
+            let page = index.conversation_page(folder.id, 0, 200).unwrap();
+            (lens.len(), page.len())
+        });
+        lines.push(Line {
+            name: format!("Open {} as conversations", folder.path),
+            detail: format!("{rows} conversations: layout + first 200 rows"),
+            first,
+            typical,
+            target: ms_target(100),
+        });
+        if std::ptr::eq(inbox, largest) {
+            break;
+        }
+    }
+
     // Scrolling: pages from the middle and the far end.
     for (label, offset) in [("middle", largest.total / 2), ("end", largest.total.saturating_sub(200))] {
         let (first, typical, _) = time(15, || index.page(largest.id, offset, 200).unwrap().len());

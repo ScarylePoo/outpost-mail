@@ -67,7 +67,7 @@ fn folders(core: &Core) -> Vec<FolderInfo> {
 }
 
 fn subjects(core: &Core, folder: &str) -> Vec<String> {
-    match core.handle(Command::ListMessages { folder: folder.into(), offset: 0, limit: 100 }).unwrap() {
+    match core.handle(Command::ListMessages { folder: folder.into(), offset: 0, limit: 100, conversations: false }).unwrap() {
         Response::Messages { rows, .. } => rows.into_iter().map(|r| r.subject).collect(),
         other => panic!("{other:?}"),
     }
@@ -131,13 +131,13 @@ fn an_account_is_added_synced_and_kept_up_to_date() {
         _ => None,
     });
     let Response::Messages { rows, .. } =
-        core.handle(Command::ListMessages { folder: inbox.clone(), offset: 0, limit: 10 }).unwrap()
+        core.handle(Command::ListMessages { folder: inbox.clone(), offset: 0, limit: 10, conversations: false }).unwrap()
     else {
         panic!()
     };
     let first = rows.iter().find(|r| r.subject == "first").unwrap();
     let Response::Located { index } =
-        core.handle(Command::LocateMessage { folder: inbox.clone(), id: first.id }).unwrap()
+        core.handle(Command::LocateMessage { folder: inbox.clone(), id: first.id, conversations: false }).unwrap()
     else {
         panic!()
     };
@@ -237,7 +237,7 @@ fn what_the_user_does_in_the_app_reaches_the_server() {
     let folder = |role: &str| tree.iter().find(|f| f.role.as_deref() == Some(role)).unwrap().id.clone();
     let (inbox, trash, archive) = (folder("inbox"), folder("trash"), folder("archive"));
     let id = |subject: &str| -> i64 {
-        match core.handle(Command::ListMessages { folder: inbox.clone(), offset: 0, limit: 100 }).unwrap() {
+        match core.handle(Command::ListMessages { folder: inbox.clone(), offset: 0, limit: 100, conversations: false }).unwrap() {
             Response::Messages { rows, .. } => rows.into_iter().find(|r| r.subject == subject).unwrap().id,
             other => panic!("{other:?}"),
         }
@@ -254,7 +254,7 @@ fn what_the_user_does_in_the_app_reaches_the_server() {
     assert_eq!(subjects(&core, &trash), ["m2"]);
     assert_eq!(subjects(&core, &archive), ["m3"]);
     let Response::Messages { rows, .. } =
-        core.handle(Command::ListMessages { folder: inbox.clone(), offset: 0, limit: 10 }).unwrap()
+        core.handle(Command::ListMessages { folder: inbox.clone(), offset: 0, limit: 10, conversations: false }).unwrap()
     else {
         panic!()
     };
@@ -385,7 +385,7 @@ mod sending {
         assert!(folder_named(&core, "Outbox").is_none(), "the outbox empties and disappears");
 
         // 2. A reply: threaded, and the original is marked answered.
-        let question = match core.handle(Command::ListMessages { folder: inbox.clone(), offset: 0, limit: 10 }).unwrap() {
+        let question = match core.handle(Command::ListMessages { folder: inbox.clone(), offset: 0, limit: 10, conversations: false }).unwrap() {
             Response::Messages { rows, .. } => rows[0].id,
             other => panic!("{other:?}"),
         };

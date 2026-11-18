@@ -382,11 +382,14 @@ impl Core {
                 core_version: env!("CARGO_PKG_VERSION").to_string(),
             }),
             Command::ListFolders => self.list_folders(),
-            Command::FolderLayout { folder } => {
+            Command::FolderLayout { folder, conversations } => {
                 let preview_lens = match self.target(&folder)? {
                     Target::Synthetic(f) => (0..f.info.total)
                         .map(|i| synthetic::preview_len(f.seed, i))
                         .collect(),
+                    Target::Folder(account, id) if conversations => {
+                        account.store.index().conversation_lens(id).map_err(internal)?
+                    }
                     Target::Folder(account, id) => {
                         account.store.index().preview_lens(id).map_err(internal)?
                     }
@@ -402,6 +405,7 @@ impl Core {
                 folder,
                 offset,
                 limit,
+                conversations,
             } => {
                 let limit = limit.min(MAX_PAGE);
                 let (offset, total, rows) = match self.target(&folder)? {
@@ -410,6 +414,17 @@ impl Core {
                         let start = offset.min(total);
                         let end = start.saturating_add(limit).min(total);
                         (start, total, (start..end).map(|i| synthetic::row(f.seed, i)).collect())
+                    }
+                    Target::Folder(account, id) if conversations => {
+                        let index = account.store.index();
+                        let total = index.conversation_total(id).map_err(internal)?;
+                        let start = offset.min(total);
+                        let rows = index.conversation_page(id, start, limit).map_err(internal)?;
+                        let own: Vec<String> = account
+                            .config()
+                            .map(|c| [c.identity().map(|i| i.address), Some(c.username)].into_iter().flatten().collect())
+                            .unwrap_or_default();
+                        (start, total, conversation_rows(rows, start, &own))
                     }
                     Target::Folder(account, id) => {
                         let index = account.store.index();
@@ -596,9 +611,12 @@ impl Core {
                     name,
                 })
             }
-            Command::LocateMessage { folder, id } => {
+            Command::LocateMessage { folder, id, conversations } => {
                 let index = match self.target(&folder)? {
                     Target::Synthetic(f) => (id >= 0 && id < f.info.total as i64).then_some(id as u32),
+                    Target::Folder(account, folder_id) if conversations => {
+                        account.store.index().conversation_position(folder_id, id).map_err(internal)?
+                    }
                     Target::Folder(account, folder_id) => {
                         account.store.index().position(folder_id, id).map_err(internal)?
                     }
@@ -1318,6 +1336,43 @@ fn message_rows(rows: Vec<ListRow>, first_index: u32) -> Vec<MessageRow> {
             unread: !r.flags.contains(Flags::SEEN),
             flagged: r.flags.contains(Flags::FLAGGED),
             has_attachment: r.has_attachment,
+            thread_count: 1,
+            thread_unread: u32::from(!r.flags.contains(Flags::SEEN)),
+            senders: String::new(),
+        })
+        .collect()
+}
+
+/// Rows for a conversation list. `own` are the user's addresses, shown as
+/// "You" among the people in a conversation.
+fn conversation_rows(rows: Vec<store::index::ConversationRow>, first_index: u32, own: &[String]) -> Vec<MessageRow> {
+    rows.into_iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let names: Vec<String> = c
+                .senders
+                .iter()
+                .map(|(name, address)| {
+                    if own.iter().any(|o| o.eq_ignore_ascii_case(address)) {
+                        return "You".to_string();
+                    }
+                    let shown = if name.trim().is_empty() { address.split('@').next().unwrap_or(address) } else { name.trim() };
+                    // In a list of several people, first names are enough.
+                    match c.senders.len() {
+                        1 => shown.to_string(),
+                        _ => shown.split_whitespace().next().unwrap_or(shown).to_string(),
+                    }
+                })
+                .collect();
+            let senders = match names.len() {
+                0..=4 => names.join(", "),
+                n => format!("{}, {} and {} more", names[0], names[1], n - 2),
+            };
+            let mut row = message_rows(vec![c.head], first_index + i as u32).remove(0);
+            row.thread_count = c.count;
+            row.thread_unread = c.unread;
+            row.senders = senders;
+            row
         })
         .collect()
 }

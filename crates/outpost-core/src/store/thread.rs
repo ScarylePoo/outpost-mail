@@ -630,6 +630,75 @@ mod tests {
         assert_eq!(shape(&store, c), [("three".to_string(), None, false)]);
     }
 
+    /// (subject of the newest message, messages, unread, sender names) for
+    /// each conversation in a folder's list.
+    fn heads(store: &Store, folder: i64) -> Vec<(String, u32, u32, String)> {
+        let rows = store.index().conversation_page(folder, 0, 100).unwrap();
+        assert_eq!(rows.len() as u32, store.index().conversation_total(folder).unwrap());
+        assert_eq!(rows.len(), store.index().conversation_lens(folder).unwrap().len());
+        rows.into_iter()
+            .map(|c| {
+                let who: Vec<&str> = c.senders.iter().map(|s| s.1.split('@').next().unwrap()).collect();
+                (c.head.subject.clone(), c.count, c.unread, who.join(","))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_folder_lists_one_row_per_conversation() {
+        let (_tmp, store, inbox, sent) = store();
+        let from_bob = |id: &'static str, subject: &'static str, day, reply_to: &'static str| Mail {
+            id, subject, from: B, to: A, day, reply_to, refs: reply_to,
+        };
+        let a = store.add_message(inbox, &raw(&mail("a", "plan", 1, "", "")), Flags::default(), None).unwrap();
+        store.add_message(inbox, &raw(&mail("z", "unrelated", 2, "", "")), Flags::SEEN, None).unwrap();
+        assert_eq!(heads(&store, inbox), [("unrelated".into(), 1, 0, "alice".into()), ("plan".into(), 1, 1, "alice".into())]);
+
+        // The user's reply is in Sent: the conversation grows, the inbox
+        // still shows the message that is in the inbox.
+        let b = store.add_message(sent, &raw(&from_bob("b", "Re: plan", 3, "a")), Flags::SEEN, None).unwrap();
+        assert_eq!(heads(&store, inbox), [("unrelated".into(), 1, 0, "alice".into()), ("plan".into(), 2, 1, "alice,bob".into())]);
+        assert_eq!(heads(&store, sent), [("Re: plan".into(), 2, 1, "alice,bob".into())]);
+
+        // A newer message in the inbox takes over as the conversation's row
+        // and moves it to the top.
+        let c = store.add_message(inbox, &raw(&mail("c", "Re: plan (2)", 4, "b", "a b")), Flags::default(), None).unwrap();
+        assert_eq!(heads(&store, inbox), [("Re: plan (2)".into(), 3, 2, "alice,bob".into()), ("unrelated".into(), 1, 0, "alice".into())]);
+        assert_eq!(store.index().conversation_position(inbox, a).unwrap(), Some(0));
+        assert_eq!(store.index().conversation_position(inbox, c).unwrap(), Some(0));
+        assert_eq!(store.index().conversation_position(inbox, b).unwrap(), Some(0), "found by its conversation, though it is in Sent");
+
+        // It goes back when that message leaves, by deletion or by a move.
+        store.move_messages(&[c], sent).unwrap();
+        assert_eq!(heads(&store, inbox), [("unrelated".into(), 1, 0, "alice".into()), ("plan".into(), 3, 2, "alice,bob".into())]);
+        assert_eq!(heads(&store, sent)[0].0, "Re: plan (2)");
+        assert_eq!(heads(&store, sent).len(), 1, "two messages of one conversation are one row");
+        store.remove_messages(sent, &[c]).unwrap();
+        assert_eq!(heads(&store, sent), [("Re: plan".into(), 2, 1, "alice,bob".into())]);
+        store.remove_messages(inbox, &[a]).unwrap();
+        assert_eq!(heads(&store, inbox), [("unrelated".into(), 1, 0, "alice".into())]);
+
+        // Two conversations that turn out to be one become one row.
+        let x = store.add_message(inbox, &raw(&mail("x", "Re: lost", 6, "lost", "lost")), Flags::SEEN, None).unwrap();
+        store.add_message(inbox, &raw(&mail("y", "other", 7, "", "")), Flags::SEEN, None).unwrap();
+        assert_eq!(heads(&store, inbox).len(), 3);
+        store.add_message(inbox, &raw(&mail("lost", "lost", 5, "", "")), Flags::SEEN, None).unwrap();
+        let now = heads(&store, inbox);
+        assert_eq!(now.len(), 3, "{now:?}");
+        assert!(now.contains(&("Re: lost".into(), 2, 0, "alice".into())), "{now:?}");
+        let _ = x;
+
+        // A rebuild arrives at the same list.
+        let before = heads(&store, inbox);
+        store.rebuild(false, |_| {}).unwrap();
+        let inbox = store.index().folders().unwrap().into_iter().find(|f| f.path == "Inbox").unwrap().id;
+        assert_eq!(heads(&store, inbox), before);
+        // And keeps it right afterwards (the triggers are back).
+        store.add_message(inbox, &raw(&mail("w", "Re: other", 8, "y", "y")), Flags::SEEN, None).unwrap();
+        assert_eq!(heads(&store, inbox)[0], ("Re: other".into(), 2, 0, "alice".into()));
+        assert_eq!(heads(&store, inbox).len(), 3);
+    }
+
     #[test]
     fn a_rebuild_finds_the_same_conversations() {
         let (_tmp, store, inbox, sent) = store();

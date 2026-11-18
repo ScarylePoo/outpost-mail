@@ -26,12 +26,20 @@ pub enum Command {
     ListFolders,
     /// What the list needs to lay out a whole folder without loading it:
     /// the row count and each row's preview length in characters.
-    FolderLayout { folder: FolderId },
+    /// With `conversations`, a row is a conversation rather than a message.
+    FolderLayout {
+        folder: FolderId,
+        #[serde(default)]
+        conversations: bool,
+    },
     /// One page of rows, in the folder's sort order.
     ListMessages {
         folder: FolderId,
         offset: u32,
         limit: u32,
+        /// One row per conversation: its newest message in the folder.
+        #[serde(default)]
+        conversations: bool,
     },
     /// A message, prepared for reading. `folder` is any folder of the
     /// message's account.
@@ -79,7 +87,13 @@ pub enum Command {
     SaveAttachment { folder: FolderId, id: i64, index: u32 },
     /// Where a message now is in a folder's list, so the list can keep its
     /// place when the folder changes underneath it.
-    LocateMessage { folder: FolderId, id: i64 },
+    LocateMessage {
+        folder: FolderId,
+        id: i64,
+        /// Locate the message's conversation in the conversation list.
+        #[serde(default)]
+        conversations: bool,
+    },
     /// The accounts and what each one's sync is doing.
     ListAccounts,
     /// Signs in to check the details, then adds the account and starts
@@ -310,6 +324,12 @@ pub struct MessageRow {
     pub unread: bool,
     pub flagged: bool,
     pub has_attachment: bool,
+    /// In a conversation list: how many messages the conversation has (in
+    /// every folder), how many are unread, and who wrote in it. In a
+    /// message list: 1, 0 or 1, and empty.
+    pub thread_count: u32,
+    pub thread_unread: u32,
+    pub senders: String,
 }
 
 /// What the composer holds. The same shape is used for a new message, a

@@ -28,7 +28,14 @@ export type Command =
       username: string;
       password: string;
       remember: boolean;
+      sending?: SendingSettings | null;
     }
+  | { type: "setSending"; account: FolderId; sending: SendingSettings }
+  | { type: "composeReply"; folder: FolderId; id: number; mode: "reply" | "replyAll" | "forward" }
+  | { type: "editDraft"; folder: FolderId; id: number }
+  | { type: "saveDraft"; account: FolderId; draft: DraftContent }
+  | { type: "sendMessage"; account: FolderId; draft: DraftContent; delaySeconds: number }
+  | { type: "cancelSend"; account: FolderId; id: number }
   | { type: "providePassword"; account: FolderId; password: string; remember: boolean }
   | { type: "syncNow"; account: FolderId };
 
@@ -95,6 +102,31 @@ export interface AccountInfo {
   host: string;
   username: string;
   status: SyncStatus;
+  /** How the account sends mail, once that has been set up. */
+  sending: SendingSettings | null;
+}
+
+export interface SendingSettings {
+  name: string;
+  address: string;
+  host: string;
+  port: number;
+  security: "tls" | "starttls" | "plaintext";
+}
+
+/** What the composer holds. */
+export interface DraftContent {
+  to: string;
+  cc: string;
+  bcc: string;
+  subject: string;
+  body: string;
+  inReplyTo: string | null;
+  references: string[];
+  attachments: { name: string; mimeType: string; dataBase64: string }[];
+  replyToMessage: number | null;
+  forwardOf: number | null;
+  replaces: number | null;
 }
 
 export type Response =
@@ -105,6 +137,10 @@ export type Response =
   | { type: "searchResults"; rows: MessageRow[] }
   | { type: "message"; message: MessageView }
   | { type: "attachmentSaved"; path: string; name: string }
+  | { type: "draft"; draft: DraftContent }
+  | { type: "draftSaved"; id: number }
+  | { type: "sendQueued"; id: number }
+  | { type: "sendCancelled"; cancelled: boolean }
   | { type: "located"; index: number | null }
   | { type: "accounts"; accounts: AccountInfo[] }
   | { type: "accepted" };
@@ -138,6 +174,12 @@ type ResponseFor = {
   locateMessage: "located";
   listAccounts: "accounts";
   addAccount: "accepted";
+  setSending: "accepted";
+  composeReply: "draft";
+  editDraft: "draft";
+  saveDraft: "draftSaved";
+  sendMessage: "sendQueued";
+  cancelSend: "sendCancelled";
   providePassword: "accepted";
   syncNow: "accepted";
 };

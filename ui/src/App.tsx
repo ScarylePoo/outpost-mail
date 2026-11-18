@@ -1,7 +1,15 @@
 // The main window: folder tree, message list, reading pane, status bar.
 
 import { createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch } from "solid-js";
-import { core, type AccountInfo, type FolderInfo, type MessageRow, type SyncStatus } from "./core";
+import {
+  core,
+  type AccountInfo,
+  type DraftContent,
+  type FolderInfo,
+  type MessageRow,
+  type SyncStatus,
+} from "./core";
+import { Composer, EMPTY_DRAFT, UNDO_SECONDS } from "./compose/Composer";
 import { runScrollTest } from "./bench";
 import { MessageList, type ListHandle } from "./list/MessageList";
 import { SearchResults } from "./list/SearchResults";
@@ -9,7 +17,11 @@ import { Reader } from "./reader/Reader";
 import { AddAccount, PasswordPrompt } from "./accounts/AccountPanels";
 import { autoShellTest } from "./autotest";
 
-type Panel = { kind: "none" } | { kind: "add" } | { kind: "password"; account: string };
+type Panel =
+  | { kind: "none" }
+  | { kind: "add" }
+  | { kind: "password"; account: string }
+  | { kind: "compose"; account: string; draft: DraftContent; key: number };
 
 /** The account a folder (or account) id belongs to: `acct/<name>`. */
 function accountOf(id: string): string {
@@ -104,7 +116,8 @@ export function App() {
     setMessage(undefined);
     setQuery("");
     setFolderId(id);
-    if (panel().kind !== "none") setPanel({ kind: "none" });
+    // A message being written stays open while the user looks elsewhere.
+    if (panel().kind === "add" || panel().kind === "password") setPanel({ kind: "none" });
   }
 
   onMount(() => {
@@ -263,12 +276,86 @@ export function App() {
     }
   }
 
+  // ---- writing ------------------------------------------------------------
+
+  const [undo, setUndo] = createSignal<{ account: string; id: number; subject: string }>();
+  let undoTimer: ReturnType<typeof setTimeout> | undefined;
+  let composeKey = 0;
+
+  /** The account to write from: the open folder's, if it can send. */
+  function writingAccount() {
+    const a = account();
+    return a && canSync() ? a : undefined;
+  }
+
+  function compose(draft: DraftContent, accountId?: string) {
+    const id = accountId ?? writingAccount()?.id;
+    if (id) setPanel({ kind: "compose", account: id, draft, key: ++composeKey });
+  }
+
+  function respond(mode: "reply" | "replyAll" | "forward") {
+    const t = target();
+    if (!t) return;
+    core
+      .send({ type: "composeReply", folder: t.folder, id: t.row.id, mode })
+      .then((r) => compose(r.draft))
+      .catch((e) => setNotice(String(e?.message ?? e)));
+  }
+
+  /** Reopens a draft, or a message left in the outbox, for editing. */
+  function editDraft(id: number, accountId?: string) {
+    const folderOfAccount = folderId();
+    if (!folderOfAccount) return;
+    core
+      .send({ type: "editDraft", folder: folderOfAccount, id })
+      .then((r) => compose(r.draft, accountId))
+      .catch((e) => setNotice(String(e?.message ?? e)));
+  }
+
+  function sent(accountId: string, id: number, subject: string) {
+    setPanel({ kind: "none" });
+    clearTimeout(undoTimer);
+    setUndo({ account: accountId, id, subject });
+    undoTimer = setTimeout(() => setUndo(undefined), UNDO_SECONDS * 1000);
+  }
+
+  function undoSend() {
+    const pending = undo();
+    if (!pending) return;
+    clearTimeout(undoTimer);
+    setUndo(undefined);
+    core
+      .send({ type: "cancelSend", account: pending.account, id: pending.id })
+      .then((r) => {
+        if (r.cancelled) editDraft(pending.id, pending.account);
+        else setNotice("Too late to undo: the message has been sent.");
+      })
+      .catch((e) => setNotice(String(e?.message ?? e)));
+  }
+
+  const composing = createMemo(() => {
+    const p = panel();
+    if (p.kind !== "compose") return undefined;
+    const a = accounts().find((a) => a.id === p.account);
+    return a ? { account: a, draft: p.draft, key: p.key } : undefined;
+  });
+  const editable = () => ["drafts", "outbox"].includes(folder()?.role ?? "");
+
   // Outlook's shortcuts, when the keyboard is not in a text field.
   function onKey(e: KeyboardEvent) {
     const typing = (e.target as HTMLElement | null)?.closest?.("input, textarea, select, [contenteditable]");
-    if (typing || panel().kind !== "none" || !message()) return;
+    if (typing || panel().kind !== "none") return;
     const key = e.key.toLowerCase();
-    if (e.key === "Delete") remove();
+    if (e.ctrlKey && key === "n") {
+      compose(EMPTY_DRAFT);
+      e.preventDefault();
+      return;
+    }
+    if (!message()) return;
+    if (e.ctrlKey && e.shiftKey && key === "r") respond("replyAll");
+    else if (e.ctrlKey && key === "r") respond("reply");
+    else if (e.ctrlKey && key === "f") respond("forward");
+    else if (e.key === "Delete") remove();
     else if (e.key === "Backspace") archive();
     else if (e.key === "Insert") toggleFlag();
     else if (e.ctrlKey && key === "q") markRead(true);
@@ -300,6 +387,30 @@ export function App() {
         <button onClick={syncNow} disabled={!canSync()} title="Check every folder for changes now">
           Sync now
         </button>
+        <span class="toolbar-gap" />
+        <button class="primary" onClick={() => compose(EMPTY_DRAFT)} disabled={!writingAccount()} title="New message (Ctrl+N)">
+          New
+        </button>
+        <Show
+          when={editable()}
+          fallback={
+            <>
+              <button onClick={() => respond("reply")} disabled={!target()} title="Reply (Ctrl+R)">
+                Reply
+              </button>
+              <button onClick={() => respond("replyAll")} disabled={!target()} title="Reply to all (Ctrl+Shift+R)">
+                Reply all
+              </button>
+              <button onClick={() => respond("forward")} disabled={!target()} title="Forward (Ctrl+F)">
+                Forward
+              </button>
+            </>
+          }
+        >
+          <button onClick={() => message() && editDraft(message()!.id)} disabled={!target()}>
+            Edit
+          </button>
+        </Show>
         <span class="toolbar-gap" />
         <button onClick={remove} disabled={!target()} title="Delete (Del)">
           Delete
@@ -420,6 +531,20 @@ export function App() {
           <Match when={panel().kind === "add"}>
             <AddAccount onDone={accountAdded} onCancel={() => setPanel({ kind: "none" })} />
           </Match>
+          <Match when={composing()} keyed>
+            {(c) => (
+              <Composer
+                account={c.account}
+                initial={c.draft}
+                onSent={(id, subject) => sent(c.account.id, id, subject)}
+                onClose={(note) => {
+                  setPanel({ kind: "none" });
+                  if (note) setNotice(note);
+                }}
+                onSendingSet={() => void loadAccounts()}
+              />
+            )}
+          </Match>
           <Match when={passwordAccount()}>
             {(a) => (
               <PasswordPrompt
@@ -442,6 +567,17 @@ export function App() {
           <Match when={folderId()}>{(id) => <Reader folder={id()} row={message()} onOpened={opened} />}</Match>
         </Switch>
       </section>
+
+      <Show when={undo()}>
+        {(u) => (
+          <div class="undo-bar" role="status">
+            <span>
+              Sending "{u().subject || "(no subject)"}" in a few seconds.
+            </span>
+            <button onClick={undoSend}>Undo</button>
+          </div>
+        )}
+      </Show>
 
       <footer class="statusbar">
         <span

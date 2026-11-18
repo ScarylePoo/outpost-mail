@@ -83,6 +83,30 @@ async function probe(details: string): Promise<string> {
     input.dispatchEvent(new InputEvent("input", { bubbles: true }));
     await sleep(900);
     lines.push(`search "zebra": ${text(".results .row-subject").join(" | ")}`);
+
+    // Writing and sending through the real composer.
+    input.value = "";
+    input.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    await sleep(300);
+    const type = (el: Element | null | undefined, value: string) => {
+      const field = el as HTMLInputElement | HTMLTextAreaElement;
+      field.value = value;
+      field.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    };
+    press("Reply");
+    await sleep(700);
+    const replyFields = [...document.querySelectorAll(".composer-line input")] as HTMLInputElement[];
+    lines.push(`reply starts as: to "${replyFields[0]?.value}" subject "${replyFields.at(-1)?.value}"`);
+    const quoted = (document.querySelector(".composer-body") as HTMLTextAreaElement | null)?.value ?? "";
+    lines.push(`reply quotes the original: ${quoted.includes("> ") ? "yes" : "NO"}`);
+    type(document.querySelector(".composer-body"), `Written in the window.${quoted}`);
+    (document.querySelector(".composer button.primary") as HTMLButtonElement | null)?.click();
+    await sleep(700);
+    lines.push(`undo bar: ${text(".undo-bar span").join("")}`);
+    lines.push(`outbox in tree while waiting: ${text(".folders .folder-name").includes("Outbox") ? "yes" : "NO"}`);
+    // Long enough for the undo pause to run out and the message to go.
+    await sleep(14_000);
+    lines.push(`tree after sending: ${text(".folders .folder-name").join(" | ")}`);
   } catch (e) {
     lines.push(`FAILED: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
   }

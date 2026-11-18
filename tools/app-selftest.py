@@ -14,14 +14,17 @@ Under WSL it can also test the Windows build: pass the path to outpost.exe.
 The Windows app then reaches the Dovecot inside WSL through localhost.
 """
 
+import base64
 import imaplib
 import json
 import os
 import shutil
 import socket
+import socketserver
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 APP = sys.argv[1] if len(sys.argv) > 1 else "target/release/outpost"
@@ -33,6 +36,52 @@ def free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+SENT = []
+
+
+class FakeSmtp(socketserver.StreamRequestHandler):
+    """Accepts mail and keeps it. Delivers nothing anywhere."""
+
+    def handle(self):
+        say = lambda text: self.wfile.write((text + "\r\n").encode())
+        say("220 selftest ready")
+        sender, recipients = "", []
+        while True:
+            line = self.rfile.readline().decode(errors="replace").strip()
+            upper = line.upper()
+            if not line or upper == "QUIT":
+                say("221 bye")
+                return
+            if upper.startswith("EHLO"):
+                self.wfile.write(b"250-selftest\r\n250 AUTH PLAIN\r\n")
+            elif upper.startswith("AUTH PLAIN"):
+                ok = base64.b64decode(line[11:]).split(b"\0")[-1].decode() == PASSWORD
+                say("235 welcome" if ok else "535 no")
+            elif upper.startswith("MAIL FROM:"):
+                sender, recipients = line[10:].strip("<>"), []
+                say("250 ok")
+            elif upper.startswith("RCPT TO:"):
+                recipients.append(line[8:].strip("<>"))
+                say("250 ok")
+            elif upper == "DATA":
+                say("354 go on")
+                data = b""
+                while True:
+                    part = self.rfile.readline()
+                    if part in (b".\r\n", b""):
+                        break
+                    data += part
+                SENT.append((sender, recipients, data.decode(errors="replace")))
+                say("250 accepted")
+            else:
+                say("502 not implemented")
+
+
+class Threaded(socketserver.ThreadingMixIn, socketserver.TCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
 
 
 def message(n, subject, body):
@@ -137,6 +186,8 @@ service stats {{
 
         # From Windows, the server inside WSL is reached at WSL's own address.
         host = subprocess.check_output(["hostname", "-I"], text=True).split()[0] if windows else "127.0.0.1"
+        smtp = Threaded(("0.0.0.0" if windows else "127.0.0.1", 0), FakeSmtp)
+        threading.Thread(target=smtp.serve_forever, daemon=True).start()
         report = os.path.join(shared, "report.txt")
         env = dict(
             os.environ,
@@ -147,11 +198,15 @@ service stats {{
             OUTPOST_PROBE_ACCOUNT=json.dumps({
                 "host": host, "port": port, "encrypted": False,
                 "username": "tester", "password": PASSWORD, "remember": False,
+                "sending": {
+                    "name": "Self Test", "address": "tester@example.com",
+                    "host": host, "port": smtp.server_address[1], "security": "plaintext",
+                },
             }),
             WEBKIT_DISABLE_DMABUF_RENDERER="1",
         )
         app = subprocess.Popen([APP], env=env, **quiet)
-        deadline = time.time() + 60
+        deadline = time.time() + 90
         delivered = False
         while app.poll() is None and time.time() < deadline:
             if not delivered and os.path.exists(report) and open(report).read() == "READY":
@@ -160,7 +215,7 @@ service stats {{
             time.sleep(0.1)
         if app.poll() is None:
             app.kill()
-            print("FAILED: the app did not finish within a minute.")
+            print("FAILED: the app did not finish in time.")
         print(open(report).read() if os.path.exists(report) else "FAILED: no report was written.")
         # What the app did must have reached the server.
         def on_server(folder):
@@ -175,6 +230,13 @@ service stats {{
             return sorted(found)
         print("server INBOX:", on_server("INBOX"))
         print("server Trash:", on_server("Trash"))
+        print("server Sent: ", on_server("Sent"))
+        for sender, recipients, data in SENT:
+            subject = next((l for l in data.splitlines() if l.startswith("Subject:")), "")
+            said = "Written in the window." in data
+            print(f"handed to the outgoing server: from {sender} to {recipients}; {subject}; body arrived: {said}")
+        if not SENT:
+            print("handed to the outgoing server: NOTHING")
         saved = os.path.join(shared, "data", "accounts", "tester", "account.json")
         if os.path.exists(saved):
             text = open(saved).read()

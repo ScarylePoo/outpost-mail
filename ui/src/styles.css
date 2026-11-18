@@ -49,10 +49,11 @@ input[type="checkbox"] {
   height: 100%;
   display: grid;
   grid-template-columns: 220px minmax(300px, 420px) minmax(0, 1fr);
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
   grid-template-areas:
     "toolbar toolbar toolbar"
     "folders list reading"
+    "undo undo undo"
     "status status status";
 }
 
@@ -727,4 +728,116 @@ button.inline:hover {
 .statusbar-right {
   flex: none;
   margin-left: 12px;
+}
+
+/* Composer */
+
+.toolbar button.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+.toolbar button.primary:hover:not(:disabled) {
+  color: #fff;
+  filter: brightness(1.08);
+}
+
+.toolbar button.primary:disabled {
+  opacity: 0.5;
+  color: #fff;
+}
+
+.composer {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 16px 24px;
+  user-select: none;
+}
+
+.composer-from {
+  padding-bottom: 8px;
+  color: var(--text-2);
+}
+
+.composer-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.composer-line span {
+  flex: none;
+  width: 56px;
+  color: var(--text-2);
+}
+
+.composer-line input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 0;
+  border: 0;
+  outline: none;
+  font: inherit;
+  color: inherit;
+  background: none;
+  user-select: text;
+}
+
+.composer-body {
+  flex: 1;
+  min-height: 160px;
+  margin: 12px 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  resize: none;
+  font: 14px/1.6 var(--font);
+  color: inherit;
+  user-select: text;
+}
+
+.composer-note {
+  margin: 0 0 10px;
+  color: var(--text-2);
+  font-size: 13px;
+}
+
+.composer .panel-actions {
+  margin-top: 4px;
+}
+
+.panel select {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font: inherit;
+  font-weight: 400;
+  background: var(--pane);
+}
+
+.undo-bar {
+  grid-area: undo;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 7px 12px;
+  background: var(--text);
+  color: #fff;
+}
+
+.undo-bar button {
+  padding: 2px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  border-radius: 5px;
+  background: none;
+  color: #fff;
+  font-weight: 600;
 }

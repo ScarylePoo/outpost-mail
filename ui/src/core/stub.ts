@@ -132,6 +132,31 @@ function answer(command: Command): Response {
         600,
       );
       return { type: "accepted" };
+    case "composeReply":
+    case "editDraft":
+      return {
+        type: "draft",
+        draft: {
+          to: "Alice Abbott <alice@example.com>",
+          cc: "",
+          bcc: "",
+          subject: "Re: Roof repair quote",
+          body: "\n\nOn Mon, 2 Nov 2026 at 09:15 UTC, Alice Abbott wrote:\n> Can you confirm the dates before Friday?\n",
+          inReplyTo: null,
+          references: [],
+          attachments: [],
+          replyToMessage: command.id,
+          forwardOf: null,
+          replaces: null,
+        },
+      };
+    case "saveDraft":
+      return { type: "draftSaved", id: 1 };
+    case "sendMessage":
+      return { type: "sendQueued", id: 1 };
+    case "cancelSend":
+      return { type: "sendCancelled", cancelled: true };
+    case "setSending":
     case "changeFlags":
     case "moveMessages":
     case "archiveMessages":

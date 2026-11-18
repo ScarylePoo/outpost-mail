@@ -301,7 +301,10 @@ export function App() {
     const c = await chosen();
     if (!c) return;
     // From the trash, deleting is for good, which is worth a question.
-    const permanently = folder()?.role === "trash";
+    // A message picked inside a conversation may be in another folder; only
+    // what is actually in the trash is removed for good.
+    const elsewhere = c.ids.length === 1 && c.row.inFolder !== undefined && c.row.inFolder !== c.folder;
+    const permanently = folder()?.role === "trash" && !elsewhere;
     const what = c.ids.length > 1 ? `these ${c.ids.length.toLocaleString()} messages` : `"${c.row.subject || "(no subject)"}"`;
     if (permanently && !window.confirm(`Permanently delete ${what}? This cannot be undone.`)) return;
     send({ type: "deleteMessages", folder: c.folder, ids: c.ids, permanently });

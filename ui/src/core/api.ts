@@ -68,6 +68,12 @@ export interface MessageRow {
   threadCount: number;
   threadUnread: number;
   senders: string;
+  /**
+   * Not sent by the core. Set by the list for a message picked inside an
+   * open conversation: the folder that message is in, which need not be the
+   * folder on show.
+   */
+  inFolder?: FolderId;
 }
 
 /** A message as the reading pane shows it. */

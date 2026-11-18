@@ -400,6 +400,7 @@ export function MessageList(props: {
       threadCount: head?.threadCount ?? thread.messages.length,
       threadUnread: head?.threadUnread ?? 0,
       senders: head?.senders ?? "",
+      inFolder: message.folder,
     });
   }
 

@@ -42,6 +42,9 @@ pub struct Options {
     pub fast_resync: bool,
     /// How long to stay in IDLE before checking the other folders.
     pub poll_interval: Duration,
+    /// During a long download in another folder, how often to stop and
+    /// bring the inbox up to date.
+    pub inbox_check: Duration,
     /// Folders the server marks as "all mail" hold a second copy of every
     /// message (Gmail). Skipped unless this is set.
     pub include_all_mail: bool,
@@ -53,6 +56,7 @@ impl Default for Options {
             header_batch: 200,
             fast_resync: true,
             poll_interval: Duration::from_secs(10 * 60),
+            inbox_check: Duration::from_secs(30),
             include_all_mail: false,
         }
     }
@@ -382,19 +386,65 @@ const GROUP_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Downloads the bodies a folder still lacks, newest first. The folder must
 /// be the one currently open on `session`.
+///
+/// A big folder can take hours the first time. With `inbox` given, the
+/// download pauses every `options.inbox_check` to bring the inbox up to
+/// date, so new mail is not kept waiting behind it.
+#[allow(clippy::too_many_arguments)]
 async fn download_bodies(
     session: &mut Session,
     store: &Store,
     folder: &SyncFolder,
+    inbox: Option<&SyncFolder>,
+    options: &Options,
     stop: &Stop,
     progress: &mut (dyn FnMut(Progress) + Send),
     summary: &mut Summary,
 ) -> Result<()> {
+    let mut run = BodyRun::default();
+    loop {
+        let until = inbox.map(|_| std::time::Instant::now() + options.inbox_check);
+        if download_some(session, store, folder, until, &mut run, stop, progress, summary).await? {
+            return Ok(());
+        }
+        let Some(inbox) = inbox else { continue };
+        // Its sync position may have moved since this pass began.
+        let current = store.index().remote_folders()?.into_iter().find(|f| f.id == inbox.id);
+        if let Some(current) = current {
+            sync_folder(session, store, &current, options, stop, progress, summary).await?;
+            let mut inbox_run = BodyRun::default();
+            download_some(session, store, &current, None, &mut inbox_run, stop, progress, summary).await?;
+        }
+        session.examine(&folder.remote_name, None).await?;
+    }
+}
+
+#[derive(Default)]
+struct BodyRun {
+    done: usize,
+    /// Messages that turned out to be gone from the server stay in the index
+    /// until the next list sync removes them; do not ask for them twice.
+    skipped: HashSet<i64>,
+}
+
+/// Downloads missing bodies until there are none (returns true) or until
+/// the time `until` has passed (returns false).
+#[allow(clippy::too_many_arguments)]
+async fn download_some(
+    session: &mut Session,
+    store: &Store,
+    folder: &SyncFolder,
+    until: Option<std::time::Instant>,
+    run: &mut BodyRun,
+    stop: &Stop,
+    progress: &mut (dyn FnMut(Progress) + Send),
+    summary: &mut Summary,
+) -> Result<bool> {
     let index = store.index();
-    let mut done = 0;
-    // Messages that turned out to be gone from the server stay in the index
-    // until the next list sync removes them; do not ask for them twice.
-    let mut skipped: HashSet<i64> = HashSet::new();
+    let BodyRun { done, skipped } = run;
+    // However short the time allowed, each call fetches something, so a
+    // download that keeps being interrupted still finishes.
+    let mut fetched_any = false;
     loop {
         let batch: Vec<KnownMessage> = index
             .missing_bodies(folder.id, 50 + skipped.len() as u32)?
@@ -402,7 +452,7 @@ async fn download_bodies(
             .filter(|m| !skipped.contains(&m.id))
             .collect();
         if batch.is_empty() {
-            return Ok(());
+            return Ok(true);
         }
         // Small messages go several to a request, because a round trip per
         // message is what makes a first sync slow. Large ones go alone, in
@@ -410,6 +460,16 @@ async fn download_bodies(
         let mut i = 0;
         while i < batch.len() {
             stop.check()?;
+            if fetched_any && until.is_some_and(|t| std::time::Instant::now() >= t) {
+                progress(Progress::Bodies {
+                    folder: folder.name.clone(),
+                    done: *done,
+                    total: *done + (index.missing_bodies_in(folder.id)? as usize).saturating_sub(skipped.len()),
+                });
+                progress(Progress::FolderChanged { folder_id: folder.id });
+                return Ok(false);
+            }
+            fetched_any = true;
             let first = &batch[i];
             if first.size > SMALL_MESSAGE {
                 match session.fetch_message(first.uid).await? {
@@ -421,7 +481,7 @@ async fn download_bodies(
                         skipped.insert(first.id);
                     }
                 }
-                done += 1;
+                *done += 1;
                 i += 1;
                 continue;
             }
@@ -448,13 +508,13 @@ async fn download_bodies(
                     }
                 }
             }
-            done += group.len();
+            *done += group.len();
             i += group.len();
         }
         progress(Progress::Bodies {
             folder: folder.name.clone(),
-            done,
-            total: done + (index.missing_bodies_in(folder.id)? as usize).saturating_sub(skipped.len()),
+            done: *done,
+            total: *done + (index.missing_bodies_in(folder.id)? as usize).saturating_sub(skipped.len()),
         });
         progress(Progress::FolderChanged { folder_id: folder.id });
     }
@@ -488,7 +548,10 @@ async fn pass(
             continue;
         }
         session.examine(&folder.remote_name, None).await?;
-        download_bodies(session, store, folder, stop, progress, &mut summary).await?;
+        // While any folder but the inbox downloads, keep the inbox current.
+        let is_inbox = |f: &SyncFolder| f.remote_name.eq_ignore_ascii_case(b"INBOX");
+        let inbox = if is_inbox(folder) { None } else { folders.iter().find(|f| is_inbox(f)) };
+        download_bodies(session, store, folder, inbox, options, stop, progress, &mut summary).await?;
     }
     Ok(summary)
 }
@@ -629,7 +692,7 @@ async fn connected(
             if let Some(current) = current {
                 sync_folder(&mut session, store, &current, options, stop, progress, &mut summary).await?;
                 session.examine(&current.remote_name, None).await?;
-                download_bodies(&mut session, store, &current, stop, progress, &mut summary).await?;
+                download_bodies(&mut session, store, &current, None, options, stop, progress, &mut summary).await?;
                 progress(Progress::Idle);
             }
         }

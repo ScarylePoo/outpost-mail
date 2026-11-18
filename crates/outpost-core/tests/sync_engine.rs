@@ -391,3 +391,43 @@ async fn a_refused_sign_in_is_reported_and_not_retried() {
     assert!(matches!(seen.last(), Some(Progress::SignInFailed { .. })), "{seen:?}");
     assert_eq!(seen.iter().filter(|p| **p == Progress::Connecting).count(), 1);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_inbox_stays_current_during_a_long_download_elsewhere() {
+    let Some(server) = TestServer::start() else { return };
+    let mut other = server.other_client("ivy");
+    other.cmd("CREATE Big");
+    let body = "y".repeat(300_000); // too large to be grouped: one request each
+    for n in 1..=12 {
+        other.append("Big", "", &message(n, &format!("big {n}"), &body));
+    }
+    other.append("INBOX", "", &message(1, "already there", "b"));
+    let tmp = TempDir::new();
+    let store = Store::open(tmp.path()).unwrap();
+    let options = Options { inbox_check: Duration::ZERO, ..Options::default() };
+
+    // Mail arrives in the inbox once the big folder's download is under way.
+    let other = Arc::new(Mutex::new(other));
+    let (deliverer, delivered) = (other.clone(), Arc::new(Mutex::new(false)));
+    let flag = delivered.clone();
+    let (_handle, stop) = sync::stop_signal();
+    let summary = sync::sync_once(&store, &account(server.server(), "ivy"), PASSWORD, &options, &stop, move |p| {
+        if let Progress::Bodies { folder, .. } = &p {
+            let mut done = flag.lock().unwrap();
+            if folder == "Big" && !*done {
+                *done = true;
+                deliverer.lock().unwrap().append("INBOX", "", &message(2, "arrived meanwhile", "b"));
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(*delivered.lock().unwrap(), "the test delivered its message mid-download");
+
+    // The same pass picked it up, body and all, without waiting for another.
+    let rows = local(&store);
+    assert!(rows.iter().any(|r| r.1 == "arrived meanwhile" && r.3), "{rows:?}");
+    assert_eq!(rows.iter().filter(|r| r.0 == "Big" && r.3).count(), 12);
+    assert_eq!(summary.bodies_fetched, 14);
+    assert_eq!(files_in(&store, "Big"), 12);
+}

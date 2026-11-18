@@ -59,6 +59,33 @@ Consequences to remember: sorting the list by anything other than date
 (sender, subject, size) will need its own index or a sort, and search results
 in any other order need the slower collect-and-sort path.
 
+### A rebuild writes messages into the index in list order
+
+The rebuild loads rows into a scratch file as they are parsed, then copies
+them into the index folder by folder, oldest to newest. The rows of any one
+page of the message list therefore sit next to each other in the file, and
+opening a folder cold reads a few adjacent pages instead of one scattered page
+per row. Mail added later by sync arrives roughly in date order anyway.
+Measured on a million messages with the file cache emptied: first open of a
+163,000-message folder fell from 2.8 s to 0.22 s.
+
+### Memory-mapped reads of the index are off
+
+With them on, warm reads were no faster, and cold reads were five to ten
+times slower (the same cold folder open: 0.22 s with, 0.045 s without). This
+was measured under WSL2, where page faults are expensive, so the size of the
+effect may differ on other systems, but there was no case where mapping
+helped.
+
+### Known issue for milestone 3: very large folders exceed the list's maximum height
+
+The message list is one tall scrolling element. Browser engines cap an
+element's height at about 33.5 million pixels, which is roughly 350,000 rows.
+The synthetic Archive folder (352,194 messages) hit the cap exactly: its last
+few thousand rows cannot be scrolled to. The list needs to map the scrollbar
+onto a virtual height for folders this large. The core and index are not
+affected.
+
 ### Search
 
 SQLite FTS5 over subject, participants and body, storing positions (so exact

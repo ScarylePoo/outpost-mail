@@ -34,6 +34,10 @@ All from the repository root.
 | Type-check the interface | `npm run typecheck` |
 | Run the app while developing | `npm run dev` |
 | Build the app (no installer) | `npm run build -- --no-bundle`, giving `target/release/outpost` |
+
+Always build the app with that command, not with `cargo build`. A plain
+`cargo build` of the shell produces a development binary that expects the dev
+server, and shows "could not connect to localhost" when run on its own.
 | Work on the interface in a browser, no Rust | `npm run ui`, then open http://localhost:1420 |
 
 `cargo test` at the root tests the core only, so it works without any webview
@@ -71,7 +75,12 @@ small files is far slower.
 
 "First" in the report is the first run in that process; "typical" is the
 median of 15 more. The tool cannot empty the operating system's file cache, so
-for a truly cold number, reboot and run `measure` alone.
+for a truly cold number, reboot and run `measure` alone. On Linux the index
+can be dropped from the cache without a reboot:
+
+```sh
+python3 -c "import os,sys; fd=os.open(sys.argv[1],0); os.fsync(fd); os.posix_fadvise(fd,0,0,os.POSIX_FADV_DONTNEED)" DIR/index.sqlite
+```
 
 To browse a generated mailbox in the app, put it where an account would be and
 point the app at the data directory:

@@ -286,7 +286,9 @@ fn open_accounts(data_dir: &Path) -> Result<Vec<Account>, StoreError> {
     std::fs::create_dir_all(&root)?;
     let mut names: Vec<String> = std::fs::read_dir(&root)?
         .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
+        // `is_dir` on the path follows links, so an account may be a link to
+        // a directory on another disk.
+        .filter(|entry| entry.path().is_dir())
         .filter_map(|entry| entry.file_name().into_string().ok())
         .filter(|name| !name.starts_with('.'))
         .collect();

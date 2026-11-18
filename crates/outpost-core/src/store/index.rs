@@ -281,7 +281,7 @@ impl Index {
             r.get::<_, i64>(0)
         })? as u64;
         for message in messages {
-            ids.push(insert_unique(&tx, folder_id, message, sort_key(message.date, tie))?);
+            ids.push(insert_unique(&tx, "main.message", folder_id, message, sort_key(message.date, tie))?);
             tie += 1;
         }
         let unread = messages.iter().filter(|m| !m.flags.contains(Flags::SEEN)).count();
@@ -437,21 +437,47 @@ impl Index {
         for (name, _) in INDEXES {
             conn.execute_batch(&format!("DROP INDEX IF EXISTS {name}"))?;
         }
-        conn.execute_batch(
-            "DELETE FROM message; DELETE FROM folder;
+        // Rows are loaded into a staging table in a scratch file, in whatever
+        // order they arrive, and copied into place in list order at the end.
+        let staging = staging_path(&self.path);
+        let _ = std::fs::remove_file(&staging);
+        conn.execute("ATTACH DATABASE ?1 AS load", [staging.to_string_lossy()])?;
+        conn.execute_batch(&format!(
+            "PRAGMA load.journal_mode = OFF; PRAGMA load.synchronous = OFF;
+             CREATE TABLE load.message AS SELECT {MESSAGE_COLUMNS} FROM main.message WHERE 0;
+             DELETE FROM main.message; DELETE FROM folder;
              INSERT INTO message_fts(message_fts) VALUES('delete-all');
-             BEGIN",
-        )?;
-        Ok(Bulk { conn, in_batch: 0, count: 0 })
+             BEGIN"
+        ))?;
+        Ok(Bulk { conn, staging, in_batch: 0, count: 0, finished: false })
     }
 }
 
 /// A bulk load in progress. See [`Index::begin_bulk`].
 pub(super) struct Bulk<'a> {
     conn: MutexGuard<'a, Connection>,
+    staging: PathBuf,
     in_batch: u32,
     /// Messages added so far. Also the next sort key's tie-breaker.
     count: u64,
+    finished: bool,
+}
+
+impl Drop for Bulk<'_> {
+    /// A load that was abandoned (an error part-way) must not leave the
+    /// shared writer inside a transaction or without its indexes. What is
+    /// left is a valid, emptier index; rebuilding again completes it.
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        let _ = self.conn.execute_batch("ROLLBACK");
+        let _ = self.conn.execute_batch("DETACH DATABASE load");
+        let _ = std::fs::remove_file(&self.staging);
+        for (_, sql) in INDEXES {
+            let _ = self.conn.execute_batch(sql);
+        }
+    }
 }
 
 impl Bulk<'_> {
@@ -469,13 +495,13 @@ impl Bulk<'_> {
         // than that turns the uniqueness index on and checks from then on.
         let key = sort_key(message.date, self.count);
         if self.count < 1 << TIE_BITS {
-            insert_one(&self.conn, folder_id, message, key)?;
+            insert_one(&self.conn, "load.message", folder_id, message, key)?;
         } else {
             if self.count == 1 << TIE_BITS {
-                let (_, unique) = INDEXES.iter().find(|(name, _)| *name == "message_sort").unwrap();
-                self.conn.execute_batch(unique)?;
+                self.conn
+                    .execute_batch("CREATE UNIQUE INDEX load.message_sort ON message(sort_key)")?;
             }
-            insert_unique(&self.conn, folder_id, message, key)?;
+            insert_unique(&self.conn, "load.message", folder_id, message, key)?;
         }
         self.count += 1;
         self.in_batch += 1;
@@ -487,8 +513,20 @@ impl Bulk<'_> {
     }
 
     /// Commits, rebuilds the indexes and tidies up.
-    pub fn finish(self, optimize_search: bool) -> Result<()> {
-        self.conn.execute_batch("COMMIT")?;
+    pub fn finish(mut self, optimize_search: bool) -> Result<()> {
+        // Copy into place folder by folder, newest last, so that the rows of
+        // any one page of the list sit next to each other in the file. A cold
+        // open of a folder then reads a few adjacent pages instead of one
+        // scattered page per row.
+        self.conn.execute_batch(&format!(
+            "COMMIT;
+             CREATE INDEX load.message_order ON message(folder_id, sort_key);
+             INSERT INTO main.message ({MESSAGE_COLUMNS})
+               SELECT {MESSAGE_COLUMNS} FROM load.message INDEXED BY message_order
+               ORDER BY folder_id, sort_key;
+             DETACH DATABASE load"
+        ))?;
+        let _ = std::fs::remove_file(&self.staging);
         for (_, sql) in INDEXES {
             self.conn.execute_batch(sql)?;
         }
@@ -502,6 +540,7 @@ impl Bulk<'_> {
                 .execute_batch("INSERT INTO message_fts(message_fts) VALUES('optimize')")?;
         }
         self.conn.execute_batch("ANALYZE; PRAGMA wal_checkpoint(TRUNCATE)")?;
+        self.finished = true;
         Ok(())
     }
 }
@@ -519,12 +558,18 @@ fn sort_key(date: i64, tie: u64) -> i64 {
 
 /// Inserts a message, moving to the next free sort key if `key` is taken.
 /// Needs the `message_sort` index to exist.
-fn insert_unique(conn: &Connection, folder_id: i64, m: &NewMessage, mut key: i64) -> rusqlite::Result<i64> {
+fn insert_unique(
+    conn: &Connection,
+    table: &str,
+    folder_id: i64,
+    m: &NewMessage,
+    mut key: i64,
+) -> rusqlite::Result<i64> {
     loop {
-        match insert_one(conn, folder_id, m, key) {
+        match insert_one(conn, table, folder_id, m, key) {
             Err(rusqlite::Error::SqliteFailure(e, _))
                 if e.code == rusqlite::ErrorCode::ConstraintViolation
-                    && key_taken(conn, key)? =>
+                    && key_taken(conn, table, key)? =>
             {
                 key += 1;
             }
@@ -533,18 +578,38 @@ fn insert_unique(conn: &Connection, folder_id: i64, m: &NewMessage, mut key: i64
     }
 }
 
-fn key_taken(conn: &Connection, key: i64) -> rusqlite::Result<bool> {
-    conn.prepare_cached("SELECT 1 FROM message WHERE sort_key = ?1")?.exists([key])
+fn key_taken(conn: &Connection, table: &str, key: i64) -> rusqlite::Result<bool> {
+    conn.prepare_cached(&format!("SELECT 1 FROM {table} WHERE sort_key = ?1"))?
+        .exists([key])
 }
 
-fn insert_one(conn: &Connection, folder_id: i64, m: &NewMessage, key: i64) -> rusqlite::Result<i64> {
+/// The columns of `message` other than `id`, which SQLite assigns.
+const MESSAGE_COLUMNS: &str = "folder_id, base, file_flags, flags, uid, modseq, date, sort_key, \
+     size, has_attachment, from_name, from_addr, recipients, subject, message_id, in_reply_to, \
+     refs, thread_id, preview, preview_len, verdict";
+
+fn staging_path(index: &Path) -> PathBuf {
+    let mut name = index.file_name().unwrap_or_default().to_os_string();
+    name.push(".rebuild");
+    index.with_file_name(name)
+}
+
+/// Inserts into `table`, which is `main.message` or the bulk loader's
+/// staging copy of it.
+fn insert_one(
+    conn: &Connection,
+    table: &str,
+    folder_id: i64,
+    m: &NewMessage,
+    key: i64,
+) -> rusqlite::Result<i64> {
     let p = &m.parsed;
-    conn.prepare_cached(
-        "INSERT INTO message (folder_id, base, file_flags, flags, uid, date, size, has_attachment,
+    conn.prepare_cached(&format!(
+        "INSERT INTO {table} (folder_id, base, file_flags, flags, uid, date, size, has_attachment,
                               from_name, from_addr, recipients, subject, message_id, in_reply_to,
-                              refs, preview, preview_len, sort_key)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
-    )?
+                              refs, preview, preview_len, sort_key, verdict)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, 0)"
+    ))?
     .execute(params![
         folder_id,
         m.base,
@@ -582,10 +647,11 @@ fn configure(conn: &Connection) -> rusqlite::Result<()> {
     conn.busy_timeout(std::time::Duration::from_secs(10))?;
     conn.pragma_update(None, "foreign_keys", true)?;
     conn.pragma_update(None, "temp_store", "MEMORY")?;
-    // 64 MB of page cache per connection, and let the OS map up to 4 GB of
-    // the file so warm reads skip a copy.
+    // 64 MB of page cache per connection. Memory-mapped reads are left off
+    // on purpose: measured on a million messages they made no difference
+    // warm and made the first, cold read of a folder five to ten times
+    // slower (docs/performance-results.md).
     conn.pragma_update(None, "cache_size", -65_536)?;
-    conn.pragma_update(None, "mmap_size", 4_294_967_296_i64)?;
     conn.set_prepared_statement_cache_capacity(32);
     Ok(())
 }

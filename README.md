@@ -3,11 +3,11 @@
 A desktop mail client with the layout of classic Outlook, for ordinary IMAP
 accounts, storing every message as its own file. Windows and Linux.
 
-**Status: early development (milestone 3 of 9).** You can add an IMAP account
-and read your mail: the app syncs it (read-only), shows it in three panes,
-renders HTML safely and searches it. It cannot yet send, move, delete or mark
-mail. Tested against Dovecot and one hosted account; the store and search are
-tested at a million messages.
+**Status: early development (milestone 4 of 9).** You can add an IMAP account,
+read and search your mail, mark, move, archive and delete it, and write,
+reply to and forward messages, online or offline. Changing and sending mail
+has so far only been tested against a local test server, not real providers.
+The store and search are tested at a million messages.
 
 - The full plan: [Outpost build handoff.md](Outpost%20build%20handoff.md)
 - Building and testing: [docs/testing.md](docs/testing.md)

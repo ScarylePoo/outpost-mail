@@ -7,6 +7,96 @@ started.
 Status words: **Decided** (owner agreed), **Proposal** (default in use, owner
 has not reviewed), **Finding** (a test result).
 
+## 2026-11-18 · Milestone 4 (in progress)
+
+**Proposals** unless marked otherwise. From this milestone the app changes
+mail on the server. Everything here was developed and tested against the
+throwaway Dovecot and a fake outgoing server, never a real account.
+
+### What the user does is applied here first and replayed to the server
+
+Marking, moving, deleting and saving take effect in the local store at once
+and are recorded in a queue in the same transaction. The sync engine replays
+the queue in order, at once when online, later when not. A message moved or
+created locally has no server UID until its action has been replayed; actions
+queued behind it refer to it by its row and get the UID filled in when the
+server reports it. This is what lets a message be moved three times and
+re-flagged in between while offline, and arrive as one copy in the right
+place (tested).
+
+Every replay is safe to repeat. Flags are idempotent, moving or expunging a
+UID that is gone does nothing, and before a message is uploaded again the
+folder is searched for its Message-ID. Sync recognises a message it put in a
+folder itself, by Message-ID, instead of downloading it as new.
+
+Sync and the queue do not fight: the queue is replayed before anything is
+read back, and sync leaves alone any message that has a change on the way.
+
+### An action the server refuses is undone and reported, not retried
+
+A refused move puts the message back where it was. The user sees one line in
+the status bar. The actions queued behind it still run.
+
+### Deleting
+
+Delete moves to the account's trash folder. Deleting from the trash removes
+the message for good, after a yes-or-no question. Removal is always by UID:
+this client has no folder-wide EXPUNGE, so it cannot remove messages another
+client had marked for deletion (tested). On a server that cannot expunge by
+UID, the message is marked deleted and left; and any message marked deleted,
+by anyone, is treated as gone until the mark is removed.
+
+### Sending
+
+- **Own SMTP client** (`smtp.rs`, about 250 lines) rather than a library, so
+  that certificates are checked exactly as for IMAP and the outcomes are kept
+  apart. TLS from the start (port 465) and STARTTLS (port 587) are supported;
+  a server that will not encrypt is never used when encryption was asked for.
+- **Three outcomes, three behaviours.** Not reachable: the message waits in
+  the outbox and is retried after a growing pause, without holding up other
+  actions. Refused (wrong password, refused recipient): it goes back to
+  Drafts with a notice. Connection lost after the message was handed over and
+  before the server answered: it may have gone, so it is **never retried
+  automatically**; it stays in the outbox and the user is told to check.
+- **Undo send:** a sent message waits 10 seconds in the outbox (the handoff
+  doc's proposal), during which Undo makes it a draft again.
+- **Blind copies** are in the copy kept in Sent and removed from what is
+  transmitted.
+- **The copy in Sent** is uploaded by Outpost, except on Gmail (recognised by
+  its capability), which files sent mail itself.
+- **The outbox** is a folder that exists only on this computer, shown in the
+  tree while it holds something.
+- **One password.** The outgoing server is signed in to with the mailbox
+  password. A separate one is not supported yet.
+- Replying marks the original answered; forwarding marks it forwarded and
+  carries its attachments.
+
+### The composer is plain text
+
+The handoff doc proposes rich text by default. The milestone asks for a basic
+composer, and this one is plain text: To, Cc, Bcc, subject, body, file
+attachments, save as draft. Rich text, inline pictures, signatures, several
+identities, drag-and-drop and saving as you type are not built.
+
+### Shortcuts so far
+
+Outlook's where they exist: Ctrl+N new, Ctrl+R reply, Ctrl+Shift+R reply all,
+Ctrl+F forward, Del delete, Backspace archive, Ctrl+Q read, Ctrl+U unread,
+Insert flag. Opening a message marks it read.
+
+### Still to do in milestone 4
+
+- Acting on several messages at once (the list selects one).
+- Creating, renaming and deleting folders.
+- **Real servers.** The outgoing path has only met the fake server: real
+  TLS and STARTTLS submission, and a real provider's quirks, are untested.
+  Moving, deleting and flagging have only met Dovecot.
+- The owner's "full day on his main account, including offline".
+- **Upgrades lose the queue.** The index is still discarded and rebuilt when
+  its format changes, and the queue lives in it. Mail is never lost (unsent
+  messages stay in the outbox as files) but queued changes would be. A real
+  migration path is needed before any release.
+
 ## 2026-11-18 · Milestone 3 closed
 
 The owner added his real account in the Windows app and reports it working.

@@ -71,6 +71,14 @@ then resumed with nothing duplicated; a folder the server renumbered; folders
 created and deleted elsewhere; push, polling and reconnecting in a running
 sync; and a rebuilt index not downloading anything again.
 
+## Tests of changing and sending mail (milestone 4)
+
+These run with the other automated tests (`cargo test`) and need Dovecot.
+Sending is tested against a fake outgoing server built into the tests, which
+keeps what it is given and delivers nothing; it can be told to refuse a
+password or a recipient, to be busy, or to drop the connection after taking a
+message. No test sends mail anywhere.
+
 ## The app self-test (milestone 3)
 
 ```sh
@@ -80,10 +88,12 @@ python3 tools/app-selftest.py            # uses target/release/outpost
 Needs Dovecot and a built app; run it on Linux. Under WSL, pass the path to
 `outpost.exe` to test the Windows build the same way. It starts a throwaway Dovecot,
 runs the real app against it, adds an account through the interface, delivers
-one more message while the window is open, opens a message and runs a search,
-then prints what the window showed. Expect an account that is up to date, the
-folder tree, six messages after the late delivery, the reader's text, and six
-search results. It opens a window for about ten seconds.
+one more message while the window is open, then works the window as a person
+would: opens a message, flags it, deletes it, searches, replies and sends.
+It prints what the window showed and then what the mail server and the (fake)
+outgoing server ended up with. Expect the deleted message in Trash with its
+flag, the reply in Sent, the original marked answered, and one message handed
+to the outgoing server. It opens a window for about half a minute.
 
 ## Using the app with a real account (milestone 3)
 

@@ -16,6 +16,7 @@ npm) and ship the notices with the app.
 | `tauri` | The shell | MIT or Apache-2.0 |
 | `rusqlite`, with SQLite bundled | The index and full-text search | MIT (SQLite: public domain) |
 | `mail-parser` | Reading message files | MIT or Apache-2.0 |
+| `mail-builder` | Writing outgoing messages | MIT or Apache-2.0 |
 | `ammonia` | Making HTML mail safe to display | MIT or Apache-2.0 |
 | `keyring` | Passwords in the operating system's credential store | MIT or Apache-2.0 |
 | `tauri-plugin-opener` | Opening links and showing saved files | MIT or Apache-2.0 |

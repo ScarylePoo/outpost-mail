@@ -6,9 +6,11 @@
 //! - `item`: reading and changing calendar and contact files.
 //! - `store`: the files and their index on this computer.
 //! - `sync`: one pass that brings the two into line.
+//! - `service`: the accounts as the core runs them, and their commands.
 
 pub mod client;
 pub mod http;
 pub mod item;
+pub mod service;
 pub mod store;
 pub mod sync;

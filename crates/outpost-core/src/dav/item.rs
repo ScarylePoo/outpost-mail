@@ -307,11 +307,17 @@ fn zone_ignoring_case(name: &str) -> Option<Tz> {
 pub fn occurrences(text: &str, tz: &str, from: i64, to: i64) -> Vec<(i64, i64, bool)> {
     let Ok(calendar) = ICalendar::parse(text) else { return Vec::new() };
     let lines = unfold(text);
-    let all_day = component(&lines, "VEVENT")
-        .and_then(|(_, _, own)| own.into_iter().find(|(_, l)| l.name == "DTSTART"))
-        .is_some_and(|(_, l)| l.value.trim().len() == 8);
+    let start_line = component(&lines, "VEVENT").and_then(|(_, _, own)| own.into_iter().find(|(_, l)| l.name == "DTSTART"));
+    let all_day = start_line.as_ref().is_some_and(|(_, l)| l.value.trim().len() == 8);
+    // The library applies the default zone to a repeating event whose start
+    // is written in UTC, as if it were a time without a zone (seen with
+    // calcard 0.3.14; a single event is not affected). Such an event is
+    // therefore expanded with UTC as the default, which gives the right
+    // moments. `repeats_written_in_utc_stay_in_utc` holds this in place.
+    let in_utc = start_line.as_ref().is_some_and(|(_, l)| l.value.trim().to_ascii_uppercase().ends_with('Z'));
+    let default_zone = if in_utc { zone("UTC") } else { zone(tz) };
     // Enough for a daily event over fifty years.
-    let expanded = calendar.expand_dates(zone(tz), 20_000);
+    let expanded = calendar.expand_dates(default_zone, 20_000);
     let mut out: Vec<(i64, i64, bool)> = expanded
         .events
         .iter()
@@ -728,6 +734,30 @@ mod tests {
         let birthday = ics("BEGIN:VEVENT\nUID:y\nDTSTART;VALUE=DATE:20200229\nRRULE:FREQ=YEARLY\nSUMMARY:Leap day\nEND:VEVENT");
         let found = occurrences(&birthday, "America/Los_Angeles", at(2024, 1, 1, 0, 0), at(2029, 1, 1, 0, 0));
         assert_eq!(found, [(at(2024, 2, 29, 0, 0), at(2024, 3, 1, 0, 0), true), (at(2028, 2, 29, 0, 0), at(2028, 3, 1, 0, 0), true)]);
+    }
+
+    #[test]
+    fn repeats_written_in_utc_stay_in_utc() {
+        // Whatever this computer's zone, 09:00 UTC is 09:00 UTC.
+        let daily = ics("BEGIN:VEVENT\nUID:u\nDTSTART:20261120T090000Z\nDTEND:20261120T100000Z\nRRULE:FREQ=DAILY;COUNT=3\nSUMMARY:Standup\nEND:VEVENT");
+        let single = daily.replace("RRULE:FREQ=DAILY;COUNT=3\r\n", "");
+        for tz in ["UTC", BERLIN, "America/Los_Angeles", "Pacific/Auckland"] {
+            let starts: Vec<i64> = occurrences(&daily, tz, 0, i64::MAX / 2).iter().map(|o| o.0).collect();
+            assert_eq!(starts, [at(2026, 11, 20, 9, 0), at(2026, 11, 21, 9, 0), at(2026, 11, 22, 9, 0)], "{tz}");
+            assert_eq!(occurrences(&single, tz, 0, i64::MAX / 2), [(at(2026, 11, 20, 9, 0), at(2026, 11, 20, 10, 0), false)], "{tz}");
+            let Some(Item::Event(e)) = read_calendar(&daily, tz) else { panic!() };
+            assert_eq!((e.start, e.end), (at(2026, 11, 20, 9, 0), at(2026, 11, 20, 10, 0)), "{tz}");
+        }
+        // A repeat in a named zone is that zone's clock time, whatever the
+        // computer's; one with no zone is the computer's clock time.
+        let zoned = ics("BEGIN:VEVENT\nUID:z\nDTSTART;TZID=Europe/Berlin:20261120T090000\nDURATION:PT1H\nRRULE:FREQ=DAILY;COUNT=2\nSUMMARY:Z\nEND:VEVENT");
+        let floating = ics("BEGIN:VEVENT\nUID:f\nDTSTART:20261120T090000\nDURATION:PT1H\nRRULE:FREQ=DAILY;COUNT=2\nSUMMARY:F\nEND:VEVENT");
+        for tz in ["UTC", "America/Los_Angeles"] {
+            let starts: Vec<i64> = occurrences(&zoned, tz, 0, i64::MAX / 2).iter().map(|o| o.0).collect();
+            assert_eq!(starts, [at(2026, 11, 20, 8, 0), at(2026, 11, 21, 8, 0)], "{tz}");
+        }
+        let starts: Vec<i64> = occurrences(&floating, "America/Los_Angeles", 0, i64::MAX / 2).iter().map(|o| o.0).collect();
+        assert_eq!(starts, [at(2026, 11, 20, 17, 0), at(2026, 11, 21, 17, 0)]);
     }
 
     #[test]

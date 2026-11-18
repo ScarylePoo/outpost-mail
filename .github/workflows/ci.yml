@@ -37,6 +37,14 @@ jobs:
           /usr/sbin/dovecot --version
           echo "OUTPOST_REQUIRE_DOVECOT=1" >> "$GITHUB_ENV"
 
+      # The calendar and contacts tests start their own private Radicale.
+      - name: Radicale for the calendar and contacts tests
+        if: runner.os == 'Linux'
+        run: |
+          pip install --target "$HOME/outpost-dav" radicale
+          PYTHONPATH="$HOME/outpost-dav" python3 -c "import radicale; print('radicale', radicale.VERSION)"
+          echo "OUTPOST_REQUIRE_RADICALE=1" >> "$GITHUB_ENV"
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-node@v4

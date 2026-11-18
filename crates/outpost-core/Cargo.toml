@@ -33,6 +33,8 @@ httparse = "1"
 # Dates and time zones, as calcard uses them (already in the build with it).
 chrono = { version = "0.4", default-features = false }
 chrono-tz = { version = "0.10", default-features = false }
+# The name of this computer's time zone (already in the build with chrono).
+iana-time-zone = "0.1"
 # DKIM signature re-checks. Pure-Rust cryptography (no C toolchain needed),
 # and the system's own DNS settings for looking up signing keys.
 mail-auth = { version = "0.15", default-features = false, features = ["rust-crypto", "dns-hickory"] }

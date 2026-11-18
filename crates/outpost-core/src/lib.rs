@@ -163,6 +163,8 @@ struct Inner {
     data_dir: Option<PathBuf>,
     downloads_dir: Option<PathBuf>,
     accounts: RwLock<Vec<Arc<Account>>>,
+    /// Calendar-and-contacts accounts (phase two). See `dav/service.rs`.
+    dav: RwLock<Vec<Arc<dav::service::DavAccount>>>,
     synthetic: Vec<SyntheticFolder>,
     secrets: Arc<dyn Secrets>,
     /// Re-checks signatures, keeping the keys it has fetched.
@@ -212,9 +214,10 @@ impl Core {
             inner: Arc::new(Inner {
                 sink: Box::new(sink),
                 settings: settings::Settings::load(config.data_dir.as_deref()),
-                data_dir: config.data_dir,
                 downloads_dir: config.downloads_dir,
                 accounts: RwLock::new(accounts),
+                dav: RwLock::new(config.data_dir.as_deref().map(dav::service::open_accounts).unwrap_or_default()),
+                data_dir: config.data_dir,
                 synthetic: synthetic_folders(),
                 secrets,
                 rechecker: Arc::new(recheck::Rechecker::new()),
@@ -240,6 +243,7 @@ impl Core {
                 core.begin(&account);
             }
         }
+        core.begin_dav();
         Ok(core)
     }
 
@@ -469,6 +473,11 @@ impl Core {
 
     /// Handles one command.
     pub fn handle(&self, command: Command) -> Result<Response, CoreError> {
+        // Calendars, tasks and contacts are handled in `dav/service.rs`.
+        let command = match self.handle_dav(command) {
+            Ok(answer) => return answer,
+            Err(command) => command,
+        };
         match command {
             Command::Ping => Ok(Response::Pong {
                 core_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -828,6 +837,21 @@ impl Core {
                 self.start_sync(&account);
                 Ok(Response::Accepted)
             }
+            // Answered above, in `handle_dav`.
+            Command::ListDavAccounts
+            | Command::AddDavAccount { .. }
+            | Command::ProvideDavPassword { .. }
+            | Command::RemoveDavAccount { .. }
+            | Command::SetDavCollection { .. }
+            | Command::SyncDav { .. }
+            | Command::ListEvents { .. }
+            | Command::ListTasks
+            | Command::ListContacts { .. }
+            | Command::OpenDavItem { .. }
+            | Command::SaveEvent { .. }
+            | Command::SaveTask { .. }
+            | Command::SaveContact { .. }
+            | Command::DeleteDavItem { .. } => Err(CoreError::new(ErrorCode::Internal, "a calendar command was not handled")),
             Command::GetGeneral => Ok(Response::General { general: self.inner.settings.general() }),
             Command::SetGeneral { general, password } => {
                 self.inner
@@ -1333,6 +1357,8 @@ impl Drop for Inner {
             if let Some(running) = account.live.lock().unwrap().running.take() {
                 running.stop();
             }
+        }        for account in self.dav.read().unwrap().iter() {
+            account.stop();
         }
     }
 }
@@ -1702,7 +1728,7 @@ fn save_download(dir: &Path, name: &str, data: &[u8]) -> std::io::Result<(PathBu
     Err(std::io::Error::other("too many files with that name"))
 }
 
-fn denied(why: settings::Denied) -> CoreError {
+pub(crate) fn denied(why: settings::Denied) -> CoreError {
     match why {
         settings::Denied::WrongPassword => {
             CoreError::new(ErrorCode::WrongPassword, "the settings password is needed, and that was not it")
@@ -1787,7 +1813,7 @@ fn conversation_rows(
 }
 
 /// A file that marks an account's directory as removed by the user.
-const REMOVED_MARK: &str = "removed-by-user";
+pub(crate) const REMOVED_MARK: &str = "removed-by-user";
 
 fn open_accounts(data_dir: &Path) -> Result<Vec<Arc<Account>>, StoreError> {
     let root = data_dir.join("accounts");

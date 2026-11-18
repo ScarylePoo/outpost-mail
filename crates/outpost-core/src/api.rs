@@ -118,6 +118,76 @@ pub enum Command {
     },
     /// Sets or changes how an account sends mail.
     SetSending { account: FolderId, sending: SendingSettings },
+    // ---- calendars, tasks and contacts (phase two) ------------------------
+    /// The calendar-and-contacts accounts, with their calendars, task lists
+    /// and address books.
+    ListDavAccounts,
+    /// Signs in to a CalDAV/CardDAV server to check the details, then adds
+    /// the account and starts syncing it. Answers `Accepted` at once; the
+    /// outcome arrives as `DavAccountAdded` or `DavAccountSetupFailed`.
+    /// `url` is the server's address; `https://` is assumed unless it says
+    /// `http://`.
+    AddDavAccount {
+        url: String,
+        username: String,
+        password: Secret,
+        remember: bool,
+    },
+    /// Supplies the password for an account that has none stored, or whose
+    /// stored one was refused.
+    ProvideDavPassword {
+        account: FolderId,
+        password: Secret,
+        remember: bool,
+    },
+    /// Removes a calendar-and-contacts account from this computer. Nothing
+    /// changes on the server. `password` is the settings password.
+    RemoveDavAccount {
+        account: FolderId,
+        #[serde(default)]
+        password: Option<Secret>,
+    },
+    /// Whether a calendar, task list or address book is synced and shown,
+    /// and in which colour (`None` is the server's own).
+    SetDavCollection {
+        account: FolderId,
+        collection: i64,
+        enabled: bool,
+        color: Option<String>,
+    },
+    /// Syncs an account now.
+    SyncDav { account: FolderId },
+    /// Every occurrence of every event between two times (unix seconds), in
+    /// every account, earliest first.
+    ListEvents { from: i64, to: i64 },
+    ListTasks,
+    /// Contacts matching every word of `query` (all of them if it is
+    /// empty), by name.
+    ListContacts { query: String, limit: u32 },
+    /// One event, task or contact in full.
+    OpenDavItem { account: FolderId, id: i64 },
+    /// Saves a new event (`id` is `None`) or changes one. It shows at once
+    /// and is sent to the server in the background.
+    SaveEvent {
+        account: FolderId,
+        collection: i64,
+        id: Option<i64>,
+        event: EventContent,
+    },
+    SaveTask {
+        account: FolderId,
+        collection: i64,
+        id: Option<i64>,
+        task: TaskContent,
+    },
+    SaveContact {
+        account: FolderId,
+        collection: i64,
+        id: Option<i64>,
+        contact: ContactContent,
+    },
+    /// Deletes an event, task or contact. The interface asks first.
+    DeleteDavItem { account: FolderId, id: i64 },
     /// The general settings.
     GetGeneral,
     /// Changes the general settings. `password` is needed if one is set.
@@ -253,6 +323,25 @@ pub enum Response {
     Thread {
         thread: ThreadView,
     },
+    DavAccounts {
+        accounts: Vec<DavAccountInfo>,
+    },
+    Events {
+        events: Vec<EventRow>,
+    },
+    Tasks {
+        tasks: Vec<TaskRow>,
+    },
+    Contacts {
+        contacts: Vec<ContactRow>,
+    },
+    DavItem {
+        item: DavItemView,
+    },
+    /// The item was saved here; `id` is its id.
+    DavSaved {
+        id: i64,
+    },
     General {
         general: crate::settings::General,
     },
@@ -323,6 +412,13 @@ pub enum Event {
     AccountAdded { account: FolderId },
     /// An account was removed from this computer.
     AccountRemoved { account: FolderId },
+    /// `AddDavAccount` succeeded.
+    DavAccountAdded { account: FolderId },
+    /// `AddDavAccount` failed. Nothing was saved.
+    DavAccountSetupFailed { error: String },
+    /// Calendars, tasks or contacts changed: an account was added or
+    /// removed, its sync state changed, or its contents did.
+    DavChanged { account: FolderId },
     /// Unread mail arrived in an inbox while the app was running. `sender`
     /// and `subject` are the newest message's.
     NewMail {
@@ -537,6 +633,121 @@ pub struct SenderCheck {
     pub name_seen_from: String,
     /// A domain the user hears from that the sender's domain resembles.
     pub lookalike_of: String,
+}
+
+/// A calendar-and-contacts account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DavAccountInfo {
+    pub id: FolderId,
+    pub name: String,
+    pub url: String,
+    pub username: String,
+    pub status: SyncStatus,
+    pub collections: Vec<DavCollectionInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DavCollectionInfo {
+    pub id: i64,
+    pub name: String,
+    /// It can hold events / tasks / contacts.
+    pub events: bool,
+    pub tasks: bool,
+    pub contacts: bool,
+    /// `#rrggbb`, if the user or the server gave it one.
+    pub color: Option<String>,
+    /// False if the user has switched it off.
+    pub enabled: bool,
+}
+
+/// One occurrence of an event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventRow {
+    pub account: FolderId,
+    pub id: i64,
+    pub collection: i64,
+    pub color: Option<String>,
+    pub summary: String,
+    pub location: String,
+    /// Unix seconds. For an all-day event, midnight UTC of its first day
+    /// and of the day after its last: days, not moments.
+    pub start: i64,
+    pub end: i64,
+    pub all_day: bool,
+    pub recurring: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRow {
+    pub account: FolderId,
+    pub id: i64,
+    pub collection: i64,
+    pub color: Option<String>,
+    pub summary: String,
+    pub due: Option<i64>,
+    /// The due time is a day, not a moment.
+    pub due_all_day: bool,
+    pub completed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContactRow {
+    pub account: FolderId,
+    pub id: i64,
+    pub collection: i64,
+    pub name: String,
+    pub emails: Vec<String>,
+}
+
+/// What the user can set on an event.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventContent {
+    pub summary: String,
+    pub location: String,
+    pub description: String,
+    pub start: i64,
+    pub end: i64,
+    pub all_day: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskContent {
+    pub summary: String,
+    pub description: String,
+    /// A day: midnight UTC.
+    pub due: Option<i64>,
+    pub completed: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContactContent {
+    pub name: String,
+    pub emails: Vec<String>,
+    pub phones: Vec<String>,
+    pub organisation: String,
+    pub note: String,
+}
+
+/// One event, task or contact in full. Exactly one of the three is set.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DavItemView {
+    pub id: i64,
+    pub collection: i64,
+    pub event: Option<EventContent>,
+    /// The event repeats. Its times here are the first occurrence's;
+    /// changing them moves the whole series.
+    pub recurring: bool,
+    pub task: Option<TaskContent>,
+    pub contact: Option<ContactContent>,
 }
 
 /// A signature checked again on this computer.

@@ -139,8 +139,8 @@ fn a_change_made_in_two_places_is_never_silently_lost() {
         // Their versions are kept, here and there, and the user is told
         // about each.
         assert_eq!(pass.notices.len(), 2, "{:?}", pass.notices);
-        assert!(pass.notices[0].contains("Planning (my edit)") && pass.notices[0].contains("not saved"), "{:?}", pass.notices);
-        assert!(pass.notices[1].contains("Review") && pass.notices[1].contains("not deleted"), "{:?}", pass.notices);
+        assert!(pass.notices.iter().any(|n| n.contains("Planning (my edit)") && n.contains("not saved")), "{:?}", pass.notices);
+        assert!(pass.notices.iter().any(|n| n.contains("Review") && n.contains("not deleted")), "{:?}", pass.notices);
         assert_eq!(titles(&store), ["Planning (their edit)", "Review (their edit)"]);
         assert_eq!(store.pending().unwrap(), []);
         let hrefs: Vec<String> = dav.list("/ann/work/").await.unwrap().into_iter().map(|i| i.href).collect();

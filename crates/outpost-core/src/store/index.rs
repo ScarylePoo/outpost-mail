@@ -608,11 +608,12 @@ impl Bulk<'_> {
              DETACH DATABASE load"
         ))?;
         let _ = std::fs::remove_file(&self.staging);
+        // Conversations are worked out once every message is in place, and
+        // before the indexes that their columns feed are built.
+        super::thread::link_all(&self.conn, |_, _| {})?;
         for (_, sql) in INDEXES {
             self.conn.execute_batch(sql)?;
         }
-        // Conversations are worked out once everything is in place.
-        super::thread::link_all(&self.conn, |_, _| {})?;
         self.conn.execute_batch(
             "UPDATE folder SET
                total  = (SELECT count(*) FROM message WHERE folder_id = folder.id),

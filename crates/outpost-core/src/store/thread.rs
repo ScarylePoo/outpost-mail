@@ -184,20 +184,177 @@ pub(super) fn link(conn: &Connection, id: i64) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Places every message, oldest first. For after a rebuild.
+fn hash(text: &str) -> u128 {
+    // Two independent 64-bit hashes: at a million messages a collision in
+    // 128 bits is not a practical possibility.
+    use std::hash::{Hash, Hasher};
+    let mut a = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut a);
+    let mut b = std::collections::hash_map::DefaultHasher::new();
+    (text, 0x9E37_79B9u32).hash(&mut b);
+    ((a.finish() as u128) << 64) | b.finish() as u128
+}
+
+/// Places every message at once, for after a rebuild. It reaches the same
+/// result as calling [`link`] for each message, but works in memory: doing a
+/// million of them one at a time through the database takes most of an hour.
 pub(super) fn link_all(conn: &Connection, mut progress: impl FnMut(u64, u64)) -> rusqlite::Result<()> {
-    conn.execute_batch("DELETE FROM reference_to; UPDATE message SET thread_id = NULL, parent_id = NULL, link_guessed = 0")?;
-    let ids: Vec<i64> = conn
-        .prepare("SELECT id FROM message ORDER BY date, id")?
-        .query_map([], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    let total = ids.len() as u64;
-    conn.execute_batch("BEGIN")?;
-    for (n, id) in ids.iter().enumerate() {
-        link(conn, *id)?;
-        if (n + 1) % 20_000 == 0 {
-            conn.execute_batch("COMMIT; BEGIN")?;
-            progress(n as u64 + 1, total);
+    use std::collections::HashMap;
+
+    // 1. Which Message-IDs are here, and which message holds each (the
+    //    earliest, as `link` would find).
+    let mut holder: HashMap<u128, u32> = HashMap::new();
+    let mut ids: Vec<i64> = Vec::new();
+    {
+        let mut all = conn.prepare("SELECT id, message_id FROM message ORDER BY id")?;
+        let mut rows = all.query([])?;
+        while let Some(row) = rows.next()? {
+            let message_id: String = row.get(1)?;
+            if !message_id.is_empty() {
+                holder.entry(hash(&message_id)).or_insert(ids.len() as u32);
+            }
+            ids.push(row.get(0)?);
+        }
+    }
+    let total = ids.len();
+
+    // Sets of messages that belong together.
+    let mut set: Vec<u32> = (0..total as u32).collect();
+    fn find(set: &mut [u32], mut i: u32) -> u32 {
+        while set[i as usize] != i {
+            set[i as usize] = set[set[i as usize] as usize];
+            i = set[i as usize];
+        }
+        i
+    }
+    fn join(set: &mut [u32], a: u32, b: u32) {
+        let (a, b) = (find(set, a), find(set, b));
+        // The lower position (the lower id) names the conversation.
+        if a != b {
+            set[a.max(b) as usize] = a.min(b);
+        }
+    }
+
+    // 2. Each message's parent: the nearest message it cites that is here.
+    let mut parent: Vec<Option<u32>> = vec![None; total];
+    let mut guessed: Vec<bool> = vec![false; total];
+    let mut keys: Vec<String> = vec![String::new(); total];
+    // Messages citing something that is not here, by what they cite.
+    let mut orphans: HashMap<u128, u32> = HashMap::new();
+    let mut missing: Vec<(String, i64)> = Vec::new();
+    // Replies that cite nothing, to be placed by subject afterwards.
+    let mut uncited: Vec<u32> = Vec::new();
+    // Every message by subject, for those guesses: (date, position).
+    let mut by_subject: HashMap<String, Vec<(i64, u32)>> = HashMap::new();
+    {
+        let mut all = conn.prepare("SELECT id, message_id, in_reply_to, refs, subject, date FROM message ORDER BY id")?;
+        let mut rows = all.query([])?;
+        let mut n = 0u32;
+        while let Some(row) = rows.next()? {
+            let me = n;
+            n += 1;
+            let message_id: String = row.get(1)?;
+            let in_reply_to: String = row.get(2)?;
+            let refs: String = row.get(3)?;
+            let subject: String = row.get(4)?;
+            let date: i64 = row.get(5)?;
+            let (key, is_reply) = subject_key(&subject);
+
+            let mut cited: Vec<&str> = refs.split_whitespace().filter(|r| *r != message_id).collect();
+            if !in_reply_to.is_empty() && in_reply_to != message_id {
+                cited.retain(|r| *r != in_reply_to);
+                cited.push(&in_reply_to);
+            }
+            for cite in cited.iter().rev() {
+                match holder.get(&hash(cite)) {
+                    Some(&found) if found != me => {
+                        if parent[me as usize].is_none() {
+                            parent[me as usize] = Some(found);
+                        }
+                        join(&mut set, me, found);
+                    }
+                    Some(_) => {}
+                    None => {
+                        // Keep it findable for a message that arrives later,
+                        // and join everyone else waiting on the same one.
+                        missing.push((cite.to_string(), ids[me as usize]));
+                        match orphans.get(&hash(cite)) {
+                            Some(&other) => join(&mut set, me, other),
+                            None => {
+                                orphans.insert(hash(cite), me);
+                            }
+                        }
+                    }
+                }
+            }
+            if cited.is_empty() && is_reply && !key.is_empty() {
+                uncited.push(me);
+            }
+            if !key.is_empty() {
+                by_subject.entry(key.clone()).or_default().push((date, me));
+            }
+            keys[me as usize] = key;
+            if n % 100_000 == 0 {
+                progress(n as u64 / 2, total as u64);
+            }
+        }
+    }
+
+    // 3. Guesses by subject, for replies that cite nothing.
+    for list in by_subject.values_mut() {
+        list.sort_unstable();
+    }
+    {
+        let mut who = conn.prepare("SELECT date, from_addr, recipients FROM message WHERE id = ?1")?;
+        let mut people = |id: i64| -> rusqlite::Result<(i64, String, String)> {
+            who.query_row([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        };
+        for me in uncited {
+            let (date, from, to) = people(ids[me as usize])?;
+            let Some(candidates) = by_subject.get(&keys[me as usize]) else { continue };
+            // Latest first, among those no later than this message and
+            // within the window.
+            let end = candidates.partition_point(|(d, _)| *d <= date);
+            for &(when, other) in candidates[..end].iter().rev().take(25) {
+                if when < date - GUESS_WINDOW {
+                    break;
+                }
+                if other == me {
+                    continue;
+                }
+                let (_, other_from, other_to) = people(ids[other as usize])?;
+                if share_participant(&from, &to, &other_from, &other_to) {
+                    parent[me as usize] = Some(other);
+                    guessed[me as usize] = true;
+                    join(&mut set, me, other);
+                    break;
+                }
+            }
+        }
+    }
+
+    // 4. Write it all back.
+    conn.execute_batch("DELETE FROM reference_to; BEGIN")?;
+    {
+        let mut update = conn.prepare(
+            "UPDATE message SET thread_id = ?1, parent_id = ?2, link_guessed = ?3, subject_key = ?4 WHERE id = ?5",
+        )?;
+        for i in 0..total {
+            let root = find(&mut set, i as u32);
+            update.execute(params![
+                ids[root as usize],
+                parent[i].map(|p| ids[p as usize]),
+                guessed[i],
+                keys[i],
+                ids[i]
+            ])?;
+            if (i + 1) % 100_000 == 0 {
+                progress((total + i) as u64 / 2, total as u64);
+            }
+        }
+        let mut cite = conn.prepare("INSERT INTO reference_to (ref, message) VALUES (?1, ?2)")?;
+        for (reference, message) in &missing {
+            cite.execute(params![reference, message])?;
         }
     }
     conn.execute_batch("COMMIT")

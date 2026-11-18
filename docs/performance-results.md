@@ -25,7 +25,19 @@ threading, ordering, building indexes and compacting). Index file 2.54 GB,
 Before compacting was added, the cold figures for the same four opens were
 147, 359, 124 and 218 ms: all missed. See the decision log.
 
-WINDOWS_RESULTS
+Windows, measured straight after the rebuild, so the file cache was warm and
+"first" is **not** a cold read here (a cold Windows figure needs a reboot
+first, and has not been taken for this milestone):
+
+| Operation | First | Typical | Target |
+| --- | --- | --- | --- |
+| Open Inbox | 13 ms | 10 ms | 100 ms |
+| Open Archive | 27 ms | 21 ms | 100 ms |
+| Open Inbox as conversations | 17 ms | 11 ms | 100 ms |
+| Open Archive as conversations | 21 ms | 17 ms | 100 ms |
+| Load a page at the middle / end of Archive | 5 / 10 ms | 5 / 9 ms | 16 ms |
+
+Rebuild on Windows: 517 s (389 s reading and indexing, 115 s finishing).
 
 ## Milestone 1 · 17 November 2026 · one million messages
 

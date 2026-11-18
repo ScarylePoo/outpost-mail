@@ -20,6 +20,18 @@ import { asking, general, loadProtection, messageActions } from "./core/protecti
 import { PasswordAsk, Settings } from "./settings/Settings";
 import { MenuBar, type Menu } from "./MenuBar";
 import { pressed, SHORTCUTS } from "./shortcuts";
+import { Calendar } from "./organizer/Calendar";
+import { People } from "./organizer/People";
+import { Tasks } from "./organizer/Tasks";
+import { davAccounts, davChanged, loadDavAccounts } from "./organizer/store";
+
+type View = "mail" | "calendar" | "people" | "tasks";
+const VIEWS: { id: View; label: string }[] = [
+  { id: "mail", label: "Mail" },
+  { id: "calendar", label: "Calendar" },
+  { id: "people", label: "People" },
+  { id: "tasks", label: "Tasks" },
+];
 
 type Panel =
   | { kind: "none" }
@@ -75,6 +87,10 @@ export function App() {
       // Not remembered, then; it still applies for this run.
     }
   }
+  /** Which of Mail, Calendar, People and Tasks is on show. */
+  const [view, setView] = createSignal<View>("mail");
+  /** The calendar, people or tasks view covers the mail panes, unless a panel (settings, a message being written) is open. */
+  const organizing = () => view() !== "mail" && panel().kind === "none";
   /** How many messages are selected in the list. */
   const [count, setCount] = createSignal(0);
   const [panel, setPanel] = createSignal<Panel>({ kind: "none" });
@@ -157,6 +173,7 @@ export function App() {
       .catch((e) => setNotice(`Core not responding: ${e?.message ?? e}`));
     void loadAccounts();
     void loadProtection();
+    void loadDavAccounts();
     // What the reading pane's failed-message view can ask for.
     messageActions.remove = () => void remove();
     messageActions.moveToJunk = () => {
@@ -169,6 +186,9 @@ export function App() {
     const params = new URLSearchParams(location.search);
     void loadFolders().then(() => {
       if (params.get("panel") === "add") setPanel({ kind: "add" });
+      // `?view=calendar` (or people, tasks) opens on that view.
+      const wanted = params.get("view");
+      if (wanted === "calendar" || wanted === "people" || wanted === "tasks") setView(wanted);
       if (params.get("panel") === "protection") setPanel({ kind: "settings", find: "protection" });
       if (params.get("panel") === "settings") setPanel({ kind: "settings", find: params.get("find") ?? "" });
       if (params.get("q")) setQuery(params.get("q")!);
@@ -201,6 +221,10 @@ export function App() {
           break;
         case "accountAdded":
           void loadAccounts();
+          break;
+        case "davChanged":
+        case "davAccountAdded":
+          davChanged();
           break;
         case "accountRemoved":
           setMessage(undefined);
@@ -470,7 +494,14 @@ export function App() {
       .catch((e) => setNotice(String(e?.message ?? e)));
   }
 
+  /** Shows the calendar, people or tasks, closing settings if it is open. */
+  function go(to: View) {
+    if (["settings", "add", "password"].includes(panel().kind)) setPanel({ kind: "none" });
+    setView(to);
+  }
+
   function focusSearch() {
+    setView("mail");
     setPanel({ kind: "none" });
     queueMicrotask(() => (document.querySelector(".search input") as HTMLInputElement | null)?.focus());
   }
@@ -486,6 +517,10 @@ export function App() {
     flag: { run: () => void toggleFlag(), can: () => target() !== undefined },
     read: { run: () => void markRead(true), can: () => target() !== undefined },
     unread: { run: () => void markRead(false), can: () => target() !== undefined },
+    mail: { run: () => setView("mail"), can: () => true },
+    calendar: { run: () => go("calendar"), can: () => true },
+    people: { run: () => go("people"), can: () => true },
+    tasks: { run: () => go("tasks"), can: () => true },
     search: { run: focusSearch, can: () => folderId() !== undefined },
     sync: { run: syncNow, can: () => canSync() },
     print: { run: () => window.print(), can: () => message() !== undefined },
@@ -553,6 +588,8 @@ export function App() {
         { label: "Single messages", run: () => chooseLayout(false), checked: !conversations() },
         null,
         entry("search", "Search"),
+        null,
+        ...VIEWS.map((v) => ({ ...entry(v.id, v.label), checked: view() === v.id })),
       ],
     },
     {
@@ -582,6 +619,7 @@ export function App() {
         null,
         { label: "Protection settings", run: () => setPanel({ kind: "settings", find: "protection" }) },
         { label: "Account settings", run: () => setPanel({ kind: "settings", find: "account" }) },
+        { label: "Calendar and contacts accounts", run: () => setPanel({ kind: "settings", find: "calendar account" }) },
       ],
     },
     {
@@ -594,7 +632,7 @@ export function App() {
   ];
 
   return (
-    <div class="app">
+    <div class="app" classList={{ organizing: organizing() }}>
       <MenuBar menus={menus()} />
       <header class="toolbar">
         <span class="brand">Outpost</span>
@@ -667,6 +705,53 @@ export function App() {
       </header>
 
       <nav class="folders" aria-label="Folders">
+       <div class="folders-scroll">
+        <Show when={view() !== "mail"}>
+          <For
+            each={davAccounts()}
+            fallback={
+              <div class="side-hint">
+                <p>No calendar or contacts account yet.</p>
+                <button onClick={() => setPanel({ kind: "settings", find: "calendar account" })}>Add one in Settings</button>
+              </div>
+            }
+          >
+            {(a) => {
+              const wanted = () => a.collections.filter((c) => (view() === "calendar" ? c.events : view() === "tasks" ? c.tasks : c.contacts));
+              return (
+                <>
+                  <div class="account" title={a.url}>
+                    <span class="account-name">{a.username}</span>
+                    <Show when={a.status.state === "needsPassword" || a.status.state === "signInFailed"}>
+                      <button class="sign-in" onClick={() => setPanel({ kind: "settings", find: "calendar account" })}>
+                        Sign in
+                      </button>
+                    </Show>
+                  </div>
+                  <For each={wanted()} fallback={<div class="side-hint">Nothing of this kind on this account.</div>}>
+                    {(c) => (
+                      <label class="side-collection">
+                        <input
+                          type="checkbox"
+                          checked={c.enabled}
+                          onChange={(e) =>
+                            send({ type: "setDavCollection", account: a.id, collection: c.id, enabled: e.currentTarget.checked, color: c.color })
+                          }
+                        />
+                        <span class="side-color" style={{ background: c.color ?? "var(--text-3)" }} />
+                        <span class="folder-name">{c.name}</span>
+                      </label>
+                    )}
+                  </For>
+                  <Show when={a.status.state === "offline"}>
+                    <div class="side-hint problem">{a.status.detail}</div>
+                  </Show>
+                </>
+              );
+            }}
+          </For>
+        </Show>
+        <Show when={view() === "mail"}>
         <For each={folders()}>
           {(f) => (
             <Show
@@ -722,7 +807,34 @@ export function App() {
             </form>
           )}
         </Show>
+        </Show>
+       </div>
+        <div class="switcher" role="tablist" aria-label="Mail, calendar, people and tasks">
+          <For each={VIEWS}>
+            {(v) => (
+              <button role="tab" aria-selected={view() === v.id} classList={{ on: view() === v.id }} onClick={() => (v.id === "mail" ? setView("mail") : go(v.id))}>
+                {v.label}
+              </button>
+            )}
+          </For>
+        </div>
       </nav>
+
+      <Show when={organizing()}>
+        <div class="organizer-area">
+          <Switch>
+            <Match when={view() === "calendar"}>
+              <Calendar />
+            </Match>
+            <Match when={view() === "tasks"}>
+              <Tasks />
+            </Match>
+            <Match when={view() === "people"}>
+              <People onWrite={(to) => compose({ ...EMPTY_DRAFT, to })} />
+            </Match>
+          </Switch>
+        </div>
+      </Show>
 
       <main class="list-pane">
         <Show when={folder()} keyed>

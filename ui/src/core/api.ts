@@ -14,6 +14,20 @@ export type Command =
   | { type: "openMessage"; folder: FolderId; id: number }
   | { type: "openThread"; folder: FolderId; id: number }
   | { type: "recheckSignature"; folder: FolderId; id: number }
+  | { type: "listDavAccounts" }
+  | { type: "addDavAccount"; url: string; username: string; password: string; remember: boolean }
+  | { type: "provideDavPassword"; account: FolderId; password: string; remember: boolean }
+  | { type: "removeDavAccount"; account: FolderId; password?: string | null }
+  | { type: "setDavCollection"; account: FolderId; collection: number; enabled: boolean; color: string | null }
+  | { type: "syncDav"; account: FolderId }
+  | { type: "listEvents"; from: number; to: number }
+  | { type: "listTasks" }
+  | { type: "listContacts"; query: string; limit: number }
+  | { type: "openDavItem"; account: FolderId; id: number }
+  | { type: "saveEvent"; account: FolderId; collection: number; id: number | null; event: EventContent }
+  | { type: "saveTask"; account: FolderId; collection: number; id: number | null; task: TaskContent }
+  | { type: "saveContact"; account: FolderId; collection: number; id: number | null; contact: ContactContent }
+  | { type: "deleteDavItem"; account: FolderId; id: number }
   | { type: "getGeneral" }
   | { type: "setGeneral"; general: General; password?: string | null }
   | { type: "updateAccount"; account: FolderId; host: string; port: number; encrypted: boolean; signature: string; password?: string | null }
@@ -95,6 +109,98 @@ export interface SignatureLine {
   outcome: "valid" | "mismatch" | "unknown";
   sentence: string;
   aligned: boolean;
+}
+
+/** A calendar-and-contacts account. */
+export interface DavAccountInfo {
+  id: FolderId;
+  name: string;
+  url: string;
+  username: string;
+  status: SyncStatus;
+  collections: DavCollectionInfo[];
+}
+
+export interface DavCollectionInfo {
+  id: number;
+  name: string;
+  events: boolean;
+  tasks: boolean;
+  contacts: boolean;
+  color: string | null;
+  enabled: boolean;
+}
+
+/** One occurrence of an event. */
+export interface EventRow {
+  account: FolderId;
+  id: number;
+  collection: number;
+  color: string | null;
+  summary: string;
+  location: string;
+  /**
+   * Unix seconds. For an all-day event these are days, not moments:
+   * midnight UTC of its first day and of the day after its last.
+   */
+  start: number;
+  end: number;
+  allDay: boolean;
+  recurring: boolean;
+}
+
+export interface TaskRow {
+  account: FolderId;
+  id: number;
+  collection: number;
+  color: string | null;
+  summary: string;
+  due: number | null;
+  dueAllDay: boolean;
+  completed: boolean;
+}
+
+export interface ContactRow {
+  account: FolderId;
+  id: number;
+  collection: number;
+  name: string;
+  emails: string[];
+}
+
+export interface EventContent {
+  summary: string;
+  location: string;
+  description: string;
+  start: number;
+  end: number;
+  allDay: boolean;
+}
+
+export interface TaskContent {
+  summary: string;
+  description: string;
+  /** A day: midnight UTC. */
+  due: number | null;
+  completed: boolean;
+}
+
+export interface ContactContent {
+  name: string;
+  emails: string[];
+  phones: string[];
+  organisation: string;
+  note: string;
+}
+
+/** One event, task or contact in full. Exactly one of the three is set. */
+export interface DavItemView {
+  id: number;
+  collection: number;
+  event: EventContent | null;
+  recurring: boolean;
+  task: TaskContent | null;
+  contact: ContactContent | null;
 }
 
 /** How the app behaves in general. */
@@ -273,6 +379,12 @@ export type Response =
   | { type: "message"; message: MessageView }
   | { type: "thread"; thread: ThreadView }
   | { type: "signatureRechecked"; signatures: SignatureLine[]; verified: boolean }
+  | { type: "davAccounts"; accounts: DavAccountInfo[] }
+  | { type: "events"; events: EventRow[] }
+  | { type: "tasks"; tasks: TaskRow[] }
+  | { type: "contacts"; contacts: ContactRow[] }
+  | { type: "davItem"; item: DavItemView }
+  | { type: "davSaved"; id: number }
   | { type: "general"; general: General }
   | { type: "protection"; protection: Protection; passwordSet: boolean }
   | { type: "attachmentSaved"; path: string; name: string }
@@ -292,6 +404,9 @@ export type CoreEvent =
   | { type: "notice"; account: FolderId; text: string }
   | { type: "accountAdded"; account: FolderId }
   | { type: "accountRemoved"; account: FolderId }
+  | { type: "davAccountAdded"; account: FolderId }
+  | { type: "davAccountSetupFailed"; error: string }
+  | { type: "davChanged"; account: FolderId }
   | { type: "newMail"; account: FolderId; folder: FolderId; count: number; sender: string; subject: string }
   | { type: "accountSetupFailed"; error: string };
 
@@ -310,6 +425,20 @@ type ResponseFor = {
   openMessage: "message";
   openThread: "thread";
   recheckSignature: "signatureRechecked";
+  listDavAccounts: "davAccounts";
+  addDavAccount: "accepted";
+  provideDavPassword: "accepted";
+  removeDavAccount: "accepted";
+  setDavCollection: "accepted";
+  syncDav: "accepted";
+  listEvents: "events";
+  listTasks: "tasks";
+  listContacts: "contacts";
+  openDavItem: "davItem";
+  saveEvent: "davSaved";
+  saveTask: "davSaved";
+  saveContact: "davSaved";
+  deleteDavItem: "accepted";
   getGeneral: "general";
   setGeneral: "general";
   updateAccount: "accepted";

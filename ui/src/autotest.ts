@@ -31,7 +31,8 @@ async function probe(details: string): Promise<string> {
   const lines: string[] = ["Outpost app self-test"];
   try {
     await sleep(800);
-    await core.send({ type: "addAccount", ...JSON.parse(details) });
+    const { dav, ...mail } = JSON.parse(details);
+    await core.send({ type: "addAccount", ...mail });
     // Long enough for sign-in, a first sync, and the window to catch up.
     const deadline = Date.now() + 20_000;
     while (Date.now() < deadline && !events.some((e) => e === "status:upToDate" || e.startsWith("accountSetupFailed")))
@@ -170,6 +171,50 @@ async function probe(details: string): Promise<string> {
     window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     await sleep(300);
     lines.push(`settings closed by Escape: ${document.querySelector(".settings") ? "NO" : "yes"}`);
+
+    // Calendars, tasks and contacts, against the test's own server.
+    if (dav) {
+      await core.send({ type: "addDavAccount", url: dav.url, username: dav.username, password: dav.password, remember: false });
+      const until = Date.now() + 15_000;
+      while (Date.now() < until && !events.some((e) => e === "davAccountAdded" || e === "davAccountSetupFailed")) await sleep(100);
+      await sleep(1500);
+      const tab = (label: string) =>
+        ([...document.querySelectorAll(".switcher button")].find((b) => b.textContent?.trim() === label) as HTMLButtonElement | undefined)?.click();
+      const type = (selector: string, value: string) => {
+        const input = document.querySelector(selector) as HTMLInputElement | null;
+        if (!input) return false;
+        input.value = value;
+        input.dispatchEvent(new InputEvent("input", { bubbles: true }));
+        return true;
+      };
+      tab("Calendar");
+      await sleep(700);
+      lines.push(`calendar sidebar: ${text(".side-collection").join(" | ")}`);
+      ([...document.querySelectorAll(".organizer-head button")].find((b) => b.textContent?.trim() === "New event") as HTMLButtonElement | undefined)?.click();
+      await sleep(400);
+      type(".organizer-side .panel input[type=text]", "Made in the window, with a comma");
+      (document.querySelector(".organizer-side .panel button.primary") as HTMLButtonElement | null)?.click();
+      await sleep(1500);
+      lines.push(`calendar shows today: ${text(".month-day.today .month-event").join(" | ")}`);
+      tab("Tasks");
+      await sleep(500);
+      lines.push(`tasks before: ${text(".task-list li .task-title").join(" | ") || "(none)"}`);
+      type(".task-add input", "Buy milk");
+      (document.querySelector(".task-add") as HTMLFormElement | null)?.requestSubmit();
+      await sleep(1200);
+      lines.push(`tasks after adding one: ${text(".task-list li .task-title").join(" | ")}`);
+      (document.querySelector(".task-list li input[type=checkbox]") as HTMLInputElement | null)?.click();
+      await sleep(1200);
+      lines.push(`ticked off: ${document.querySelectorAll(".task-list li.done").length} of ${document.querySelectorAll(".task-list li").length}`);
+      tab("People");
+      await sleep(700);
+      lines.push(`people: ${text(".people-list .person strong").join(" | ")}`);
+      // Time for the changes to reach the server before the app closes.
+      await sleep(2500);
+      tab("Mail");
+    } else {
+      lines.push("calendar: not tested here (no calendar server was given)");
+    }
   } catch (e) {
     lines.push(`FAILED: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
   }

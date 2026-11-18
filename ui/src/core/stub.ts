@@ -136,9 +136,15 @@ function row(i: number): MessageRow {
   };
 }
 
+import { answerOrganizer } from "./stubOrganizer";
+
 const listeners = new Set<(event: CoreEvent) => void>();
 
 function answer(command: Command): Response {
+  const organizer = answerOrganizer(command, () => {
+    for (const listener of listeners) listener({ type: "davChanged", account: "dav/stub" });
+  });
+  if (organizer) return organizer;
   const folder = (id: string) => {
     const f = FOLDERS.find((f) => f.id === id);
     if (!f) throw { code: "unknownFolder", message: `no folder "${id}"` };
@@ -346,6 +352,9 @@ function answer(command: Command): Response {
     case "providePassword":
     case "syncNow":
       return { type: "accepted" };
+    default:
+      // The calendar, task and contact commands were answered above.
+      throw { code: "badCommand", message: `the stub does not answer ${command.type}` };
   }
 }
 

@@ -2,8 +2,9 @@
 // search box that narrows the page as you type. It takes the place of the
 // reading pane while open; nothing here is modal.
 
-import { createMemo, createSignal, For, type JSX, Show } from "solid-js";
-import { core, type AccountInfo, type General, type Protection } from "../core";
+import { createMemo, createSignal, For, type JSX, onCleanup, onMount, Show } from "solid-js";
+import { core, type AccountInfo, type DavAccountInfo, type General, type Protection } from "../core";
+import { davAccounts } from "../organizer/store";
 import { general, passwordSet, protection, saveGeneral, savePassword, saveProtection, withPassword } from "../core/protection";
 import { SHORTCUTS } from "../shortcuts";
 
@@ -77,6 +78,203 @@ function Switch(props: { on: boolean; label: string; hint?: string; change: (on:
       </Show>
     </>
   );
+}
+
+/** Adding a calendar-and-contacts account. */
+function AddDav() {
+  const [url, setUrl] = createSignal("");
+  const [username, setUsername] = createSignal("");
+  const [password, setPassword] = createSignal("");
+  const [remember, setRemember] = createSignal(true);
+  const [checking, setChecking] = createSignal(false);
+  const [note, setNote] = createSignal("");
+
+  onMount(() => {
+    const stop = core.onEvent((event) => {
+      if (!checking()) return;
+      if (event.type === "davAccountAdded") {
+        setChecking(false);
+        setNote("Added. Its calendars and address books are listed above.");
+        setUrl("");
+        setUsername("");
+        setPassword("");
+      } else if (event.type === "davAccountSetupFailed") {
+        setChecking(false);
+        setNote(`Could not add the account: ${event.error}`);
+      }
+    });
+    onCleanup(stop);
+  });
+
+  return (
+    <form
+      onSubmit={(e) => {
+        e.preventDefault();
+        setNote("");
+        setChecking(true);
+        core
+          .send({ type: "addDavAccount", url: url(), username: username(), password: password(), remember: remember() })
+          .catch((e) => {
+            setChecking(false);
+            setNote(errorText(e));
+          });
+      }}
+    >
+      <div class="setting-title">Add a calendar and contacts account</div>
+      <p class="panel-hint flush">
+        For a CalDAV or CardDAV server: Nextcloud, Radicale, Baikal, Fastmail and others. Give the server's address;
+        Outpost finds your calendars, task lists and address books on it.
+      </p>
+      <label>
+        Server address
+        <input type="text" spellcheck={false} required placeholder="dav.example.com" value={url()} onInput={(e) => setUrl(e.currentTarget.value)} />
+      </label>
+      <Show when={/^http:\/\//i.test(url().trim())}>
+        <p class="panel-warning">
+          An address starting with http:// is not encrypted: your password and data cross the network readable by
+          anyone in between. Only use it for a server on your own machine.
+        </p>
+      </Show>
+      <div class="panel-row">
+        <label class="grow">
+          User name
+          <input type="text" spellcheck={false} required autocomplete="off" value={username()} onInput={(e) => setUsername(e.currentTarget.value)} />
+        </label>
+        <label class="grow">
+          Password
+          <input type="password" required autocomplete="new-password" value={password()} onInput={(e) => setPassword(e.currentTarget.value)} />
+        </label>
+      </div>
+      <label class="check">
+        <input type="checkbox" checked={remember()} onChange={(e) => setRemember(e.currentTarget.checked)} />
+        Remember the password on this computer
+      </label>
+      <Show when={note()}>
+        <p class="panel-note" role="status">
+          {note()}
+        </p>
+      </Show>
+      <button type="submit" disabled={checking()}>
+        {checking() ? "Checking…" : "Sign in and add"}
+      </button>
+    </form>
+  );
+}
+
+/** Everything about one calendar-and-contacts account. */
+function davItems(account: DavAccountInfo, say: (text: string) => void): Item[] {
+  const who = `${account.username} ${account.url} calendar contacts account caldav carddav`;
+  const kind = (c: DavAccountInfo["collections"][number]) =>
+    c.contacts ? "address book" : c.events && c.tasks ? "calendar and tasks" : c.tasks ? "task list" : "calendar";
+  const [password, setPassword] = createSignal("");
+  const needsPassword = () => account.status.state === "needsPassword" || account.status.state === "signInFailed";
+  return [
+    {
+      words: `${who} status sync`,
+      view: () => (
+        <div class="setting-line">
+          <span>
+            {account.url}
+            <span class="setting-aside">
+              {account.status.state === "upToDate"
+                ? "Up to date."
+                : account.status.state === "syncing"
+                  ? "Syncing…"
+                  : account.status.state === "offline"
+                    ? `Not reachable: ${account.status.detail}`
+                    : account.status.state === "signInFailed"
+                      ? "The server refused the password."
+                      : account.status.state === "needsPassword"
+                        ? "Needs its password."
+                        : ""}
+            </span>
+          </span>
+          <button onClick={() => void core.send({ type: "syncDav", account: account.id }).catch((e) => say(errorText(e)))}>Sync now</button>
+        </div>
+      ),
+    },
+    ...(needsPassword()
+      ? [
+          {
+            words: `${who} password sign in`,
+            view: () => (
+              <form
+                class="setting-line"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  core
+                    .send({ type: "provideDavPassword", account: account.id, password: password(), remember: true })
+                    .then(() => setPassword(""))
+                    .catch((e) => say(errorText(e)));
+                }}
+              >
+                <label class="grow">
+                  Password for {account.username}
+                  <input type="password" required value={password()} onInput={(e) => setPassword(e.currentTarget.value)} />
+                </label>
+                <button type="submit">Sign in</button>
+              </form>
+            ),
+          } satisfies Item,
+        ]
+      : []),
+    ...account.collections.map(
+      (c): Item => ({
+        words: `${who} ${c.name} ${kind(c)} colour color show sync`,
+        view: () => (
+          <div class="setting-line">
+            <label class="check">
+              <input
+                type="checkbox"
+                checked={c.enabled}
+                onChange={(e) =>
+                  void core
+                    .send({ type: "setDavCollection", account: account.id, collection: c.id, enabled: e.currentTarget.checked, color: c.color })
+                    .catch((err) => say(errorText(err)))
+                }
+              />
+              {c.name}
+              <span class="setting-aside inline-aside">{kind(c)}</span>
+            </label>
+            <Show when={!c.contacts}>
+              <input
+                type="color"
+                aria-label={`Colour of ${c.name}`}
+                value={c.color ?? "#5b626c"}
+                onChange={(e) =>
+                  void core
+                    .send({ type: "setDavCollection", account: account.id, collection: c.id, enabled: c.enabled, color: e.currentTarget.value })
+                    .catch((err) => say(errorText(err)))
+                }
+              />
+            </Show>
+          </div>
+        ),
+      }),
+    ),
+    {
+      words: `${who} remove delete`,
+      view: () => (
+        <div class="setting-line">
+          <span>
+            Remove this account from this computer
+            <span class="setting-aside">Its calendars and contacts are deleted here. Nothing changes on the server.</span>
+          </span>
+          <button
+            class="danger"
+            onClick={() => {
+              if (!window.confirm(`Remove ${account.username} on ${account.url} from this computer? Everything stays on the server.`)) return;
+              withPassword(`To remove ${account.username}`, (password) => core.send({ type: "removeDavAccount", account: account.id, password })).catch((e) =>
+                say(errorText(e)),
+              );
+            }}
+          >
+            Remove account
+          </button>
+        </div>
+      ),
+    },
+  ];
 }
 
 /** Everything about one account. */
@@ -494,15 +692,22 @@ export function Settings(props: {
       .filter((a) => a.host)
       .map(
         (account): Section => ({
-          title: `Account: ${account.username}`,
+          title: `Mail account: ${account.username}`,
           items: accountItems(account, props.onAccountsChanged, setNote, props.onPassword),
         }),
       ),
+    ...davAccounts().map(
+      (account): Section => ({ title: `Calendar and contacts: ${account.username}`, items: davItems(account, setNote) }),
+    ),
     {
-      title: "Accounts",
+      title: "Calendar and contacts accounts",
+      items: [{ words: "add calendar contacts account caldav carddav nextcloud tasks address book", view: () => <AddDav /> }],
+    },
+    {
+      title: "Mail accounts",
       items: [
         {
-          words: "add account new mailbox imap",
+          words: "add mail account new mailbox imap",
           view: () => (
             <div class="setting-line">
               <span>Add a mail account</span>

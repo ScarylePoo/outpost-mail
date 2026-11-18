@@ -192,6 +192,8 @@ service stats {{
         host = subprocess.check_output(["hostname", "-I"], text=True).split()[0] if windows else "127.0.0.1"
         smtp = Threaded(("0.0.0.0" if windows else "127.0.0.1", 0), FakeSmtp)
         threading.Thread(target=smtp.serve_forever, daemon=True).start()
+        # A throwaway calendar and contacts server too, if Radicale is here.
+        radicale, dav = start_radicale(work, host, windows)
         report = os.path.join(shared, "report.txt")
         env = dict(
             os.environ,
@@ -206,11 +208,12 @@ service stats {{
                     "name": "Self Test", "address": "tester@example.com",
                     "host": host, "port": smtp.server_address[1], "security": "plaintext",
                 },
+                "dav": dav,
             }),
             WEBKIT_DISABLE_DMABUF_RENDERER="1",
         )
         app = subprocess.Popen([APP], env=env, **quiet)
-        deadline = time.time() + 90
+        deadline = time.time() + 120
         delivered = False
         while app.poll() is None and time.time() < deadline:
             if not delivered and os.path.exists(report) and open(report).read() == "READY":
@@ -241,14 +244,84 @@ service stats {{
             print(f"handed to the outgoing server: from {sender} to {recipients}; {subject}; body arrived: {said}")
         if not SENT:
             print("handed to the outgoing server: NOTHING")
+        if dav:
+            print("calendar server holds:", sorted(dav_summaries(dav)))
+        else:
+            print("calendar server: SKIPPED, Radicale is not installed")
         saved = os.path.join(shared, "data", "accounts", "tester", "account.json")
         if os.path.exists(saved):
             text = open(saved).read()
             print("account.json holds the password!" if PASSWORD in text else "account.json: saved, no password in it")
     finally:
+        if "radicale" in locals() and radicale:
+            radicale.kill()
         subprocess.run([DOVECOT, "-c", conf, "stop"], **quiet)
         shutil.rmtree(work, ignore_errors=True)
         shutil.rmtree(shared, ignore_errors=True)
+
+
+def radicale_env():
+    own = os.environ.get("OUTPOST_RADICALE", os.path.expanduser("~/outpost-dav"))
+    return dict(os.environ, PYTHONPATH=own + os.pathsep + os.environ.get("PYTHONPATH", ""))
+
+
+def dav_request(dav, method, path, body=b"", headers=None):
+    import base64
+    import urllib.request
+    request = urllib.request.Request(f"http://127.0.0.1:{dav['port']}{path}", data=body or None, method=method, headers=headers or {})
+    token = base64.b64encode(f"{dav['username']}:{dav['password']}".encode()).decode()
+    request.add_header("Authorization", f"Basic {token}")
+    with urllib.request.urlopen(request, timeout=10) as response:
+        return response.read().decode()
+
+
+def start_radicale(work, host, windows):
+    """Starts a private Radicale with a calendar and an address book.
+    Returns (process, details for the app), or (None, None) without it."""
+    env = radicale_env()
+    if subprocess.run([sys.executable, "-c", "import radicale"], env=env, capture_output=True).returncode != 0:
+        return None, None
+    import socket
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    storage = os.path.join(work, "radicale")
+    os.makedirs(storage)
+    users = os.path.join(work, "radicale-users")
+    with open(users, "w") as f:
+        f.write(f"tester:{PASSWORD}\n")
+    process = subprocess.Popen(
+        [sys.executable, "-m", "radicale", f"--server-hosts={'0.0.0.0' if windows else '127.0.0.1'}:{port}",
+         f"--storage-filesystem-folder={storage}", "--auth-type=htpasswd", f"--auth-htpasswd-filename={users}",
+         "--auth-htpasswd-encryption=plain", "--auth-delay=0"],
+        env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    dav = {"url": f"http://{host}:{port}/", "port": port, "username": "tester", "password": PASSWORD}
+    mkcol = ('<d:mkcol xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:card="urn:ietf:params:xml:ns:carddav">'
+             '<d:set><d:prop><d:resourcetype><d:collection/>%s</d:resourcetype><d:displayname>%s</d:displayname></d:prop></d:set></d:mkcol>')
+    for _ in range(100):
+        try:
+            dav_request(dav, "MKCOL", "/tester/diary/", (mkcol % ("<c:calendar/>", "Diary")).encode(), {"Content-Type": "application/xml"})
+            break
+        except OSError:
+            time.sleep(0.1)
+    dav_request(dav, "MKCOL", "/tester/people/", (mkcol % ("<card:addressbook/>", "People")).encode(), {"Content-Type": "application/xml"})
+    card = "BEGIN:VCARD\r\nVERSION:3.0\r\nUID:dana\r\nFN:Dana Dubois\r\nN:Dubois;Dana;;;\r\nEMAIL:dana@example.com\r\nEND:VCARD\r\n"
+    dav_request(dav, "PUT", "/tester/people/dana.vcf", card.encode(), {"Content-Type": "text/vcard"})
+    return process, dav
+
+
+def dav_summaries(dav):
+    """The titles of everything in the test calendar, as the server has it."""
+    import re
+    listing = dav_request(dav, "PROPFIND", "/tester/diary/", b"", {"Depth": "1"})
+    found = []
+    for href in re.findall(r"<[^>]*href>([^<]+\.ics)<", listing):
+        text = dav_request(dav, "GET", href)
+        kind = "task" if "BEGIN:VTODO" in text else "event"
+        for line in text.splitlines():
+            if line.startswith("SUMMARY:"):
+                found.append(f"{kind}: {line[8:]}")
+    return found
 
 
 if __name__ == "__main__":

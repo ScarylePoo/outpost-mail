@@ -238,3 +238,67 @@ async fn tls_connections_work_and_certificates_are_checked() {
     let not_tls = outpost_core::imap::Server { port: server.port, ..tls };
     assert!(Session::connect(&not_tls, "tina", PASSWORD).await.is_err());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn changes_are_made_exactly_and_only_where_asked() {
+    let Some(server) = TestServer::start() else { return };
+    let mut other = server.other_client("wes");
+    other.cmd("CREATE Target");
+    for n in 1..=6 {
+        other.append("INBOX", "", &message(n, &format!("m{n}"), "b"));
+    }
+    // Another client has marked a message for deletion without expunging.
+    other.cmd("SELECT INBOX");
+    other.cmd("UID STORE 6 +FLAGS (\\Deleted)");
+
+    let mut session = Session::connect(&server.server(), "wes", PASSWORD).await.unwrap();
+    session.select(b"INBOX").await.unwrap();
+
+    // Flags.
+    session.store_flags(&[1, 2], Flags::SEEN.with(Flags::FLAGGED), true).await.unwrap();
+    session.store_flags(&[2], Flags::FLAGGED, false).await.unwrap();
+    session.store_flags(&[3], Flags::FORWARDED.with(Flags::ANSWERED), true).await.unwrap();
+    let flags = session.fetch_flags(1, None).await.unwrap();
+    let of = |uid: u32| flags.iter().find(|f| f.uid == uid).unwrap().flags;
+    assert_eq!(of(1), Flags::SEEN.with(Flags::FLAGGED));
+    assert_eq!(of(2), Flags::SEEN);
+    assert_eq!(of(3), Flags::FORWARDED.with(Flags::ANSWERED));
+    assert_eq!(of(4), Flags::default());
+
+    // Move: gone from here, present there, and we are told its new UID.
+    let pairs = session.move_messages(&[4, 5], b"Target").await.unwrap();
+    assert_eq!(pairs.iter().map(|p| p.0).collect::<Vec<_>>(), [4, 5]);
+    let remaining: Vec<u32> = session.fetch_flags(1, None).await.unwrap().iter().map(|f| f.uid).collect();
+    assert_eq!(remaining, [1, 2, 3, 6]);
+    session.examine(b"Target", None).await.unwrap();
+    let moved: Vec<u32> = session.fetch_flags(1, None).await.unwrap().iter().map(|f| f.uid).collect();
+    assert_eq!(moved, pairs.iter().map(|p| p.1).collect::<Vec<_>>());
+    assert_eq!(session.fetch_message(pairs[0].1).await.unwrap().unwrap(), message(4, "m4", "b"));
+
+    // Expunge by UID removes only what was named: the message the other
+    // client marked for deletion is still there afterwards.
+    session.select(b"INBOX").await.unwrap();
+    assert!(session.expunge(&[2]).await.unwrap());
+    let remaining: Vec<u32> = session.fetch_flags(1, None).await.unwrap().iter().map(|f| f.uid).collect();
+    assert_eq!(remaining, [1, 3, 6], "UID 6 was marked deleted by someone else and must survive");
+
+    // Append, and finding a message by its Message-ID.
+    let raw = message(50, "appended", "body");
+    let uid = session.append(b"Target", Flags::SEEN.with(Flags::DRAFT), &raw).await.unwrap().unwrap();
+    session.examine(b"Target", None).await.unwrap();
+    assert_eq!(session.fetch_message(uid).await.unwrap().unwrap(), raw);
+    let state = session.fetch_flags(uid, None).await.unwrap();
+    assert_eq!(state[0].flags, Flags::SEEN.with(Flags::DRAFT));
+    assert_eq!(session.find_by_message_id("50.8@example.com").await.unwrap(), [uid]);
+    assert_eq!(session.find_by_message_id("<50.8@example.com>").await.unwrap(), [uid]);
+    assert!(session.find_by_message_id("nobody@nowhere").await.unwrap().is_empty());
+
+    // Folders.
+    session.create_folder(b"Made/Here").await.unwrap();
+    session.rename_folder(b"Made/Here", b"Made/There").await.unwrap();
+    let names: Vec<String> = session.list().await.unwrap().into_iter().map(|f| f.name).collect();
+    assert!(names.contains(&"Made/There".to_string()) && !names.contains(&"Made/Here".to_string()), "{names:?}");
+    session.delete_folder(b"Made/There").await.unwrap();
+    let names: Vec<String> = session.list().await.unwrap().into_iter().map(|f| f.name).collect();
+    assert!(!names.contains(&"Made/There".to_string()));
+}

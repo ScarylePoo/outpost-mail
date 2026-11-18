@@ -120,11 +120,11 @@ pub struct FolderStatus {
 }
 
 pub struct Session {
-    conn: Connection,
-    qresync: bool,
+    pub(super) conn: Connection,
+    pub(super) qresync: bool,
 }
 
-fn mailbox(raw_name: &[u8]) -> Result<Mailbox<'static>> {
+pub(super) fn mailbox(raw_name: &[u8]) -> Result<Mailbox<'static>> {
     Mailbox::try_from(raw_name.to_vec())
         .map_err(|_| ImapError::Protocol("a folder name the protocol cannot express".into()))
 }
@@ -154,7 +154,7 @@ fn to_flags(fetched: &[FlagFetch<'_>]) -> Flags {
 }
 
 /// A UID set like `3:7,12` from sorted or unsorted UIDs.
-fn uid_set(uids: &[u32]) -> Option<SequenceSet> {
+pub(super) fn uid_set(uids: &[u32]) -> Option<SequenceSet> {
     let mut sorted: Vec<u32> = uids.iter().copied().filter(|u| *u > 0).collect();
     sorted.sort_unstable();
     sorted.dedup();
@@ -340,6 +340,10 @@ impl Session {
     /// modification sequence from the last sync) and QRESYNC, the server
     /// also reports what has been removed or re-flagged since then.
     pub async fn examine(&mut self, raw_name: &[u8], known: Option<(u32, u64)>) -> Result<Opened> {
+        self.open(raw_name, known, true).await
+    }
+
+    pub(super) async fn open(&mut self, raw_name: &[u8], known: Option<(u32, u64)>, read_only: bool) -> Result<Opened> {
         let mut parameters = Vec::new();
         if let (true, Some((validity, modseq))) = (self.qresync, known) {
             if let (Some(uid_validity), Some(mod_sequence_value)) =
@@ -353,9 +357,16 @@ impl Session {
                 });
             }
         }
-        let command = CommandBody::Examine {
-            mailbox: mailbox(raw_name)?,
-            parameters,
+        let command = if read_only {
+            CommandBody::Examine {
+                mailbox: mailbox(raw_name)?,
+                parameters,
+            }
+        } else {
+            CommandBody::Select {
+                mailbox: mailbox(raw_name)?,
+                parameters,
+            }
         };
         let mut opened = Opened::default();
         let mut no_modseq = false;

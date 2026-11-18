@@ -10,6 +10,7 @@
 pub mod conn;
 pub mod session;
 pub mod utf7;
+mod write;
 
 pub use conn::{ImapError, Security, Server};
 pub use session::Session;

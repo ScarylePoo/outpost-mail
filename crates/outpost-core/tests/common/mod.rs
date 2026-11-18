@@ -436,3 +436,34 @@ impl FlakyProxy {
         }
     }
 }
+
+impl OtherClient {
+    /// (subject, flags) of every message in a folder, as the server has
+    /// them now, sorted by subject.
+    pub fn subjects_in(&mut self, folder: &str) -> Vec<(String, String)> {
+        self.cmd(&format!("EXAMINE \"{folder}\""));
+        let mut found: Vec<(String, String)> = self
+            .cmd("UID FETCH 1:* (FLAGS BODY.PEEK[HEADER.FIELDS (SUBJECT)])")
+            .into_iter()
+            .filter(|l| l.contains("FETCH ("))
+            .map(|l| {
+                let subject = l
+                    .split_once("Subject: ")
+                    .map(|(_, rest)| rest.lines().next().unwrap_or("").trim().to_string())
+                    .unwrap_or_default();
+                // Flags sorted, without the ones the server adds by itself.
+                let mut flags: Vec<&str> = l
+                    .split_once("FLAGS (")
+                    .and_then(|(_, rest)| rest.split_once(')'))
+                    .map(|(f, _)| f.split_whitespace().collect())
+                    .unwrap_or_default();
+                flags.retain(|f| *f != "\\Recent" && !f.starts_with("$Has"));
+                flags.sort();
+                let flags = flags.join(" ");
+                (subject, flags)
+            })
+            .collect();
+        found.sort();
+        found
+    }
+}

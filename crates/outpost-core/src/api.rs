@@ -146,6 +146,9 @@ pub enum Event {
     FolderChanged { folder: FolderId },
     /// An account's set of folders changed.
     FoldersChanged { account: FolderId },
+    /// Something the user should be told, once: an action the server
+    /// refused, for example.
+    Notice { account: FolderId, text: String },
     /// `AddAccount` succeeded.
     AccountAdded { account: FolderId },
     /// `AddAccount` failed. Nothing was saved.

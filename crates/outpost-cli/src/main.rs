@@ -154,6 +154,10 @@ async fn run_sync(args: &Args) -> Result<(), String> {
             status("");
             eprintln!("\rSign-in failed: {error}");
         }
+        Progress::ActionFailed { what, error } => {
+            status("");
+            eprintln!("\r{what} failed: {error}");
+        }
         Progress::FolderChanged { .. } => {}
     };
 
@@ -163,7 +167,7 @@ async fn run_sync(args: &Args) -> Result<(), String> {
             let _ = tokio::signal::ctrl_c().await;
             handle.stop();
         });
-        let now = tokio::sync::Notify::new();
+        let now = sync::Signals::default();
         sync::run(&store, &account, &password, &options, stop, &now, show).await;
         status("");
         eprintln!("\rStopped.");

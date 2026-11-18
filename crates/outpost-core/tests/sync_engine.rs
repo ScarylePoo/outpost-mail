@@ -342,7 +342,7 @@ async fn running_sync_gets_push_polls_and_survives_a_dropped_connection() {
         tokio::spawn(async move {
             let options = Options { poll_interval: Duration::from_secs(2), ..Options::default() };
             let account = account(server, "gina");
-            let now = tokio::sync::Notify::new();
+            let now = sync::Signals::default();
             sync::run(&store, &account, PASSWORD, &options, stop, &now, move |p| seen.lock().unwrap().push(p)).await;
         })
     };
@@ -382,7 +382,7 @@ async fn a_refused_sign_in_is_reported_and_not_retried() {
     let (_handle, stop) = sync::stop_signal();
     let log = seen.clone();
     let (account, options) = (account(server.server(), "harry"), Options::default());
-    let now = tokio::sync::Notify::new();
+    let now = sync::Signals::default();
     let run = sync::run(&store, &account, "wrong password", &options, stop, &now, move |p| {
         log.lock().unwrap().push(p)
     });

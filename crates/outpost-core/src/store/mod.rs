@@ -10,6 +10,7 @@
 //!
 //! Backing up or moving an account is copying its directory.
 
+pub mod actions;
 pub mod index;
 pub mod maildir;
 pub mod parse;

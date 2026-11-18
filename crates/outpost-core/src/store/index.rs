@@ -16,7 +16,7 @@ use std::sync::{Mutex, MutexGuard};
 type Result<T> = std::result::Result<T, StoreError>;
 
 /// Bump when the schema changes, and add a step to `migrate`.
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 4;
 
 const TABLES: &str = r#"
 CREATE TABLE folder (
@@ -75,6 +75,15 @@ CREATE TABLE message (
     preview_len    INTEGER NOT NULL,
     -- Sender-check verdict (milestone 6). 0 = not checked.
     verdict        INTEGER NOT NULL DEFAULT 0
+);
+
+-- What the user has done that the server has not been told yet, in order.
+-- See store/actions.rs.
+CREATE TABLE action (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    payload    TEXT NOT NULL,
+    attempts   INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT
 );
 
 -- Contentless: the words are indexed, the text itself is not stored again.
@@ -723,7 +732,8 @@ fn migrate(conn: &Connection) -> Result<bool> {
         older if older < SCHEMA_VERSION => {
             conn.execute_batch(
                 "DROP TABLE IF EXISTS message_fts; DROP TABLE IF EXISTS message;
-                 DROP TABLE IF EXISTS folder; PRAGMA user_version = 0",
+                 DROP TABLE IF EXISTS folder; DROP TABLE IF EXISTS action;
+                 PRAGMA user_version = 0",
             )?;
             migrate(conn)?;
             Ok(true)

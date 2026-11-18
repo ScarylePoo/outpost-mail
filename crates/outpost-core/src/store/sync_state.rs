@@ -227,6 +227,18 @@ impl Index {
         Ok(())
     }
 
+    /// Gives `uid` to a message in the folder that has this Message-ID and
+    /// no UID yet. Returns whether there was one.
+    pub fn adopt_uid(&self, folder_id: i64, message_id: &str, uid: u32) -> Result<bool> {
+        let adopted = self.writer().execute(
+            "UPDATE message SET uid = ?1 WHERE id = (
+               SELECT id FROM message WHERE folder_id = ?2 AND uid IS NULL AND message_id = ?3 LIMIT 1)
+             AND NOT EXISTS (SELECT 1 FROM message WHERE folder_id = ?2 AND uid = ?1)",
+            params![uid, folder_id, message_id],
+        )?;
+        Ok(adopted > 0)
+    }
+
     /// Messages whose body has not been downloaded, newest first.
     pub fn missing_bodies(&self, folder_id: i64, limit: u32) -> Result<Vec<KnownMessage>> {
         self.read(|conn| {
@@ -382,10 +394,16 @@ impl Store {
     /// Adds messages known only by their list data. They appear in the
     /// folder at once; `store_body` completes each one later.
     pub fn add_headers(&self, folder_id: i64, headers: &[HeaderOnly<'_>]) -> Result<()> {
-        let messages: Vec<NewMessage> = headers
-            .iter()
-            .map(|h| {
-                let parsed = parse::parse(h.header);
+        let mut messages: Vec<NewMessage> = Vec::new();
+        for h in headers {
+            let parsed = parse::parse(h.header);
+            // A message we put in this folder ourselves (moved here, or
+            // saved here) is already present, waiting to learn its UID.
+            // Recognise it instead of adding it a second time.
+            if !parsed.message_id.is_empty() && self.index().adopt_uid(folder_id, &parsed.message_id, h.uid)? {
+                continue;
+            }
+            messages.push({
                 NewMessage {
                     base: String::new(),
                     file_flags: h.flags,
@@ -395,8 +413,8 @@ impl Store {
                     size: h.size as u64,
                     parsed,
                 }
-            })
-            .collect();
+            });
+        }
         self.index().insert(folder_id, &messages)?;
         Ok(())
     }

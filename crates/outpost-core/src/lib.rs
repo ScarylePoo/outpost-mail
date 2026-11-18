@@ -70,8 +70,8 @@ struct Account {
     /// `None` for mail that is only browsed (no server details saved).
     config: Option<AccountConfig>,
     live: Mutex<Live>,
-    /// Asks the running sync for a full pass now.
-    now: Arc<tokio::sync::Notify>,
+    /// Prods the running sync: a full pass now, or replay what the user did.
+    signals: Arc<sync::Signals>,
 }
 
 /// The parts of an account that change while the app runs.
@@ -273,7 +273,7 @@ impl Core {
                 &password,
                 &sync::Options::default(),
                 stop,
-                &account.now,
+                &account.signals,
                 report,
             )
             .await;
@@ -313,6 +313,10 @@ impl Core {
                     format!("{error}. Trying again in {} s.", retry_in.as_secs()),
                 ),
             ),
+            Progress::ActionFailed { what, error } => self.inner.sink.emit(Event::Notice {
+                account: account.id.clone(),
+                text: format!("{what} did not work: {error}"),
+            }),
             Progress::SignInFailed { error } => {
                 account.live.lock().unwrap().running = None;
                 self.set_status(account, status(SyncState::SignInFailed, error));
@@ -523,7 +527,7 @@ impl Core {
                     return Err(CoreError::new(ErrorCode::NotPossible, "the account needs its password first"));
                 }
                 if running {
-                    account.now.notify_one();
+                    account.signals.now.notify_one();
                 } else {
                     self.start_sync(&account);
                 }
@@ -577,7 +581,7 @@ impl Core {
                     running: None,
                     status: status(SyncState::Connecting, ""),
                 }),
-                now: Arc::default(),
+                signals: Arc::default(),
             });
             core.inner.accounts.write().unwrap().push(account.clone());
             core.start_sync(&account);
@@ -889,7 +893,7 @@ fn open_accounts(data_dir: &Path) -> Result<Vec<Arc<Account>>, StoreError> {
                     running: None,
                     status: status(SyncState::NotSyncing, ""),
                 }),
-                now: Arc::default(),
+                signals: Arc::default(),
             }))
         })
         .collect()

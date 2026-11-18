@@ -19,6 +19,8 @@
 //! IDLE on the inbox for push, checks the other folders on a timer, and
 //! reconnects with backoff when the connection fails.
 
+mod actions;
+
 use crate::imap::session::{RemoteFolder, SpecialUse};
 use crate::imap::{ImapError, Server, Session};
 use crate::store::maildir::{encode_segment, Flags};
@@ -114,6 +116,9 @@ pub enum Progress {
     Offline { error: String, retry_in: Duration },
     /// The server refused the sign-in. No retry until credentials change.
     SignInFailed { error: String },
+    /// The server would not carry out something the user did. It has been
+    /// undone here where that was possible.
+    ActionFailed { what: String, error: String },
 }
 
 /// What one pass did.
@@ -126,6 +131,17 @@ pub struct Summary {
     pub flags_changed: usize,
     /// Folders the server had renumbered, which were synced from scratch.
     pub folders_reset: usize,
+    /// Things the user did that were carried out on the server.
+    pub actions_replayed: usize,
+}
+
+/// How the rest of the app prods a running sync.
+#[derive(Default)]
+pub struct Signals {
+    /// Do a full pass now.
+    pub now: tokio::sync::Notify,
+    /// The user did something: replay the action queue.
+    pub changes: tokio::sync::Notify,
 }
 
 /// Lets a caller stop a running sync between steps.
@@ -293,6 +309,9 @@ async fn sync_folder(
 
     let known: HashMap<u32, KnownMessage> =
         index.known_messages(folder.id)?.into_iter().map(|m| (m.uid, m)).collect();
+    // What the user has changed here that the server has not heard yet.
+    // The server's view of those messages is out of date, not ours.
+    let pending = index.pending_uids(folder.id)?;
     let mut gone: Vec<i64> = Vec::new();
     let mut reflagged: Vec<(u32, Flags)> = Vec::new();
     let mut wanted: Vec<u32> = Vec::new();
@@ -303,26 +322,50 @@ async fn sync_folder(
             // A range can be far wider than what we hold: walk our side.
             gone.extend(known.values().filter(|m| m.uid >= *first && m.uid <= *last).map(|m| m.id));
         }
-        reflagged.extend(opened.changed.iter().map(|c| (c.uid, c.flags)));
+        for change in &opened.changed {
+            if change.flags.contains(Flags::DELETED) {
+                // Marked for deletion (here or elsewhere): as good as gone.
+                gone.extend(known.get(&change.uid).map(|m| m.id));
+            } else if pending.contains(&change.uid) {
+                // Ours to change; the server will hear shortly.
+            } else if known.contains_key(&change.uid) {
+                reflagged.push((change.uid, change.flags));
+            } else {
+                // Changed, and not here: a message that had been marked
+                // for deletion and no longer is.
+                wanted.push(change.uid);
+            }
+        }
         // Anything new has a UID at or above the UIDNEXT we last saw.
         if opened.uid_next.is_none_or(|next| next > state.uid_next) {
             for current in session.fetch_flags(state.uid_next.max(1), None).await? {
-                if current.uid >= state.uid_next && !known.contains_key(&current.uid) {
+                if current.uid >= state.uid_next
+                    && !known.contains_key(&current.uid)
+                    && !pending.contains(&current.uid)
+                    && !current.flags.contains(Flags::DELETED)
+                {
                     wanted.push(current.uid);
                 }
             }
         }
     } else {
         // Compare complete lists.
-        let server = session.fetch_flags(1, None).await?;
+        // A message marked for deletion is treated as already gone.
+        let server: Vec<_> = session
+            .fetch_flags(1, None)
+            .await?
+            .into_iter()
+            .filter(|s| !s.flags.contains(Flags::DELETED))
+            .collect();
         let on_server: HashSet<u32> = server.iter().map(|s| s.uid).collect();
         gone.extend(known.values().filter(|m| !on_server.contains(&m.uid)).map(|m| m.id));
         for current in &server {
             match known.get(&current.uid) {
-                Some(local) if local.flags != current.flags => {
+                Some(local) if local.flags != current.flags && !pending.contains(&current.uid) => {
                     reflagged.push((current.uid, current.flags))
                 }
                 Some(_) => {}
+                None if pending.contains(&current.uid) => {}
                 None => wanted.push(current.uid),
             }
         }
@@ -532,6 +575,9 @@ async fn pass(
     progress: &mut (dyn FnMut(Progress) + Send),
 ) -> Result<Summary> {
     let mut summary = Summary::default();
+    // What the user did comes first: the server must hear it before its
+    // (older) view of those messages is read back.
+    actions::replay(session, store, progress, &mut summary).await?;
     let folders = sync_folders(session, store, options).await?;
     summary.folders = folders.len();
     progress(Progress::Folders { count: folders.len() });
@@ -577,22 +623,24 @@ pub async fn sync_once(
 /// `options.poll_interval`. Reconnects with backoff when the connection
 /// fails. Returns only when stopped or when the server refuses the sign-in.
 ///
-/// `now` asks for a full pass straight away: it ends a wait between passes
-/// and a wait before a retry.
+/// `signals.now` asks for a full pass straight away: it ends a wait between
+/// passes and a wait before a retry. `signals.changes` says the user has
+/// done something: the action queue is replayed at once.
 pub async fn run(
     store: &Store,
     account: &Account,
     password: &str,
     options: &Options,
     mut stop: Stop,
-    now: &tokio::sync::Notify,
+    signals: &Signals,
     mut progress: impl FnMut(Progress) + Send,
 ) {
+    let now = &signals.now;
     const FIRST_RETRY: Duration = Duration::from_secs(2);
     const LONGEST_RETRY: Duration = Duration::from_secs(5 * 60);
     let mut retry_in = FIRST_RETRY;
     loop {
-        let outcome = connected(store, account, password, options, &mut stop, now, &mut progress, &mut retry_in).await;
+        let outcome = connected(store, account, password, options, &mut stop, signals, &mut progress, &mut retry_in).await;
         match outcome {
             Err(SyncError::Stopped) | Ok(()) => return,
             Err(SyncError::Imap(e)) if !e.is_transient() && matches!(e, ImapError::Rejected { command: "LOGIN", .. }) => {
@@ -621,10 +669,11 @@ async fn connected(
     password: &str,
     options: &Options,
     stop: &mut Stop,
-    now: &tokio::sync::Notify,
+    signals: &Signals,
     progress: &mut (dyn FnMut(Progress) + Send),
     retry_in: &mut Duration,
 ) -> Result<()> {
+    let now = &signals.now;
     progress(Progress::Connecting);
     let mut session = Session::connect(&account.server, &account.username, password).await?;
     loop {
@@ -667,14 +716,29 @@ async fn connected(
                 let limit = remaining.min(Duration::from_secs(25 * 60));
                 let mut stopping = stop.clone();
                 let asked = std::sync::atomic::AtomicBool::new(false);
+                let acted = std::sync::atomic::AtomicBool::new(false);
                 let wake = async {
                     tokio::select! {
                         _ = stopping.requested() => {}
                         _ = now.notified() => asked.store(true, std::sync::atomic::Ordering::Relaxed),
+                        _ = signals.changes.notified() => acted.store(true, std::sync::atomic::Ordering::Relaxed),
                     }
                 };
-                let pushed = session.idle(limit, wake).await?;
+                // Anything the user did while we were busy goes first.
+                let pushed = if store.index().queued_action_count()? > 0 {
+                    acted.store(true, std::sync::atomic::Ordering::Relaxed);
+                    false
+                } else {
+                    session.idle(limit, wake).await?
+                };
                 stop.check()?;
+                if acted.load(std::sync::atomic::Ordering::Relaxed) {
+                    let mut summary = Summary::default();
+                    actions::replay(&mut session, store, progress, &mut summary).await?;
+                    if !pushed {
+                        continue;
+                    }
+                }
                 if asked.load(std::sync::atomic::Ordering::Relaxed) {
                     break;
                 }

@@ -26,6 +26,11 @@ export interface ListHandle {
   visibleRange(): [number, number];
   /** The selected message, if there is one and its data is loaded. */
   selectedRow(): MessageRow | undefined;
+  /**
+   * The ids of every selected message. Rows that are selected but not
+   * loaded (a long Shift-click range) are fetched first.
+   */
+  selectedIds(): Promise<number[]>;
   /** Selects the row at this position and scrolls it into view. */
   select(index: number): void;
   /**
@@ -38,6 +43,8 @@ export interface ListHandle {
 export function MessageList(props: {
   folder: FolderId;
   onSelect: (row: MessageRow | undefined) => void;
+  /** Called with how many messages are selected whenever that changes. */
+  onCount?: (count: number) => void;
   handle?: (handle: ListHandle) => void;
 }) {
   let scroller!: HTMLDivElement;
@@ -79,6 +86,10 @@ export function MessageList(props: {
   /** Bumped when row positions change. */
   const [layoutTick, setLayoutTick] = createSignal(0);
   const [selected, setSelected] = createSignal(-1);
+  /** Positions of all selected rows. The one in `selected` is the current one. */
+  const [picked, setPicked] = createSignal<ReadonlySet<number>>(new Set());
+  /** Where a Shift-click or Shift-arrow range starts. */
+  let rangeStart = -1;
   /** Native scroll position minus `virtualTop`. 0 unless the list is scaled. */
   const [shift, setShift] = createSignal(0);
   /** Row count, for the parts of the view that react to it. */
@@ -299,6 +310,9 @@ export function MessageList(props: {
         selectedId = undefined;
         setSelected(next);
       }
+      // Positions have shifted, so a multiple selection cannot be kept.
+      rangeStart = selected();
+      pick(new Set(selected() >= 0 ? [selected()] : []));
       setDataTick((t) => t + 1);
       update();
     } catch {
@@ -325,7 +339,67 @@ export function MessageList(props: {
     update();
   }
 
+  function pick(next: ReadonlySet<number>) {
+    setPicked(next);
+    props.onCount?.(next.size);
+  }
+
+  /**
+   * A click or key on row `i`. Plain: select just it. Ctrl: add or remove
+   * it. Shift: everything from where the selection started to it.
+   */
+  function choose(i: number, mode: "one" | "toggle" | "range", reveal: boolean) {
+    if (i < 0 || i >= count()) return;
+    if (mode === "range" && rangeStart >= 0) {
+      const range = new Set<number>();
+      for (let k = Math.min(rangeStart, i); k <= Math.max(rangeStart, i); k++) range.add(k);
+      pick(range);
+    } else if (mode === "toggle") {
+      const next = new Set(picked());
+      if (next.has(i) && next.size > 1) next.delete(i);
+      else next.add(i);
+      pick(next);
+      rangeStart = i;
+    } else {
+      pick(new Set([i]));
+      rangeStart = i;
+    }
+    select(i, reveal);
+  }
+
+  const MOST_AT_ONCE = 5000;
+
+  async function selectedIds(): Promise<number[]> {
+    const positions = [...picked()].sort((a, b) => a - b);
+    if (positions.length > MOST_AT_ONCE) {
+      throw new Error(`That is more than ${MOST_AT_ONCE.toLocaleString()} messages. Select fewer at a time.`);
+    }
+    const missing = new Set<number>();
+    for (const i of positions) if (!getRow(i)) missing.add(Math.floor(i / PAGE));
+    const fetched = new Map<number, MessageRow[]>();
+    await Promise.all(
+      [...missing].map((p) =>
+        core
+          .send({ type: "listMessages", folder: props.folder, offset: p * PAGE, limit: PAGE })
+          .then((r) => fetched.set(p, r.rows)),
+      ),
+    );
+    const ids: number[] = [];
+    for (const i of positions) {
+      const row = getRow(i) ?? fetched.get(Math.floor(i / PAGE))?.[i % PAGE];
+      if (row) ids.push(row.id);
+    }
+    return ids;
+  }
+
   function onKeyDown(e: KeyboardEvent) {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
+      e.preventDefault();
+      const all = new Set<number>();
+      for (let k = 0; k < count(); k++) all.add(k);
+      if (all.size > 0) pick(all);
+      return;
+    }
     const page = Math.max(1, visLast - visFirst - 1);
     const from = selected() < 0 ? visFirst - 1 : selected();
     const to: Record<string, number> = {
@@ -340,7 +414,7 @@ export function MessageList(props: {
     if (target === undefined) return;
     e.preventDefault();
     fine();
-    select(Math.max(0, Math.min(count() - 1, target)), true);
+    choose(Math.max(0, Math.min(count() - 1, target)), e.shiftKey ? "range" : "one", true);
   }
 
   // Load a folder.
@@ -361,6 +435,8 @@ export function MessageList(props: {
         scaled = false;
         setShift(0);
         setSelected(-1);
+        rangeStart = -1;
+        pick(new Set());
         setSlots([]);
         setTotal(0);
         setHeight(0);
@@ -413,7 +489,8 @@ export function MessageList(props: {
       rowCount: count,
       visibleRange: () => [visFirst, visLast],
       selectedRow: () => (selected() >= 0 ? getRow(selected()) : undefined),
-      select: (index) => select(index, true),
+      select: (index) => choose(index, "one", true),
+      selectedIds,
       refresh: () => void refresh(),
       blankVisible() {
         let blank = 0;
@@ -448,17 +525,20 @@ export function MessageList(props: {
               <div
                 class="row"
                 role="option"
-                aria-selected={index() >= 0 && index() === selected()}
+                aria-selected={index() >= 0 && picked().has(index())}
                 classList={{
                   idle: index() < 0,
-                  selected: index() >= 0 && index() === selected(),
+                  selected: index() >= 0 && picked().has(index()),
+                  current: index() >= 0 && index() === selected() && picked().size > 1,
                   unread: row()?.unread === true,
                 }}
                 style={{
                   transform: `translateY(${top()}px)`,
                   height: `${ROW_FIXED + lines() * LINE}px`,
                 }}
-                onMouseDown={() => select(index(), false)}
+                onMouseDown={(e) =>
+                  choose(index(), e.shiftKey ? "range" : e.ctrlKey || e.metaKey ? "toggle" : "one", false)
+                }
               >
                 <Show when={row()} fallback={<div class="row-loading" />}>
                   {(r) => (

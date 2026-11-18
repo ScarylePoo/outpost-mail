@@ -325,6 +325,11 @@ input[type="checkbox"] {
   box-shadow: inset 3px 0 0 var(--accent);
 }
 
+/* In a multiple selection, the row the keyboard is on. */
+.row.selected.current {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
 .row-top {
   display: flex;
   align-items: center;

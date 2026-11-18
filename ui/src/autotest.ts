@@ -75,6 +75,15 @@ async function probe(details: string): Promise<string> {
     await sleep(1200);
     lines.push(`after Delete: ${text(".list-holder .row:not(.idle) .row-subject").join(" | ")}`);
     lines.push(`selection moved to: ${text(".message h1").join("")}`);
+    // Several at once: select everything and mark it all unread.
+    document
+      .querySelector(".list-holder .list")
+      ?.dispatchEvent(new KeyboardEvent("keydown", { key: "a", ctrlKey: true, bubbles: true }));
+    await sleep(300);
+    lines.push(`after Ctrl+A: ${text(".list-header span").join("")}`);
+    press("Mark unread");
+    await sleep(1200);
+    lines.push(`unread rows after marking all: ${document.querySelectorAll(".list-holder .row.unread:not(.idle)").length}`);
     // Give sync a moment to tell the server before the app closes.
     await sleep(2500);
 

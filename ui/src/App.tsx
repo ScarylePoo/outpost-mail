@@ -56,6 +56,8 @@ export function App() {
   const [accounts, setAccounts] = createSignal<AccountInfo[]>([]);
   const [folderId, setFolderId] = createSignal<string>();
   const [message, setMessage] = createSignal<MessageRow>();
+  /** How many messages are selected in the list. */
+  const [count, setCount] = createSignal(0);
   const [panel, setPanel] = createSignal<Panel>({ kind: "none" });
   const [query, setQuery] = createSignal("");
   const [everywhere, setEverywhere] = createSignal(false);
@@ -237,35 +239,50 @@ export function App() {
     return { row, folder: id };
   }
 
-  function markRead(read: boolean) {
+  /**
+   * Every selected message: the whole selection in the list, or the one
+   * message open from a search result.
+   */
+  async function chosen(): Promise<{ folder: string; row: MessageRow; ids: number[] } | undefined> {
     const t = target();
-    if (t) send({ type: "changeFlags", folder: t.folder, ids: [t.row.id], seen: read, flagged: null });
+    if (!t) return undefined;
+    if (searching() || !list || count() <= 1) return { ...t, ids: [t.row.id] };
+    try {
+      return { ...t, ids: await list.selectedIds() };
+    } catch (e) {
+      setNotice(String((e as Error)?.message ?? e));
+      return undefined;
+    }
   }
 
-  function toggleFlag() {
-    const t = target();
-    if (t) send({ type: "changeFlags", folder: t.folder, ids: [t.row.id], seen: null, flagged: !t.row.flagged });
+  async function markRead(read: boolean) {
+    const c = await chosen();
+    if (c) send({ type: "changeFlags", folder: c.folder, ids: c.ids, seen: read, flagged: null });
   }
 
-  function archive() {
-    const t = target();
-    if (t) send({ type: "archiveMessages", folder: t.folder, ids: [t.row.id] });
+  async function toggleFlag() {
+    const c = await chosen();
+    if (c) send({ type: "changeFlags", folder: c.folder, ids: c.ids, seen: null, flagged: !c.row.flagged });
   }
 
-  function moveTo(destination: string) {
-    const t = target();
-    if (t && destination) send({ type: "moveMessages", ids: [t.row.id], to: destination });
+  async function archive() {
+    const c = await chosen();
+    if (c) send({ type: "archiveMessages", folder: c.folder, ids: c.ids });
   }
 
-  function remove() {
-    const t = target();
-    if (!t) return;
+  async function moveTo(destination: string) {
+    const c = await chosen();
+    if (c && destination) send({ type: "moveMessages", ids: c.ids, to: destination });
+  }
+
+  async function remove() {
+    const c = await chosen();
+    if (!c) return;
     // From the trash, deleting is for good, which is worth a question.
     const permanently = folder()?.role === "trash";
-    if (permanently && !window.confirm(`Permanently delete "${t.row.subject || "(no subject)"}"? This cannot be undone.`)) {
-      return;
-    }
-    send({ type: "deleteMessages", folder: t.folder, ids: [t.row.id], permanently });
+    const what = c.ids.length > 1 ? `these ${c.ids.length.toLocaleString()} messages` : `"${c.row.subject || "(no subject)"}"`;
+    if (permanently && !window.confirm(`Permanently delete ${what}? This cannot be undone.`)) return;
+    send({ type: "deleteMessages", folder: c.folder, ids: c.ids, permanently });
   }
 
   /** Opening a message marks it read, as in Outlook. */
@@ -355,11 +372,11 @@ export function App() {
     if (e.ctrlKey && e.shiftKey && key === "r") respond("replyAll");
     else if (e.ctrlKey && key === "r") respond("reply");
     else if (e.ctrlKey && key === "f") respond("forward");
-    else if (e.key === "Delete") remove();
-    else if (e.key === "Backspace") archive();
-    else if (e.key === "Insert") toggleFlag();
-    else if (e.ctrlKey && key === "q") markRead(true);
-    else if (e.ctrlKey && key === "u") markRead(false);
+    else if (e.key === "Delete") void remove();
+    else if (e.key === "Backspace") void archive();
+    else if (e.key === "Insert") void toggleFlag();
+    else if (e.ctrlKey && key === "q") void markRead(true);
+    else if (e.ctrlKey && key === "u") void markRead(false);
     else return;
     e.preventDefault();
   }
@@ -423,7 +440,7 @@ export function App() {
           disabled={!target()}
           title="Move to another folder"
           onChange={(e) => {
-            moveTo(e.currentTarget.value);
+            void moveTo(e.currentTarget.value);
             e.currentTarget.value = "";
           }}
         >
@@ -433,7 +450,7 @@ export function App() {
           </For>
         </select>
         <button
-          onClick={() => markRead(message()?.unread ?? false)}
+          onClick={() => void markRead(message()?.unread ?? false)}
           disabled={!target()}
           title="Mark read (Ctrl+Q) or unread (Ctrl+U)"
         >
@@ -486,7 +503,11 @@ export function App() {
             <>
               <div class="list-header">
                 <strong>{f.name}</strong>
-                <span>{f.total.toLocaleString()} messages</span>
+                <span>
+                  <Show when={count() > 1 && !searching()} fallback={<>{f.total.toLocaleString()} messages</>}>
+                    {count().toLocaleString()} of {f.total.toLocaleString()} selected
+                  </Show>
+                </span>
               </div>
             </>
           )}
@@ -524,6 +545,7 @@ export function App() {
                 <MessageList
                   folder={id()}
                   onSelect={(row) => !searching() && setMessage(row)}
+                  onCount={setCount}
                   handle={(h) => (list = h)}
                 />
               </div>

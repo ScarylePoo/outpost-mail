@@ -77,7 +77,8 @@ sync; and a rebuilt index not downloading anything again.
 python3 tools/app-selftest.py            # uses target/release/outpost
 ```
 
-Linux only; needs Dovecot and a built app. It starts a throwaway Dovecot,
+Needs Dovecot and a built app; run it on Linux. Under WSL, pass the path to
+`outpost.exe` to test the Windows build the same way. It starts a throwaway Dovecot,
 runs the real app against it, adds an account through the interface, delivers
 one more message while the window is open, opens a message and runs a search,
 then prints what the window showed. Expect an account that is up to date, the

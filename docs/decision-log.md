@@ -120,14 +120,18 @@ connection can still be added if this proves too slow in practice.
 it, adds an account through the interface, delivers a message while the
 window is open, and reports what the window showed. It is the only test that
 covers window, core and sync together. It needs a display, so it is run by
-hand on Linux and is not part of CI.
+hand and is not part of CI. Under WSL it can drive the Windows build too
+(`python3 tools/app-selftest.py target/release/outpost.exe`); both pass as of
+18 Nov 2026.
 
 ### Still to do in milestone 3
 
 - The owner's judgement on the result: the milestone is done "when the owner
   can read his real mail in Outpost and scrolling meets the target".
-- Not tried on Windows beyond building, the unit tests and the scroll test:
-  adding a real account there, and the Windows credential store.
+- The Windows credential store has not been exercised. (The Windows app
+  passes the end-to-end self-test against the Dovecot in WSL, but that test
+  deliberately does not ask for the password to be remembered.)
+- Adding a real account in the app, on either system, by the owner.
 - The by-eye scrolling check on both systems, still open from milestone 0.
 - Keyboard shortcuts beyond list navigation, and a menu bar (milestone 8).
 

@@ -9,6 +9,9 @@ window is open, and prints what the window showed.
 
 Needs Dovecot 2.4 and a built app (`npm run build -- --no-bundle`). Uses only
 temporary directories and a local port; touches no real mail or passwords.
+
+Under WSL it can also test the Windows build: pass the path to outpost.exe.
+The Windows app then reaches the Dovecot inside WSL through localhost.
 """
 
 import imaplib
@@ -45,13 +48,21 @@ def main():
         sys.exit("Dovecot is not installed.")
     if not os.path.exists(APP):
         sys.exit(f"No app at {APP}. Build it first, or pass its path.")
+    windows = APP.lower().endswith(".exe")
     work = tempfile.mkdtemp(prefix="outpost-selftest-")
+    # The Windows app needs its files somewhere Windows can see.
+    shared = tempfile.mkdtemp(prefix="outpost-selftest-", dir="/mnt/c/Users/Public") if windows else work
+
+    def native(path):
+        return subprocess.check_output(["wslpath", "-w", path], text=True).strip() if windows else path
+
     port = free_port()
     user = subprocess.check_output(["id", "-un"], text=True).strip()
     group = subprocess.check_output(["id", "-gn"], text=True).strip()
     version = subprocess.check_output([DOVECOT, "--version"], text=True).split()[0]
-    for sub in ("run", "state", "home", "data"):
+    for sub in ("run", "state", "home"):
         os.makedirs(os.path.join(work, sub))
+    os.makedirs(os.path.join(shared, "data"))
     conf = os.path.join(work, "dovecot.conf")
     with open(conf, "w") as f:
         f.write(f"""dovecot_config_version = {version}
@@ -61,7 +72,7 @@ state_dir = {work}/state
 instance_name = outpost-selftest-{port}
 log_path = {work}/dovecot.log
 protocols = imap
-listen = 127.0.0.1
+listen = {'*' if windows else '127.0.0.1'}
 default_internal_user = {user}
 default_internal_group = {group}
 default_login_user = {user}
@@ -124,13 +135,17 @@ service stats {{
             other.append("INBOX", "(\\Seen)" if n % 2 else "", None, message(n, f"Selftest message {n}", f"Body {n} with a zebra in it."))
         other.append("Projects", "", None, message(9, "Project note", "No striped animals here."))
 
-        report = os.path.join(work, "report.txt")
+        # From Windows, the server inside WSL is reached at WSL's own address.
+        host = subprocess.check_output(["hostname", "-I"], text=True).split()[0] if windows else "127.0.0.1"
+        report = os.path.join(shared, "report.txt")
         env = dict(
             os.environ,
-            OUTPOST_DATA=os.path.join(work, "data"),
-            OUTPOST_SHELL_TEST=report,
+            OUTPOST_DATA=native(os.path.join(shared, "data")),
+            OUTPOST_SHELL_TEST=native(report),
+            # Lets these variables cross from WSL into a Windows program.
+            WSLENV="OUTPOST_DATA:OUTPOST_SHELL_TEST:OUTPOST_PROBE_ACCOUNT",
             OUTPOST_PROBE_ACCOUNT=json.dumps({
-                "host": "127.0.0.1", "port": port, "encrypted": False,
+                "host": host, "port": port, "encrypted": False,
                 "username": "tester", "password": PASSWORD, "remember": False,
             }),
             WEBKIT_DISABLE_DMABUF_RENDERER="1",
@@ -147,13 +162,14 @@ service stats {{
             app.kill()
             print("FAILED: the app did not finish within a minute.")
         print(open(report).read() if os.path.exists(report) else "FAILED: no report was written.")
-        saved = os.path.join(work, "data", "accounts", "tester", "account.json")
+        saved = os.path.join(shared, "data", "accounts", "tester", "account.json")
         if os.path.exists(saved):
             text = open(saved).read()
             print("account.json holds the password!" if PASSWORD in text else "account.json: saved, no password in it")
     finally:
         subprocess.run([DOVECOT, "-c", conf, "stop"], **quiet)
         shutil.rmtree(work, ignore_errors=True)
+        shutil.rmtree(shared, ignore_errors=True)
 
 
 if __name__ == "__main__":

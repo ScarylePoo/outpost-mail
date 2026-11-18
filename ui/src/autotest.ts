@@ -17,7 +17,15 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 async function probe(details: string): Promise<string> {
   const { core } = await import("./core");
   const events: string[] = [];
-  const stop = core.onEvent((e) => events.push(e.type === "accountStatus" ? `status:${e.status.state}` : e.type));
+  const stop = core.onEvent((e) =>
+    events.push(
+      e.type === "accountStatus"
+        ? `status:${e.status.state}`
+        : e.type === "accountSetupFailed"
+          ? `accountSetupFailed (${e.error})`
+          : e.type,
+    ),
+  );
   const text = (selector: string) =>
     [...document.querySelectorAll(selector)].map((el) => el.textContent?.trim() ?? "").filter(Boolean);
   const lines: string[] = ["Outpost app self-test"];
@@ -26,7 +34,8 @@ async function probe(details: string): Promise<string> {
     await core.send({ type: "addAccount", ...JSON.parse(details) });
     // Long enough for sign-in, a first sync, and the window to catch up.
     const deadline = Date.now() + 20_000;
-    while (Date.now() < deadline && !events.includes("status:upToDate")) await sleep(100);
+    while (Date.now() < deadline && !events.some((e) => e === "status:upToDate" || e.startsWith("accountSetupFailed")))
+      await sleep(100);
     await sleep(1500);
     const accounts = (await core.send({ type: "listAccounts" })).accounts;
     lines.push(`accounts: ${accounts.map((a) => `${a.name} [${a.status.state}]`).join(", ")}`);

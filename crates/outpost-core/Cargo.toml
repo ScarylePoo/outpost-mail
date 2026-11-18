@@ -1,0 +1,11 @@
+[package]
+name = "outpost-core"
+description = "Outpost Mail core: all mail work, behind one command-and-event interface."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

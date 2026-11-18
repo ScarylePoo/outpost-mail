@@ -1,0 +1,20 @@
+[package]
+name = "outpost-shell-tauri"
+description = "Tauri shell adapter for Outpost Mail. No mail logic lives here."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "outpost"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+outpost-core = { path = "../outpost-core" }
+tauri = { version = "2", features = [] }
+serde.workspace = true
+serde_json.workspace = true

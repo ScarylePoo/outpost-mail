@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["crates/outpost-core", "crates/shell-tauri"]
+# `cargo test` at the root runs the core only, so it needs no webview libraries.
+default-members = ["crates/outpost-core"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "Unlicense"
+repository = "https://github.com/ScarylePoo/outpost-mail"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4

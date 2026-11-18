@@ -289,11 +289,9 @@ impl Dav {
     }
 
     /// Saves an item. With `known` (the version last read here) the save
-    /// only happens if the server still has that version. Without it, the
-    /// server is asked to save only if nothing is at that address yet; not
-    /// every server honours that (Radicale does not), so new items are
-    /// given addresses that cannot collide. Returns the new version if the
-    /// server says what it is.
+    /// only happens if the server still has that version; without it, only
+    /// if there is nothing at that address yet. Returns the new version if
+    /// the server says what it is.
     pub async fn put(&self, href: &str, kind: Kind, data: &str, known: Option<&str>) -> Result<Option<String>> {
         let content_type = match kind {
             Kind::Calendar { .. } => "text/calendar; charset=utf-8",

@@ -63,8 +63,9 @@ fn collections_are_found_and_items_saved_fetched_changed_and_deleted() {
         assert!(one.data.contains("SUMMARY:Planning"), "{}", one.data);
         assert_eq!(Some(&one.etag), listed.iter().find(|i| i.href == one.href).map(|i| &i.etag));
 
-        // Changing an item is done against the version last read.
-        dav.put("/ann/work/one.ics", CALENDAR, &event("one", "Planning, moved"), Some(&one.etag)).await.unwrap();
+        // Saving over something that is already there needs its version.
+        assert_eq!(dav.put("/ann/work/one.ics", CALENDAR, &event("one", "Clobber"), None).await, Err(DavError::Changed));
+        dav.put("/ann/work/one.ics", CALENDAR, &event("one", "Planning moved"), Some(&one.etag)).await.unwrap();
         // The version we held is now stale: neither saving nor deleting
         // with it goes through, so someone else's change is never lost.
         assert_eq!(
@@ -73,7 +74,7 @@ fn collections_are_found_and_items_saved_fetched_changed_and_deleted() {
         );
         assert_eq!(dav.delete("/ann/work/one.ics", Some(&one.etag)).await, Err(DavError::Changed));
         let now = dav.fetch("/ann/work/", CALENDAR, &["/ann/work/one.ics".to_string()]).await.unwrap();
-        assert!(now[0].data.contains("Planning, moved"));
+        assert!(now[0].data.contains("Planning moved"));
 
         // Delete with the right version; deleting what is gone is fine.
         dav.delete("/ann/work/one.ics", Some(&now[0].etag)).await.unwrap();

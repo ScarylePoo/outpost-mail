@@ -7,6 +7,28 @@ started.
 Status words: **Decided** (owner agreed), **Proposal** (default in use, owner
 has not reviewed), **Finding** (a test result).
 
+## 2026-11-18 · Milestone 2 closed
+
+### Finding: the owner's hosted account syncs, and nothing on the server changed
+
+The owner ran `outpost-sync sync --once` against his hosted account: 17
+folders and 1,655 messages, lists and bodies, in 7 seconds, with nothing left
+to download. The before-and-after check found every message's flags on the
+server unchanged. With the Dovecot tests passing, that meets the milestone's
+"done when".
+
+Seen on that server and worth remembering:
+
+- Before sign-in it advertises only the basics (IDLE, ENABLE, LITERAL+).
+  Whether it offers CONDSTORE and QRESYNC after sign-in was not recorded;
+  the tool should print that.
+- Every folder is a child of the inbox (`INBOX/Sent`, `INBOX/Trash`, …), as is
+  usual on cPanel-style hosts. The folder tree in milestone 3 should show
+  these beside the inbox, not nested under it, and must find Sent, Drafts,
+  Trash and Junk there by special-use marker or by name.
+- This account is small. The 80 GB design case has not been tried against a
+  real server.
+
 ## 2026-11-18 · Milestone 2
 
 **Proposals** unless marked otherwise.

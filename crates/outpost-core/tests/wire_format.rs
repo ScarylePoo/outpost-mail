@@ -31,6 +31,14 @@ fn commands_decode_from_the_documented_json() {
             },
         ),
         (
+            json!({"type": "search", "scope": "demo", "text": "roof", "limit": 50}),
+            Command::Search {
+                scope: "demo".into(),
+                text: "roof".into(),
+                limit: 50,
+            },
+        ),
+        (
             json!({"type": "startDemoSync", "folder": "demo/inbox"}),
             Command::StartDemoSync {
                 folder: "demo/inbox".into(),
@@ -61,6 +69,7 @@ fn a_message_row_has_exactly_the_fields_the_interface_expects() {
         [
             "date",
             "hasAttachment",
+            "id",
             "index",
             "preview",
             "senderAddress",
@@ -194,4 +203,92 @@ fn events_reach_the_sink_in_order_and_finish() {
         }
     }
     assert_eq!(last_done, 40);
+}
+
+mod stored_mail {
+    use super::*;
+    use outpost_core::api::FolderInfo;
+    use outpost_core::store::maildir::Flags;
+    use outpost_core::store::Store;
+    use outpost_core::Config;
+
+    fn mail(n: u32, body: &str) -> Vec<u8> {
+        format!(
+            "From: Sender {n} <s{n}@example.com>\r\nSubject: message {n}\r\n\
+             Date: Mon, 2 Nov 2026 09:{n:02}:00 +0000\r\n\r\n{body}\r\n"
+        )
+        .into_bytes()
+    }
+
+    /// The commands the interface uses, answered from an account on disk.
+    #[test]
+    fn commands_are_served_from_the_index() {
+        let data = std::env::temp_dir().join(format!("outpost-core-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        {
+            let store = Store::open(data.join("accounts/home")).unwrap();
+            let inbox = store.create_folder(&["Inbox"]).unwrap();
+            let nested = store.create_folder(&["Projects", "Alpha"]).unwrap();
+            for n in 0..30 {
+                let flags = if n < 25 { Flags::SEEN } else { Flags::default() };
+                store.add_message(inbox, &mail(n, &format!("inbox body {n}")), flags, None).unwrap();
+            }
+            store.add_message(nested, &mail(40, "the alpha plan"), Flags::SEEN, None).unwrap();
+        }
+
+        let core = Core::start_with(Config { data_dir: Some(data.clone()) }, |_| {}).unwrap();
+        let Response::Folders { folders } = core.handle(Command::ListFolders).unwrap() else {
+            panic!("wrong response")
+        };
+        let shape: Vec<(&str, u8, u32, u32)> = folders
+            .iter()
+            .map(|f: &FolderInfo| (f.name.as_str(), f.depth, f.total, f.unread))
+            .collect();
+        assert_eq!(
+            shape,
+            [("home", 0, 0, 0), ("Inbox", 1, 30, 5), ("Projects", 1, 0, 0), ("Alpha", 2, 1, 0)]
+        );
+        let account = folders[0].id.clone();
+        let inbox = folders[1].id.clone();
+
+        let Response::FolderLayout { total, preview_lens, .. } =
+            core.handle(Command::FolderLayout { folder: inbox.clone() }).unwrap()
+        else {
+            panic!("wrong response")
+        };
+        assert_eq!((total, preview_lens.len()), (30, 30));
+
+        let Response::Messages { offset, total, rows, .. } = core
+            .handle(Command::ListMessages { folder: inbox.clone(), offset: 25, limit: 50 })
+            .unwrap()
+        else {
+            panic!("wrong response")
+        };
+        assert_eq!((offset, total, rows.len()), (25, 30, 5));
+        assert_eq!(rows[0].index, 25);
+        assert_eq!(rows[4].subject, "message 0", "oldest is last");
+        assert_eq!(rows[4].sender_name, "Sender 0");
+        assert!(!rows[4].unread);
+        assert_eq!(preview_lens[29] as usize, rows[4].preview.chars().count());
+
+        let search = |scope: &str, text: &str| -> Vec<String> {
+            let Response::SearchResults { rows } = core
+                .handle(Command::Search { scope: scope.into(), text: text.into(), limit: 100 })
+                .unwrap()
+            else {
+                panic!("wrong response")
+            };
+            rows.into_iter().map(|r| r.subject).collect()
+        };
+        assert_eq!(search(&account, "alpha "), ["message 40"]);
+        assert_eq!(search(&inbox, "alpha "), Vec::<String>::new());
+        assert_eq!(search(&account, "body").len(), 30);
+
+        for bad in ["acct/home/999", "acct/nobody", "acct/home/x", "demo/inbox"] {
+            let err = core.handle(Command::FolderLayout { folder: bad.into() }).unwrap_err();
+            assert_eq!(err.code, ErrorCode::UnknownFolder, "{bad}");
+        }
+        drop(core);
+        let _ = std::fs::remove_dir_all(&data);
+    }
 }

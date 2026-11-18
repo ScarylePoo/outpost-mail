@@ -43,6 +43,7 @@ function row(i: number): MessageRow {
   const name = NAMES[hash(i) % NAMES.length]!;
   const flags = hash(i * 13 + 5) % 100;
   return {
+    id: i,
     index: i,
     senderName: name,
     senderAddress: name.toLowerCase().replace(/[^a-z ]/g, "").replace(" ", ".") + "@example.com",
@@ -79,6 +80,8 @@ function answer(command: Command): Response {
       for (let i = start; i < end; i++) rows.push(row(i));
       return { type: "messages", folder: command.folder, offset: start, total, rows };
     }
+    case "search":
+      return { type: "searchResults", rows: [] };
     case "startDemoSync":
       folder(command.folder);
       return { type: "accepted" };

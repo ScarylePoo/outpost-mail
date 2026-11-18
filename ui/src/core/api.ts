@@ -11,6 +11,7 @@ export type Command =
   | { type: "listFolders" }
   | { type: "folderLayout"; folder: FolderId }
   | { type: "listMessages"; folder: FolderId; offset: number; limit: number }
+  | { type: "search"; scope: FolderId; text: string; limit: number }
   | { type: "startDemoSync"; folder: FolderId };
 
 export interface FolderInfo {
@@ -22,6 +23,7 @@ export interface FolderInfo {
 }
 
 export interface MessageRow {
+  id: number;
   index: number;
   senderName: string;
   senderAddress: string;
@@ -38,6 +40,7 @@ export type Response =
   | { type: "folders"; folders: FolderInfo[] }
   | { type: "folderLayout"; folder: FolderId; total: number; previewLens: number[] }
   | { type: "messages"; folder: FolderId; offset: number; total: number; rows: MessageRow[] }
+  | { type: "searchResults"; rows: MessageRow[] }
   | { type: "accepted" };
 
 export type CoreEvent =
@@ -55,6 +58,7 @@ type ResponseFor = {
   listFolders: "folders";
   folderLayout: "folderLayout";
   listMessages: "messages";
+  search: "searchResults";
   startDemoSync: "accepted";
 };
 

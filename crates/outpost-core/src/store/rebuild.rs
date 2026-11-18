@@ -259,6 +259,32 @@ mod tests {
     }
 
     #[test]
+    fn many_messages_dated_the_same_second_all_survive() {
+        let tmp = TempDir::new();
+        let store = Store::open(tmp.path()).unwrap();
+        let inbox = store.create_folder(&["Inbox"]).unwrap();
+        // Far more than fit in one second's worth of sort keys under test.
+        for n in 0..70 {
+            let raw = format!(
+                "Subject: burst {n}\r\nDate: Mon, 2 Nov 2026 09:00:00 +0000\r\n\r\nsame second\r\n"
+            );
+            store.add_message(inbox, raw.as_bytes(), Flags::SEEN, None).unwrap();
+        }
+        let check = |stage: &str| {
+            let page = store.index().page(inbox, 0, 500).unwrap();
+            let mut subjects: Vec<String> = page.into_iter().map(|r| r.subject).collect();
+            subjects.sort();
+            subjects.dedup();
+            assert_eq!(subjects.len(), 70, "{stage}: listed");
+            assert_eq!(store.index().search("second ", None, 500).unwrap().len(), 70, "{stage}: searchable");
+            assert_eq!(store.index().search("burst 69 ", None, 500).unwrap().len(), 1, "{stage}");
+        };
+        check("added one by one");
+        store.rebuild(true, |_| {}).unwrap();
+        check("rebuilt in bulk");
+    }
+
+    #[test]
     fn mail_from_another_program_is_picked_up() {
         let tmp = TempDir::new();
         let store = Store::open(tmp.path()).unwrap();

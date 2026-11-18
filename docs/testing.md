@@ -42,6 +42,47 @@ libraries installed. Add `--workspace` to compile the shell too.
 Every push runs the core tests, the type-check and a shell build on Windows
 and Linux (`.github/workflows/ci.yml`).
 
+## Performance tests (milestone 1)
+
+`outpost-bench` writes a synthetic mailbox of real message files, indexes it
+and times the operations the handoff doc sets targets for. Build it once:
+
+```sh
+cargo build --release -p outpost-bench
+```
+
+Then, with `DIR` an empty directory on the disk you want to test:
+
+```sh
+target/release/outpost-bench all --data DIR --messages 1000000
+```
+
+That runs three steps, which can also be run one at a time:
+
+| Step | What it does |
+| --- | --- |
+| `generate --data DIR --messages N` | Writes N messages as a Maildir tree under `DIR/mail`: conversations with reply headers and quoted history, signatures, HTML parts, attachments, 12 years of dates, nine folders. Same `--seed`, same mailbox. |
+| `rebuild --data DIR` | Empties `DIR/index.sqlite` and rebuilds it from the mail files, timing each phase. |
+| `measure --data DIR` | Times folder opens, deep pages, message reads and ten kinds of search, and marks each against its target. |
+
+A million messages is about 7 GB of mail plus the index. Generating it takes
+under a minute on Linux and well over half an hour on Windows, where creating
+small files is far slower.
+
+"First" in the report is the first run in that process; "typical" is the
+median of 15 more. The tool cannot empty the operating system's file cache, so
+for a truly cold number, reboot and run `measure` alone.
+
+To browse a generated mailbox in the app, put it where an account would be and
+point the app at the data directory:
+
+```sh
+target/release/outpost-bench all --data DATA/accounts/synthetic --messages 1000000
+OUTPOST_DATA=DATA target/release/outpost
+```
+
+Results are recorded in `docs/performance-results.md`.
+
 ## The shell test (milestone 0)
 
 This decides whether the shell stays Tauri. It has two halves, and both must

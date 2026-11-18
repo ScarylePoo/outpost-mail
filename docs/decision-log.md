@@ -7,6 +7,98 @@ started.
 Status words: **Decided** (owner agreed), **Proposal** (default in use, owner
 has not reviewed), **Finding** (a test result).
 
+## 2026-11-17 · Milestone 1
+
+All of these are **Proposals** unless marked otherwise: they follow the
+handoff doc's storage proposals and fill in details it left open.
+
+### Account layout on disk
+
+`<data>/accounts/<name>/mail/…` holds the Maildir tree and
+`<data>/accounts/<name>/index.sqlite` the index. Folders nest as real
+directories (the handoff doc's proposal). A folder name that would be invalid
+on Windows, or would collide with `cur`, `new` or `tmp`, is percent-encoded on
+disk and shown decoded.
+
+Known gap: Windows and macOS treat `Work` and `work` as the same directory, so
+two IMAP folders differing only in case would collide there. Not handled yet;
+decide in milestone 2 when real folder lists arrive.
+
+### File names
+
+`<time>.M<micros>P<pid>Q<n>R<nonce>.outpost,U=<uid>,S=<size>` then the flag
+section. The server UID is in the name (as mbsync and OfflineIMAP do) so a
+rebuilt index knows which server message each file is without asking the
+server. The Windows separator is `;` (the handoff doc's proposal); both `:`
+and `;` are read on every system, so a mail folder can be copied between
+Windows and Linux.
+
+### Flags: the index leads, file names follow
+
+Per the handoff doc's proposal. The index stores both the flags the user sees
+and the flags currently in the file name; a background pass renames files
+whose two values differ. A flag change that has not reached the file name is
+lost if the index is rebuilt before it does. That window is short, and the
+server holds the true flags once sync exists.
+
+### Messages are ordered by a sort key, and search returns newest first without sorting
+
+Each message gets a 62-bit key: its date in the high bits, a tie-breaker in
+the low 23. The folder list is ordered by it, and it is the row number in the
+search index. Search can therefore walk its matches newest-first and stop
+after the first 50, instead of collecting every match and sorting.
+
+Measured on a million messages (Linux): a word that appears in nearly every
+message went from 164 ms typical (290 ms first run, against a 300 ms target)
+to 0.1 ms. The cost: the index grew from 1.73 GB to 2.43 GB and a full rebuild
+went from 126 s to 215 s, because large row numbers compress worse in the
+search index. Chosen because search-as-you-type is used constantly and a
+rebuild almost never.
+
+Consequences to remember: sorting the list by anything other than date
+(sender, subject, size) will need its own index or a sort, and search results
+in any other order need the slower collect-and-sort path.
+
+### Search
+
+SQLite FTS5 over subject, participants and body, storing positions (so exact
+phrases can be supported) but not a second copy of the text. Every word typed
+must match; the last word matches as a prefix until a space follows it.
+Accents and case are ignored. Body text beyond 256 kB per message is not
+indexed. What the user types is always quoted, never interpreted as query
+syntax; an explicit syntax for phrases and exclusions can be added in the
+search box later.
+
+### An index from an older version is discarded, not migrated
+
+Until the first release the index format will keep changing, and everything
+in it can be rebuilt, so opening an older index replaces it with an empty one.
+An index from a newer version is refused untouched. Before sync state lives
+in the index (milestone 2) this needs a real migration path, because sync
+positions cannot be rebuilt from files.
+
+### Previews strip quotes with simple rules for now
+
+`>`-quoted lines, the "On … wrote:" line before them, and everything after a
+signature separator or an "Original Message" divider are left out of the
+preview. HTML quoting and repeated-signature detection are milestone 5.
+
+### Dependencies added
+
+`rusqlite` with bundled SQLite (MIT; SQLite itself is public domain) and
+`mail-parser` (MIT or Apache-2.0).
+
+### Finding: creating small files on Windows is about 40 times slower than on Linux
+
+Generating the synthetic mailbox wrote about 22,700 messages a second on Linux
+(ext4 under WSL2) and about 500 a second on Windows (NTFS, with Microsoft
+Defender's real-time scanning on, which is the likely cause but was not
+isolated). Reading them back for indexing was not slow. For Outpost this caps
+how fast a first sync can store mail on Windows at a few hundred messages a
+second, which is probably still faster than most servers deliver them. To
+confirm in milestone 2, and to test with a Defender exclusion on the data
+folder.
+
 ## 2026-11-17 · Milestone 0 closed
 
 ### Decided: the cPanel add-on is out of version 1

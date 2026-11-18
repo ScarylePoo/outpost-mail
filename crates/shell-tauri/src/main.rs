@@ -5,7 +5,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use outpost_core::api::{Command, CoreError, Event, Response};
-use outpost_core::Core;
+use outpost_core::{Config, Core};
 use tauri::{Emitter, Manager, State};
 
 /// Name of the single webview event that carries every core [`Event`].
@@ -44,9 +44,15 @@ fn main() {
     tauri::Builder::default()
         .setup(|app| {
             let handle = app.handle().clone();
-            app.manage(Core::start(move |event: Event| {
+            // Until there is a settings screen, the data directory comes
+            // from OUTPOST_DATA. Without it the synthetic account is shown.
+            let config = Config {
+                data_dir: std::env::var_os("OUTPOST_DATA").map(Into::into),
+            };
+            let core = Core::start_with(config, move |event: Event| {
                 let _ = handle.emit(CORE_EVENT, event);
-            }));
+            })?;
+            app.manage(core);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

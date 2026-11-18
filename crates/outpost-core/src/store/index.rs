@@ -16,7 +16,7 @@ use std::sync::{Mutex, MutexGuard};
 type Result<T> = std::result::Result<T, StoreError>;
 
 /// Bump when the schema changes, and add a step to `migrate`.
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 const TABLES: &str = r#"
 CREATE TABLE folder (
@@ -47,6 +47,11 @@ CREATE TABLE message (
     uid            INTEGER,
     modseq         INTEGER,
     date           INTEGER NOT NULL,
+    -- Orders messages newest-first: the date in the high bits and a
+    -- tie-breaker in the low bits (see `sort_key`). Unique. It is also the
+    -- message's rowid in message_fts, which is what lets search return its
+    -- newest matches first without sorting them.
+    sort_key       INTEGER NOT NULL,
     size           INTEGER NOT NULL,
     has_attachment INTEGER NOT NULL,
     from_name      TEXT NOT NULL,
@@ -77,12 +82,13 @@ CREATE VIRTUAL TABLE message_fts USING fts5(
 const INDEXES: &[(&str, &str)] = &[
     // Serves the message list. Includes preview_len so that laying out a
     // whole folder reads this index only.
-    ("message_list", "CREATE INDEX message_list ON message(folder_id, date DESC, id DESC, preview_len)"),
-    ("message_base", "CREATE UNIQUE INDEX message_base ON message(folder_id, base)"),
-    ("message_uid", "CREATE UNIQUE INDEX message_uid ON message(folder_id, uid) WHERE uid IS NOT NULL"),
-    ("message_msgid", "CREATE INDEX message_msgid ON message(message_id) WHERE message_id != ''"),
-    ("message_unread", "CREATE INDEX message_unread ON message(folder_id) WHERE (flags & 1) = 0"),
-    ("message_rename", "CREATE INDEX message_rename ON message(id) WHERE flags != file_flags"),
+    ("message_list", "CREATE INDEX IF NOT EXISTS message_list ON message(folder_id, sort_key DESC, preview_len)"),
+    ("message_sort", "CREATE UNIQUE INDEX IF NOT EXISTS message_sort ON message(sort_key)"),
+    ("message_base", "CREATE UNIQUE INDEX IF NOT EXISTS message_base ON message(folder_id, base)"),
+    ("message_uid", "CREATE UNIQUE INDEX IF NOT EXISTS message_uid ON message(folder_id, uid) WHERE uid IS NOT NULL"),
+    ("message_msgid", "CREATE INDEX IF NOT EXISTS message_msgid ON message(message_id) WHERE message_id != ''"),
+    ("message_unread", "CREATE INDEX IF NOT EXISTS message_unread ON message(folder_id) WHERE (flags & 1) = 0"),
+    ("message_rename", "CREATE INDEX IF NOT EXISTS message_rename ON message(id) WHERE flags != file_flags"),
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -244,6 +250,16 @@ impl Index {
         })
     }
 
+    /// How many messages a folder holds. 0 for a folder that does not exist.
+    pub fn folder_total(&self, folder_id: i64) -> Result<u32> {
+        self.read(|conn| {
+            conn.prepare_cached("SELECT total FROM folder WHERE id = ?1")?
+                .query_row([folder_id], |r| r.get(0))
+                .optional()
+        })
+        .map(Option::unwrap_or_default)
+    }
+
     /// Recounts every folder's totals from its messages.
     pub fn refresh_counts(&self) -> Result<()> {
         self.writer().execute_batch(
@@ -261,8 +277,12 @@ impl Index {
         let mut conn = self.writer();
         let tx = conn.transaction()?;
         let mut ids = Vec::with_capacity(messages.len());
+        let mut tie: u64 = tx.query_row("SELECT coalesce(max(id), 0) + 1 FROM message", [], |r| {
+            r.get::<_, i64>(0)
+        })? as u64;
         for message in messages {
-            ids.push(insert_one(&tx, folder_id, message)?);
+            ids.push(insert_unique(&tx, folder_id, message, sort_key(message.date, tie))?);
+            tie += 1;
         }
         let unread = messages.iter().filter(|m| !m.flags.contains(Flags::SEEN)).count();
         tx.execute(
@@ -334,7 +354,7 @@ impl Index {
         self.read(|conn| {
             conn.prepare_cached(&format!(
                 "SELECT {LIST_COLUMNS} FROM message m WHERE m.folder_id = ?1
-                 ORDER BY m.date DESC, m.id DESC LIMIT ?2 OFFSET ?3"
+                 ORDER BY m.sort_key DESC LIMIT ?2 OFFSET ?3"
             ))?
             .query_map(params![folder_id, limit, offset], list_row)?
             .collect()
@@ -345,7 +365,7 @@ impl Index {
     pub fn preview_lens(&self, folder_id: i64) -> Result<Vec<u16>> {
         self.read(|conn| {
             conn.prepare_cached(
-                "SELECT preview_len FROM message WHERE folder_id = ?1 ORDER BY date DESC, id DESC",
+                "SELECT preview_len FROM message WHERE folder_id = ?1 ORDER BY sort_key DESC",
             )?
             .query_map([folder_id], |r| r.get(0))?
             .collect()
@@ -378,20 +398,25 @@ impl Index {
         let Some(query) = fts_query(text) else {
             return Ok(Vec::new());
         };
+        // The search index's rowids are sort keys, so walking it backwards
+        // yields matches newest first and stops after `limit` of them,
+        // however many there are in total. CROSS JOIN fixes that join order.
         self.read(|conn| match folder_id {
             Some(folder_id) => conn
                 .prepare_cached(&format!(
-                    "SELECT {LIST_COLUMNS} FROM message_fts JOIN message m ON m.id = message_fts.rowid
+                    "SELECT {LIST_COLUMNS}
+                     FROM message_fts CROSS JOIN message m ON m.sort_key = message_fts.rowid
                      WHERE message_fts MATCH ?1 AND m.folder_id = ?2
-                     ORDER BY m.date DESC LIMIT ?3"
+                     ORDER BY message_fts.rowid DESC LIMIT ?3"
                 ))?
                 .query_map(params![query, folder_id, limit], list_row)?
                 .collect(),
             None => conn
                 .prepare_cached(&format!(
-                    "SELECT {LIST_COLUMNS} FROM message_fts JOIN message m ON m.id = message_fts.rowid
+                    "SELECT {LIST_COLUMNS}
+                     FROM message_fts CROSS JOIN message m ON m.sort_key = message_fts.rowid
                      WHERE message_fts MATCH ?1
-                     ORDER BY m.date DESC LIMIT ?2"
+                     ORDER BY message_fts.rowid DESC LIMIT ?2"
                 ))?
                 .query_map(params![query, limit], list_row)?
                 .collect(),
@@ -417,7 +442,7 @@ impl Index {
              INSERT INTO message_fts(message_fts) VALUES('delete-all');
              BEGIN",
         )?;
-        Ok(Bulk { conn, in_batch: 0 })
+        Ok(Bulk { conn, in_batch: 0, count: 0 })
     }
 }
 
@@ -425,6 +450,8 @@ impl Index {
 pub(super) struct Bulk<'a> {
     conn: MutexGuard<'a, Connection>,
     in_batch: u32,
+    /// Messages added so far. Also the next sort key's tie-breaker.
+    count: u64,
 }
 
 impl Bulk<'_> {
@@ -437,7 +464,20 @@ impl Bulk<'_> {
     }
 
     pub fn add(&mut self, folder_id: i64, message: &NewMessage) -> Result<()> {
-        insert_one(&self.conn, folder_id, message)?;
+        // The first 2^TIE_BITS messages all get different tie-breakers, so
+        // their sort keys cannot collide and need no checking. A load bigger
+        // than that turns the uniqueness index on and checks from then on.
+        let key = sort_key(message.date, self.count);
+        if self.count < 1 << TIE_BITS {
+            insert_one(&self.conn, folder_id, message, key)?;
+        } else {
+            if self.count == 1 << TIE_BITS {
+                let (_, unique) = INDEXES.iter().find(|(name, _)| *name == "message_sort").unwrap();
+                self.conn.execute_batch(unique)?;
+            }
+            insert_unique(&self.conn, folder_id, message, key)?;
+        }
+        self.count += 1;
         self.in_batch += 1;
         if self.in_batch >= Self::BATCH {
             self.conn.execute_batch("COMMIT; BEGIN")?;
@@ -466,13 +506,44 @@ impl Bulk<'_> {
     }
 }
 
-fn insert_one(conn: &Connection, folder_id: i64, m: &NewMessage) -> rusqlite::Result<i64> {
+/// Bits of a sort key given to the tie-breaker: room for eight million
+/// messages dated the same second. Under test it is tiny, so that the
+/// handling of collisions is exercised by ordinary-sized tests.
+const TIE_BITS: u32 = if cfg!(test) { 4 } else { 23 };
+
+/// A key that sorts by date, then by `tie`. Dates are clamped to what fits
+/// (the years 1970 to 19391), so a nonsense Date header cannot overflow it.
+fn sort_key(date: i64, tie: u64) -> i64 {
+    (date.clamp(0, (1 << 39) - 1) << TIE_BITS) | (tie & ((1 << TIE_BITS) - 1)) as i64
+}
+
+/// Inserts a message, moving to the next free sort key if `key` is taken.
+/// Needs the `message_sort` index to exist.
+fn insert_unique(conn: &Connection, folder_id: i64, m: &NewMessage, mut key: i64) -> rusqlite::Result<i64> {
+    loop {
+        match insert_one(conn, folder_id, m, key) {
+            Err(rusqlite::Error::SqliteFailure(e, _))
+                if e.code == rusqlite::ErrorCode::ConstraintViolation
+                    && key_taken(conn, key)? =>
+            {
+                key += 1;
+            }
+            other => return other,
+        }
+    }
+}
+
+fn key_taken(conn: &Connection, key: i64) -> rusqlite::Result<bool> {
+    conn.prepare_cached("SELECT 1 FROM message WHERE sort_key = ?1")?.exists([key])
+}
+
+fn insert_one(conn: &Connection, folder_id: i64, m: &NewMessage, key: i64) -> rusqlite::Result<i64> {
     let p = &m.parsed;
     conn.prepare_cached(
         "INSERT INTO message (folder_id, base, file_flags, flags, uid, date, size, has_attachment,
                               from_name, from_addr, recipients, subject, message_id, in_reply_to,
-                              refs, preview, preview_len)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                              refs, preview, preview_len, sort_key)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
     )?
     .execute(params![
         folder_id,
@@ -492,13 +563,14 @@ fn insert_one(conn: &Connection, folder_id: i64, m: &NewMessage) -> rusqlite::Re
         p.references,
         p.preview,
         p.preview.chars().count().min(u16::MAX as usize) as i64,
+        key,
     ])?;
     let id = conn.last_insert_rowid();
     conn.prepare_cached(
         "INSERT INTO message_fts (rowid, subject, participants, body) VALUES (?1, ?2, ?3, ?4)",
     )?
     .execute(params![
-        id,
+        key,
         p.subject,
         format!("{} {} {}", p.from_name, p.from_addr, p.recipients),
         p.body,
@@ -532,7 +604,16 @@ fn migrate(conn: &Connection) -> Result<()> {
             Ok(())
         }
         SCHEMA_VERSION => Ok(()),
-        other => Err(StoreError::IndexVersion(other)),
+        // An index from an older Outpost. It holds nothing that cannot be
+        // rebuilt, so replace it with an empty one of the current shape.
+        older if older < SCHEMA_VERSION => {
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS message_fts; DROP TABLE IF EXISTS message;
+                 DROP TABLE IF EXISTS folder; PRAGMA user_version = 0",
+            )?;
+            migrate(conn)
+        }
+        newer => Err(StoreError::IndexVersion(newer)),
     }
 }
 
@@ -569,6 +650,17 @@ pub fn fts_query(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sort_keys_order_by_date_then_tie_and_never_overflow() {
+        assert!(sort_key(100, 5) < sort_key(101, 0));
+        assert!(sort_key(100, 5) < sort_key(100, 6));
+        assert_eq!(sort_key(-50, 1), sort_key(0, 1), "dates before 1970 clamp to 1970");
+        assert!(sort_key(i64::MAX, u64::MAX) > sort_key(4_000_000_000, 0));
+        assert!(sort_key(i64::MAX, u64::MAX) > 0);
+        // The tie-breaker wraps instead of spilling into the date.
+        assert_eq!(sort_key(7, 1 << TIE_BITS), sort_key(7, 0));
+    }
 
     #[test]
     fn queries_are_quoted_so_user_text_is_never_syntax() {

@@ -115,6 +115,7 @@ pub fn row(seed: u64, index: u32) -> MessageRow {
         .filter(|c| c.is_ascii_alphanumeric() || *c == '.')
         .collect();
     MessageRow {
+        id: index as i64,
         index,
         sender_name: format!("{first} {last}"),
         sender_address: format!("{local}@{domain}"),

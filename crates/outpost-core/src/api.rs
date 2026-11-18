@@ -33,6 +33,15 @@ pub enum Command {
         offset: u32,
         limit: u32,
     },
+    /// Full-text search, newest first. Every word must match; the last word
+    /// matches as a prefix unless the text ends with a space.
+    Search {
+        /// What to search: an account's id for all of its mail, or a
+        /// folder's id for that folder alone.
+        scope: FolderId,
+        text: String,
+        limit: u32,
+    },
     /// Milestone 0 only: makes the core push a burst of progress events, to
     /// prove the event path end to end.
     StartDemoSync { folder: FolderId },
@@ -56,6 +65,9 @@ pub enum Response {
         folder: FolderId,
         offset: u32,
         total: u32,
+        rows: Vec<MessageRow>,
+    },
+    SearchResults {
         rows: Vec<MessageRow>,
     },
     /// The command was accepted; results arrive as events.
@@ -89,7 +101,9 @@ pub struct FolderInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageRow {
-    /// Position in the folder's current sort order.
+    /// Identifies the message within its account.
+    pub id: i64,
+    /// Position in the folder's current sort order, or in the search results.
     pub index: u32,
     pub sender_name: String,
     pub sender_address: String,

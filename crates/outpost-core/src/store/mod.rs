@@ -334,6 +334,61 @@ mod tests {
     }
 
     #[test]
+    fn messages_with_the_same_or_impossible_dates_all_list_and_search() {
+        let (_tmp, store, inbox) = sample();
+        let same = "Mon, 2 Nov 2026 09:00:00 +0000";
+        let mut ids = Vec::new();
+        for n in 0..5 {
+            ids.push(store.add_message(inbox, &mail("a@example.com", &format!("same{n}"), same, "twin"), Flags::SEEN, None).unwrap());
+        }
+        ids.push(store.add_message(inbox, &mail("a@example.com", "ancient", "Mon, 1 Jan 1900 00:00:00 +0000", "twin"), Flags::SEEN, None).unwrap());
+        ids.push(store.add_message(inbox, &mail("a@example.com", "future", "Mon, 1 Jan 9999 00:00:00 +0000", "twin"), Flags::SEEN, None).unwrap());
+        ids.push(store.add_message(inbox, b"Subject: undated\r\n\r\ntwin\r\n", Flags::SEEN, None).unwrap());
+
+        let page = store.index().page(inbox, 0, 100).unwrap();
+        assert_eq!(page.len(), 8);
+        assert_eq!(page[0].subject, "future");
+        assert_eq!(page[1].subject, "undated", "no Date header: dated by when it was stored");
+        assert_eq!(page[7].subject, "ancient");
+        // Equal dates keep the order they were added in, newest first.
+        let twins: Vec<&str> = page[2..7].iter().map(|r| r.subject.as_str()).collect();
+        assert_eq!(twins, ["same4", "same3", "same2", "same1", "same0"]);
+
+        let found = store.index().search("twin ", None, 100).unwrap();
+        assert_eq!(found.iter().map(|r| r.id).collect::<Vec<_>>(), page.iter().map(|r| r.id).collect::<Vec<_>>(), "search order is list order");
+        assert_eq!(store.index().search("twin ", None, 3).unwrap().len(), 3);
+        for id in ids {
+            assert!(store.read_message(id).is_ok());
+        }
+    }
+
+    #[test]
+    fn an_index_from_an_older_version_is_replaced_and_can_be_rebuilt() {
+        let tmp = TempDir::new();
+        {
+            let store = Store::open(tmp.path()).unwrap();
+            let inbox = store.create_folder(&["Inbox"]).unwrap();
+            store.add_message(inbox, &mail("a@example.com", "kept", "Mon, 2 Nov 2026 09:00:00 +0000", "x"), Flags::default(), None).unwrap();
+        }
+        {
+            let conn = rusqlite::Connection::open(tmp.path().join("index.sqlite")).unwrap();
+            conn.execute_batch("ALTER TABLE message DROP COLUMN verdict; PRAGMA user_version = 1").unwrap();
+        }
+        let store = Store::open(tmp.path()).unwrap();
+        assert_eq!(store.index().message_count().unwrap(), 0, "the old index is discarded");
+        store.rebuild(false, |_| {}).unwrap();
+        let folder = store.index().folders().unwrap().remove(0);
+        assert_eq!(store.index().page(folder.id, 0, 10).unwrap()[0].subject, "kept");
+
+        // An index from the future is left alone and refused.
+        drop(store);
+        let conn = rusqlite::Connection::open(tmp.path().join("index.sqlite")).unwrap();
+        conn.execute_batch("PRAGMA user_version = 999").unwrap();
+        drop(conn);
+        assert!(matches!(Store::open(tmp.path()), Err(StoreError::IndexVersion(999))));
+    }
+
+    #[test]
     fn reopening_keeps_everything_and_scans_nothing() {
         let tmp = TempDir::new();
         let id = {

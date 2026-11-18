@@ -14,6 +14,8 @@ npm) and ship the notices with the app.
 | --- | --- | --- |
 | `serde`, `serde_json` | Encoding commands and events | MIT or Apache-2.0 |
 | `tauri` | The shell | MIT or Apache-2.0 |
+| `rusqlite`, with SQLite bundled | The index and full-text search | MIT (SQLite: public domain) |
+| `mail-parser` | Reading message files | MIT or Apache-2.0 |
 | `solid-js` | Interface framework | MIT |
 | `@tauri-apps/api` | Interface side of the Tauri adapter | MIT or Apache-2.0 |
 | Inter (`@fontsource-variable/inter`) | Typeface | SIL Open Font License 1.1 |

@@ -94,6 +94,34 @@ browser (`npm run dev -w ui`) and open `/?open=0&select=0`: the stub account
 has a six-message conversation with a fork, an added person, an attachment
 and a guessed link.
 
+## Tests of sender verification (milestone 6)
+
+Part of `cargo test`.
+
+- `verify.rs`: reading result headers (comments, quoting, folding, forged
+  and misleading ones), what verifies, what fails, what must never show a
+  green check, and lookalike domains.
+- `recheck.rs`: signs messages with a fresh key, then checks that a good
+  signature is valid, that a changed body, a changed signed header or a
+  different key does not match, and that a missing or withdrawn key is
+  "could not re-check". The DNS answers are supplied by the test; nothing
+  is looked up on the network.
+- `settings.rs`: defaults, a damaged file, and the password.
+- `render.rs`: pictures allowed per sender, and links taken out.
+- `tests/core_accounts.rs`, against Dovecot:
+  - **the known-result set** (`KNOWN_RESULTS`): twelve messages whose right
+    answer is known, each checked in the list and when opened. Add a case
+    here whenever real mail shows something new.
+  - what earlier mail says about a new sender;
+  - a failed message end to end: no links, no pictures, no saving, until
+    trusted with the password; pictures for one sender; a blocked sender's
+    mail going to Junk here and on the server;
+  - mail arriving while the connection is busy.
+
+To see each state without any mail, run the interface in a browser
+(`npm run dev -w ui`): `/?select=12` is a failed message, `/?select=9` a
+verified one, `/?select=2` a lookalike, `/?panel=protection` the settings.
+
 ## The app self-test (milestone 3)
 
 ```sh
@@ -106,7 +134,9 @@ runs the real app against it, adds an account through the interface, delivers
 one more message while the window is open, then works the window as a person
 would: opens a message, flags it, deletes it, searches, replies and sends.
 It then opens the conversation its reply made and reports the tree and the
-reading pane.
+reading pane. One of its messages is delivered as a forgery: expect one row
+marked as failed, the failed-message view on it with no green check, and
+"Verified sender" on a genuine one.
 It prints what the window showed and then what the mail server and the (fake)
 outgoing server ended up with. Expect the deleted message in Trash with its
 flag, the reply in Sent, the original marked answered, and one message handed

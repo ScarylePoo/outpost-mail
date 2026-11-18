@@ -7,6 +7,172 @@ started.
 Status words: **Decided** (owner agreed), **Proposal** (default in use, owner
 has not reviewed), **Finding** (a test result).
 
+## 2026-11-18 · Milestone 6: sender verification
+
+**Proposals** unless marked otherwise. Built and tested against made-up mail
+with known answers. It has not been run on real mail from the owner's
+provider: which header that server writes, and under what name, is the
+first thing to confirm (see "Not done yet").
+
+### Only the topmost result header from the account's own server is believed
+
+The receiving server records SPF, DKIM and DMARC results in an
+`Authentication-Results` header. Anyone can put such a header in a message
+they send. Servers add headers at the top, so nothing a sender wrote can be
+above what the receiving server added. Outpost therefore reads one header
+only: the topmost one carrying the name of the account's own server. Lower
+headers under the same name are ignored even when they look genuine.
+
+- Cost: a server that spreads its results over several headers (one per
+  check, as some Postfix setups do) shows fewer results. It can show less
+  trust than is due, never more.
+- **Known limit.** If the account's server adds no result header at all to
+  some message, and does not strip forged ones bearing its name (the
+  standard says it must), a forged header would be the topmost and would be
+  believed. Whether the owner's server strips them needs checking on real
+  mail. The local signature re-check is an independent second opinion for
+  exactly this case.
+
+### Which server to believe is worked out, then confirmed
+
+The name is taken from the newest 500 messages: the server that wrote the
+topmost result header on at least three of them and on at least 60% of
+those that have one. It is used at once, marked as a guess, and shown in
+the Protection panel for the user to confirm or correct. Once confirmed it
+is never replaced by a guess. With no name, every message is "not checked".
+
+Each message's verdict is stored with the name of the server that wrote it,
+so changing the believed server changes every list at once without reading
+the mail again.
+
+### What counts as verified, and as failed
+
+- **Verified** (the only state with a green check): a DMARC pass for the
+  From domain; or a DKIM pass by the From domain, its parent or its child;
+  or an SPF pass for such a domain. A pass for any other domain is shown for
+  what it is and verifies nothing.
+- **Failed** (red banner, warning in the list): a DMARC failure, whatever
+  else passed; or an SPF hard failure with nothing vouching for the message.
+- **Not verified** (neutral): checks were recorded but none ties the message
+  to its From domain. A broken DKIM signature or an SPF soft failure alone
+  lands here, not in Failed: mailing lists and forwarding cause both.
+- **Not checked** (neutral): nothing usable recorded.
+- A message with two From lines, or two addresses in one, is never
+  verified: the server may have checked one and the reader be shown another.
+
+"Parent or child" is by name only. Two different names under one parent
+(`a.example.com`, `b.example.com`) are not treated as related, because
+without the public-suffix list that cannot be told from `a.co.uk` and
+`b.co.uk`. This errs toward not verified. The handoff doc's table has three
+states; "not verified" is a second neutral one, added so that "your server
+looked and found nothing tying this to the sender" is not worded the same
+as "nobody looked".
+
+### Signatures are checked again locally, and "could not" is not "failed"
+
+`mail-auth` (Stalwart's library) verifies DKIM signatures, with keys fetched
+through the computer's own DNS settings and kept for up to an hour. Three
+outcomes: valid; does not match the message as stored (the key is there and
+the message is not what was signed); could not re-check (key withdrawn or
+gone, signature expired, lookup failed), which is said to be normal for old
+mail and never shown as a failure.
+
+- The re-check is reported beside the server's results. It does not change
+  the state: the handoff doc defines the states by what the server recorded.
+  **Open question for the owner:** should a valid local signature from the
+  From domain earn the green check when the server recorded nothing? It is
+  stronger evidence than a header, but it is a change to the rule.
+- It runs when a failed message is opened and when the user opens the
+  details of any other. It asks DNS about the signing domain, which tells
+  the DNS server roughly what following a link in the message would. It has
+  its own switch.
+- Pure-Rust cryptography was chosen over the library's default (which
+  needs a C toolchain and assembler on Windows).
+
+### Outpost's own warnings
+
+All worked out from the mail already here, when a message is opened:
+
+- **First message from this sender**: no earlier message is from, or to,
+  the address. Mail to someone counts, so a reply from a person the user
+  wrote to first is not flagged.
+- **A familiar name on a new address**: the address is new, and earlier mail
+  under the same display name came from another address, which is shown.
+- **Lookalike domain**: the sender's domain has next to no history here and
+  resembles (one or two characters out, characters that pass for each
+  other, or the real name with something attached) a domain with real
+  history: three messages at least and more than three times the
+  newcomer's. Short names are compared exactly only, since `abc.com` and
+  `abd.com` are simply different companies.
+- **Replies go elsewhere**: the reply address is at a different domain.
+
+### A failed message is held at arm's length
+
+With that protection on (the default), a failed message's links are removed
+in the core, not just disabled in the window: each becomes its text followed
+by where it pointed. Remote pictures are never loaded for it, and the core
+refuses to save its attachments. The view follows the mock-up: banner, name
+shown / actually sent from / replies would go to with mismatches marked,
+each check on a line with a sentence, which server checked and what the
+local re-check found, then Delete, Move to spam, Block sender and a low-key
+"I trust this message". Trusting is per message, is remembered, can be
+withdrawn, and leaves the banner in place.
+
+### Protection settings, each its own switch
+
+Kept in `settings.json` in the data folder; a damaged file reads as the
+defaults, which are all on. Seven from the handoff doc plus one added
+(signature re-checks). Pictures can be allowed per sender from the message
+itself; blocked senders' mail is moved from the inbox to the junk folder as
+it arrives (through the normal action queue, so it happens on the server
+too).
+
+The password is stored as a salted PBKDF2 hash (210,000 rounds). With one
+set, the core refuses to change a setting or to trust a failed message
+without it; withdrawing trust needs none. **It is a guard against someone
+at the keyboard, not against someone who can edit files on the computer**,
+who could delete it from the settings file. That fits the stated purpose
+(parents being talked into switching protection off) and is said in the
+panel.
+
+### Fixed along the way: new mail missed while the connection was busy
+
+Found by the blocked-sender test. The server only pushes changes that
+happen while the client is waiting. Mail arriving while the connection was
+replaying the user's actions was announced in the middle of that work and
+then not seen until the next poll, up to ten minutes later; so after
+deleting a message, the next new one could be late. Before waiting, the
+inbox's position is now compared with where the last sync of it ended, and
+the inbox is synced first if they differ. A regression test delivers mail
+in the middle of a burst of changes; it failed every time before the fix.
+
+### Not done yet in milestone 6
+
+- **Not run on real mail.** Needs the owner: which result header their
+  server writes, under what name, whether it is always present, and whether
+  forged ones are stripped. The known-result set is made up from the
+  standard's formats and common servers' output.
+- ARC results (forwarded mail vouched for by the forwarder) are ignored.
+- Results spread over several headers by one server are read from the top
+  one only (see above).
+- Internationalised domains are compared as written; mixed-script
+  lookalikes are not detected.
+- The warning label in the list is for the message that stands for a
+  conversation; a failed message deeper in a conversation is marked in the
+  tree and in the reading pane.
+- The Protection panel is a plain panel; milestone 8 moves it into the
+  settings window.
+
+### Dependencies added
+
+- `mail-auth` 0.15 (Apache-2.0 or MIT) with `hickory-resolver` for DNS and
+  the RustCrypto `rsa`, `ed25519-dalek`, `sha1`, `sha2` crates. Note for the
+  release review: `rsa` has an open advisory (RUSTSEC-2023-0071, a timing
+  side channel in private-key operations); Outpost only verifies with public
+  keys, which it does not affect.
+- `ring` used directly (already in the build through rustls) for the
+  password hash.
+
 ## 2026-11-18 · Milestone 5: conversations
 
 **Proposals** unless marked otherwise. Built and tested on made-up mail and

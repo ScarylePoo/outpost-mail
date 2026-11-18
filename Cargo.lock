@@ -3272,6 +3272,7 @@ dependencies = [
  "mail-auth",
  "mail-builder",
  "mail-parser",
+ "ring",
  "rusqlite",
  "rustls-platform-verifier",
  "serde",

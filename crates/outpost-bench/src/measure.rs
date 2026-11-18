@@ -126,6 +126,21 @@ pub fn measure(account_dir: &Path, seed: u64) -> Result<bool, String> {
         target: ms_target(100),
     });
 
+    // What earlier mail says about a message's sender, worked out each time
+    // a message is opened (first-time sender, borrowed name, lookalike).
+    let mut pick = || page[rng.below(page.len() as u64) as usize].id;
+    let (first, typical, _) = time(50, || {
+        let history = index.sender_history(pick()).unwrap().unwrap();
+        outpost_core::verify::lookalike(&history.domain, &history.domains).is_some()
+    });
+    lines.push(Line {
+        name: "Sender history for one message".into(),
+        detail: "known address, name, lookalike domain".into(),
+        first,
+        typical,
+        target: ms_target(100),
+    });
+
     // Search. The generator's vocabulary is ranked by how often each word is
     // used, so words can be picked by how many messages they are in.
     let world = World::new(seed);

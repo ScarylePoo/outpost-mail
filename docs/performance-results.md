@@ -2,6 +2,23 @@
 
 How to run these: `docs/testing.md`. Targets come from the handoff doc.
 
+## Milestone 6 · 18 November 2026 · sender verification, one million messages
+
+Linux, file cache emptied first. The index gained a column and a table for
+sender checks (schema 11). Nothing moved out of range:
+
+| Operation | First | Typical | Target |
+| --- | --- | --- | --- |
+| Open Inbox / Archive | 41 / 36 ms | 10 / 22 ms | 100 ms |
+| Open Inbox / Archive as conversations | 49 / 40 ms | 10 / 17 ms | 100 ms |
+| Load a page at the middle / end of Archive | 10 / 9 ms | 4 / 8 ms | 16 ms |
+| Search, word in nearly every message | 5 ms | 0.1 ms | 300 ms |
+| Sender history for one message (new) | 60 ms | 27 ms | 100 ms |
+
+Rebuild: 264 s. Index file 2.57 GB. "Sender history" is the lookup behind
+the first-time, borrowed-name and lookalike warnings; it is added to the
+time to open a message. Not re-measured on Windows for this milestone.
+
 ## Milestone 5 · 18 November 2026 · conversations, one million messages
 
 Same mailbox and machine as below. The index now also holds conversations

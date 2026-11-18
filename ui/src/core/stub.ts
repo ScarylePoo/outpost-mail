@@ -7,10 +7,10 @@
 import type { Command, CoreEvent, FolderInfo, MessageRow, Response, ResponseTo, Transport } from "./api";
 
 const FOLDERS: FolderInfo[] = [
-  { id: "stub", name: "Browser stub account", depth: 0, total: 0, unread: 0 },
-  { id: "stub/inbox", name: "Inbox", depth: 1, total: 100_000, unread: 12_000 },
-  { id: "stub/small", name: "Small folder", depth: 1, total: 40, unread: 4 },
-  { id: "stub/empty", name: "Empty folder", depth: 1, total: 0, unread: 0 },
+  { id: "stub", name: "Browser stub account", depth: 0, total: 0, unread: 0, role: null },
+  { id: "stub/inbox", name: "Inbox", depth: 1, total: 100_000, unread: 12_000, role: "inbox" },
+  { id: "stub/small", name: "Small folder", depth: 1, total: 40, unread: 4, role: null },
+  { id: "stub/empty", name: "Empty folder", depth: 1, total: 0, unread: 0, role: null },
 ];
 
 const NAMES = ["Alice Abbott", "Bram Bergström", "Chidi Castellanos", "Dana Dubois", "Elif Eriksen", "Farid Fontaine"];
@@ -82,6 +82,32 @@ function answer(command: Command): Response {
     }
     case "search":
       return { type: "searchResults", rows: [] };
+    case "openMessage": {
+      const r = row(command.id);
+      // Every third message is HTML, one in nine is not downloaded yet, so
+      // each state of the reading pane can be seen in a browser.
+      const kind = command.id % 9 === 4 ? "pending" : command.id % 3 === 0 ? "html" : "text";
+      return {
+        type: "message",
+        message: {
+          id: command.id,
+          subject: r.subject,
+          senderName: r.senderName,
+          senderAddress: r.senderAddress,
+          to: "You <you@example.com>",
+          cc: command.id % 2 ? "Someone Else <else@example.com>" : "",
+          date: r.date,
+          html:
+            kind === "html"
+              ? `<p>${r.preview}</p><p>See <a href="https://example.com/a/long/path?with=query">the document</a> for details.</p><table border="1" cellpadding="6"><tr><td>Item</td><td align="right">12.50</td></tr></table><blockquote>Earlier: ${r.preview}</blockquote>`
+              : null,
+          text: kind === "text" ? `${r.preview}\n\n> Earlier message quoted here.\n\n-- \n${r.senderName}` : null,
+          attachments: r.hasAttachment ? [{ name: "report.pdf", mimeType: "application/pdf", size: 48_213 }] : [],
+          remoteContentBlocked: kind === "html" && command.id % 2 === 0,
+          downloaded: kind !== "pending",
+        },
+      };
+    }
     case "startDemoSync":
       folder(command.folder);
       return { type: "accepted" };

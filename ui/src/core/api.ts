@@ -11,6 +11,7 @@ export type Command =
   | { type: "listFolders" }
   | { type: "folderLayout"; folder: FolderId }
   | { type: "listMessages"; folder: FolderId; offset: number; limit: number }
+  | { type: "openMessage"; folder: FolderId; id: number }
   | { type: "search"; scope: FolderId; text: string; limit: number }
   | { type: "startDemoSync"; folder: FolderId };
 
@@ -20,6 +21,8 @@ export interface FolderInfo {
   depth: number;
   total: number;
   unread: number;
+  /** inbox, drafts, sent, archive, junk or trash, when known. */
+  role: string | null;
 }
 
 export interface MessageRow {
@@ -35,12 +38,31 @@ export interface MessageRow {
   hasAttachment: boolean;
 }
 
+/** A message as the reading pane shows it. */
+export interface MessageView {
+  id: number;
+  subject: string;
+  senderName: string;
+  senderAddress: string;
+  to: string;
+  cc: string;
+  date: number;
+  /** Already made safe by the core. Still only ever shown in a sandboxed frame. */
+  html: string | null;
+  text: string | null;
+  attachments: { name: string; mimeType: string; size: number }[];
+  remoteContentBlocked: boolean;
+  /** False while only the message's list data has been synced. */
+  downloaded: boolean;
+}
+
 export type Response =
   | { type: "pong"; coreVersion: string }
   | { type: "folders"; folders: FolderInfo[] }
   | { type: "folderLayout"; folder: FolderId; total: number; previewLens: number[] }
   | { type: "messages"; folder: FolderId; offset: number; total: number; rows: MessageRow[] }
   | { type: "searchResults"; rows: MessageRow[] }
+  | { type: "message"; message: MessageView }
   | { type: "accepted" };
 
 export type CoreEvent =
@@ -48,7 +70,7 @@ export type CoreEvent =
   | { type: "syncFinished"; folder: FolderId };
 
 export interface CoreError {
-  code: "badCommand" | "unknownFolder" | "internal";
+  code: "badCommand" | "unknownFolder" | "unknownMessage" | "internal";
   message: string;
 }
 
@@ -59,6 +81,7 @@ type ResponseFor = {
   folderLayout: "folderLayout";
   listMessages: "messages";
   search: "searchResults";
+  openMessage: "message";
   startDemoSync: "accepted";
 };
 

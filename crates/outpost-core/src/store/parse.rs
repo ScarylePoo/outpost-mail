@@ -74,6 +74,80 @@ pub fn parse(raw: &[u8]) -> Parsed {
     }
 }
 
+/// A message taken apart for the reading pane. The HTML here is exactly
+/// what the sender wrote and is NOT safe to display; see `render.rs`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Displayed {
+    pub subject: String,
+    pub from_name: String,
+    pub from_addr: String,
+    pub to: String,
+    pub cc: String,
+    pub date: Option<i64>,
+    pub html: Option<String>,
+    pub text: Option<String>,
+    pub attachments: Vec<Attachment>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Attachment {
+    pub name: String,
+    pub mime_type: String,
+    pub size: u64,
+}
+
+pub fn display(raw: &[u8]) -> Displayed {
+    let Some(message) = MessageParser::default().parse(raw) else {
+        return Displayed {
+            subject: "(unreadable message)".into(),
+            text: Some(String::from_utf8_lossy(raw).into_owned()),
+            ..Displayed::default()
+        };
+    };
+    let (from_name, from_addr) = message.from().map(|l| first_address(&l)).unwrap_or_default();
+    let mut to = String::new();
+    if let Some(list) = message.to() {
+        append_addresses(&mut to, &list);
+    }
+    let mut cc = String::new();
+    if let Some(list) = message.cc() {
+        append_addresses(&mut cc, &list);
+    }
+    // Only offer HTML if the sender wrote some; a text-only message is
+    // shown as text, not as text dressed up as HTML.
+    let has_html = message.html_body().any(|part| {
+        part.content_type()
+            .is_some_and(|c| c.subtype().is_some_and(|s| s.eq_ignore_ascii_case("html")))
+    });
+    let html = has_html.then(|| message.body_html(0).map(|h| h.into_owned())).flatten();
+    let text = message.body_text(0).map(|t| t.into_owned());
+    let attachments = message
+        .attachments()
+        .map(|part| Attachment {
+            name: part.attachment_name().unwrap_or("(unnamed)").to_string(),
+            mime_type: part
+                .content_type()
+                .map(|c| match c.subtype() {
+                    Some(sub) => format!("{}/{}", c.ctype(), sub).to_ascii_lowercase(),
+                    None => c.ctype().to_ascii_lowercase(),
+                })
+                .unwrap_or_else(|| "application/octet-stream".into()),
+            size: part.decoded_len() as u64,
+        })
+        .collect();
+    Displayed {
+        subject: message.subject().unwrap_or_default().trim().to_string(),
+        from_name,
+        from_addr,
+        to,
+        cc,
+        date: message.date().map(|d| d.to_timestamp()),
+        html,
+        text,
+        attachments,
+    }
+}
+
 fn first_address(address: &AddressList) -> (String, String) {
     address
         .first()
@@ -246,6 +320,35 @@ JVBERi0xLjQK\r\n\
         let p = parse(raw);
         assert!(p.has_attachment);
         assert_eq!(p.preview, "See the attached report.");
+    }
+
+    #[test]
+    fn a_message_is_taken_apart_for_reading() {
+        let shown = display(SIMPLE);
+        assert_eq!(shown.subject, "Re: Lunch on Friday?");
+        assert_eq!((shown.from_name.as_str(), shown.from_addr.as_str()), ("Alice Abbott", "alice@example.com"));
+        assert_eq!(shown.to, "Bob <bob@example.org>, carol@example.net");
+        assert_eq!(shown.cc, "Dana Dubois <dana@example.com>");
+        assert_eq!(shown.html, None, "a text-only message offers no HTML");
+        let text = shown.text.unwrap();
+        assert!(text.contains("Friday works.") && text.contains("> How about Friday?"), "the whole text, quotes included");
+        assert!(shown.attachments.is_empty());
+
+        let raw = b"From: a@example.com\r\nSubject: report\r\nMIME-Version: 1.0\r\n\
+Content-Type: multipart/mixed; boundary=\"b\"\r\n\r\n\
+--b\r\nContent-Type: multipart/alternative; boundary=\"alt\"\r\n\r\n\
+--alt\r\nContent-Type: text/plain\r\n\r\nplain version\r\n\
+--alt\r\nContent-Type: text/html\r\n\r\n<p>html <b>version</b></p>\r\n--alt--\r\n\
+--b\r\nContent-Type: application/pdf; name=\"report.pdf\"\r\n\
+Content-Disposition: attachment; filename=\"report.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\n\
+JVBERi0xLjQK\r\n--b--\r\n";
+        let shown = display(raw);
+        assert!(shown.html.unwrap().contains("<b>version</b>"));
+        assert!(shown.text.unwrap().contains("plain version"));
+        assert_eq!(shown.attachments.len(), 1);
+        assert_eq!(shown.attachments[0].name, "report.pdf");
+        assert_eq!(shown.attachments[0].mime_type, "application/pdf");
+        assert_eq!(shown.attachments[0].size, 9);
     }
 
     #[test]

@@ -33,6 +33,9 @@ pub enum Command {
         offset: u32,
         limit: u32,
     },
+    /// A message, prepared for reading. `folder` is any folder of the
+    /// message's account.
+    OpenMessage { folder: FolderId, id: i64 },
     /// Full-text search, newest first. Every word must match; the last word
     /// matches as a prefix unless the text ends with a space.
     Search {
@@ -70,6 +73,9 @@ pub enum Response {
     SearchResults {
         rows: Vec<MessageRow>,
     },
+    Message {
+        message: MessageView,
+    },
     /// The command was accepted; results arrive as events.
     Accepted,
 }
@@ -96,6 +102,9 @@ pub struct FolderInfo {
     pub depth: u8,
     pub total: u32,
     pub unread: u32,
+    /// What the folder is for, when known: `inbox`, `drafts`, `sent`,
+    /// `archive`, `junk` or `trash`.
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -116,12 +125,46 @@ pub struct MessageRow {
     pub has_attachment: bool,
 }
 
+/// A message as the reading pane shows it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageView {
+    pub id: i64,
+    pub subject: String,
+    pub sender_name: String,
+    pub sender_address: String,
+    /// Recipients as display text.
+    pub to: String,
+    pub cc: String,
+    /// Unix time, seconds, UTC. 0 if the message has no usable date.
+    pub date: i64,
+    /// The HTML body, already made safe to display (see `render.rs`).
+    /// `None` if the message has no HTML part.
+    pub html: Option<String>,
+    /// The plain-text body, if there is one.
+    pub text: Option<String>,
+    pub attachments: Vec<AttachmentInfo>,
+    /// The message tried to load pictures from the network.
+    pub remote_content_blocked: bool,
+    /// False while only the message's list data has been synced.
+    pub downloaded: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentInfo {
+    pub name: String,
+    pub mime_type: String,
+    pub size: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ErrorCode {
     /// The command could not be decoded.
     BadCommand,
     UnknownFolder,
+    UnknownMessage,
     Internal,
 }
 

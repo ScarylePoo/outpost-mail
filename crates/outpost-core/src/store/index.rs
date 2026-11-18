@@ -108,6 +108,8 @@ pub struct FolderRow {
     pub name: String,
     pub total: u32,
     pub unread: u32,
+    /// What the server says the folder is for (`sent`, `trash`, …), if it says.
+    pub special_use: Option<String>,
 }
 
 /// A message to add to the index.
@@ -239,7 +241,7 @@ impl Index {
     /// All folders, parents before children.
     pub fn folders(&self) -> Result<Vec<FolderRow>> {
         self.read(|conn| {
-            conn.prepare_cached("SELECT id, path, name, total, unread FROM folder ORDER BY path")?
+            conn.prepare_cached("SELECT id, path, name, total, unread, special_use FROM folder ORDER BY path")?
                 .query_map([], |r| {
                     Ok(FolderRow {
                         id: r.get(0)?,
@@ -247,6 +249,7 @@ impl Index {
                         name: r.get(2)?,
                         total: r.get(3)?,
                         unread: r.get(4)?,
+                        special_use: r.get(5)?,
                     })
                 })?
                 .collect()

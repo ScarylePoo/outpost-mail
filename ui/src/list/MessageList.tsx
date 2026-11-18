@@ -20,6 +20,8 @@ export interface ListHandle {
   /** Visible rows whose data has not arrived yet. Should be 0. */
   blankVisible(): number;
   rowCount(): number;
+  /** Selects the row at this position and scrolls it into view. */
+  select(index: number): void;
 }
 
 export function MessageList(props: {
@@ -219,6 +221,7 @@ export function MessageList(props: {
     props.handle?.({
       scroller,
       rowCount: count,
+      select: (index) => select(index, true),
       blankVisible() {
         let blank = 0;
         for (let i = visFirst; i <= visLast; i++) if (!getRow(i)) blank++;

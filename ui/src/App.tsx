@@ -5,7 +5,7 @@ import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { core, type FolderInfo, type MessageRow } from "./core";
 import { runScrollTest } from "./bench";
 import { MessageList, type ListHandle } from "./list/MessageList";
-import { formatLongDate } from "./list/format";
+import { Reader } from "./reader/Reader";
 import { autoShellTest } from "./autotest";
 
 export function App() {
@@ -45,6 +45,19 @@ export function App() {
     onCleanup(stop);
 
     void autoShellTest(() => list, setStatus);
+
+    // Development aid: `?select=N` opens the Nth message once the list has
+    // loaded, so a particular state can be reached from a URL.
+    const wanted = Number(new URLSearchParams(location.search).get("select") ?? NaN);
+    if (Number.isInteger(wanted) && wanted >= 0) {
+      const timer = setInterval(() => {
+        if (list && list.rowCount() > wanted) {
+          clearInterval(timer);
+          list.select(wanted);
+        }
+      }, 50);
+      onCleanup(() => clearInterval(timer));
+    }
   });
 
   async function scrollTest() {
@@ -80,7 +93,7 @@ export function App() {
         <button onClick={demoSync} disabled={!folder()}>
           Test core events
         </button>
-        <span class="toolbar-note">Milestone 0 build: synthetic mail, nothing is real.</span>
+        <span class="toolbar-note">Preview build: read-only. Nothing you do here changes your mail.</span>
       </header>
 
       <nav class="folders" aria-label="Folders">
@@ -131,24 +144,8 @@ export function App() {
             <pre>{report()}</pre>
           </div>
         </Show>
-        <Show
-          when={message()}
-          fallback={
-            <Show when={!report()}>
-              <div class="reading-empty">Select a message to read it.</div>
-            </Show>
-          }
-        >
-          {(m) => (
-            <article class="message">
-              <h1>{m().subject}</h1>
-              <div class="message-from">
-                <strong>{m().senderName}</strong> <span>&lt;{m().senderAddress}&gt;</span>
-              </div>
-              <div class="message-date">{formatLongDate(m().date)}</div>
-              <p>{m().preview}</p>
-            </article>
-          )}
+        <Show when={!report()}>
+          <Show when={folder()}>{(f) => <Reader folder={f().id} row={message()} />}</Show>
         </Show>
       </section>
 

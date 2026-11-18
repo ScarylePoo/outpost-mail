@@ -16,12 +16,14 @@
 
 pub mod api;
 pub mod imap;
+pub mod render;
 pub mod store;
 pub mod sync;
 pub mod synthetic;
 
 use api::{
-    Command, CoreError, ErrorCode, Event, FolderId, FolderInfo, MessageRow, Response, MAX_PAGE,
+    AttachmentInfo, Command, CoreError, ErrorCode, Event, FolderId, FolderInfo, MessageRow,
+    MessageView, Response, MAX_PAGE,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -158,6 +160,31 @@ impl Core {
                     rows,
                 })
             }
+            Command::OpenMessage { folder, id } => {
+                let view = match self.target(&folder)? {
+                    Target::Synthetic(f) => {
+                        let row = synthetic::row(f.seed, id.clamp(0, u32::MAX as i64) as u32);
+                        MessageView {
+                            id,
+                            subject: row.subject,
+                            sender_name: row.sender_name,
+                            sender_address: row.sender_address,
+                            to: "Synthetic recipient <you@example.com>".into(),
+                            cc: String::new(),
+                            date: row.date,
+                            html: None,
+                            text: Some(row.preview),
+                            attachments: Vec::new(),
+                            remote_content_blocked: false,
+                            downloaded: true,
+                        }
+                    }
+                    Target::Folder(account, _) | Target::Account(account) => {
+                        open_message(&account.store, id)?
+                    }
+                };
+                Ok(Response::Message { message: view })
+            }
             Command::Search { scope, text, limit } => {
                 let limit = limit.min(MAX_PAGE);
                 let rows = match self.target(&scope)? {
@@ -224,16 +251,9 @@ impl Core {
                 depth: 0,
                 total: 0,
                 unread: 0,
+                role: None,
             });
-            for f in account.store.index().folders().map_err(internal)? {
-                folders.push(FolderInfo {
-                    id: format!("{}/{}", account.id, f.id),
-                    name: f.name,
-                    depth: 1 + f.path.matches('/').count().min(200) as u8,
-                    total: f.total,
-                    unread: f.unread,
-                });
-            }
+            folders.extend(folder_tree(&account.id, account.store.index().folders().map_err(internal)?));
         }
         Ok(Response::Folders { folders })
     }
@@ -262,8 +282,132 @@ impl Core {
     }
 }
 
+/// What a folder is for: from the server's marker if it gave one, otherwise
+/// from the names mail servers and clients commonly use.
+fn role_of(folder: &store::index::FolderRow) -> Option<&'static str> {
+    if folder.path.eq_ignore_ascii_case("INBOX") {
+        return Some("inbox");
+    }
+    match folder.special_use.as_deref() {
+        Some("sent") => return Some("sent"),
+        Some("drafts") => return Some("drafts"),
+        Some("trash") => return Some("trash"),
+        Some("junk") => return Some("junk"),
+        Some("archive") | Some("all") => return Some("archive"),
+        _ => {}
+    }
+    match folder.name.to_lowercase().as_str() {
+        "sent" | "sent items" | "sent mail" | "sent messages" => Some("sent"),
+        "drafts" | "draft" => Some("drafts"),
+        "trash" | "deleted items" | "deleted messages" | "bin" => Some("trash"),
+        "junk" | "spam" | "junk e-mail" | "junk email" | "bulk mail" => Some("junk"),
+        "archive" | "archives" => Some("archive"),
+        _ => None,
+    }
+}
+
+/// Lays an account's folders out as the tree shows them: the inbox first,
+/// then drafts, sent, archive, junk and trash, then everything else by name.
+/// On servers that keep every folder inside the inbox, those folders are
+/// shown beside it rather than under it.
+fn folder_tree(account_id: &str, rows: Vec<store::index::FolderRow>) -> Vec<FolderInfo> {
+    fn rank(role: Option<&str>) -> u8 {
+        match role {
+            Some("inbox") => 0,
+            Some("drafts") => 1,
+            Some("sent") => 2,
+            Some("archive") => 3,
+            Some("junk") => 4,
+            Some("trash") => 5,
+            _ => 6,
+        }
+    }
+    fn parent(path: &str) -> &str {
+        path.rsplit_once('/').map_or("", |(p, _)| p)
+    }
+    fn place(
+        account_id: &str,
+        rows: &[store::index::FolderRow],
+        under: &str,
+        depth: u8,
+        hoist_inbox_children: bool,
+        out: &mut Vec<FolderInfo>,
+    ) {
+        let mut here: Vec<&store::index::FolderRow> =
+            rows.iter().filter(|r| parent(&r.path) == under).collect();
+        if hoist_inbox_children {
+            let inbox = rows.iter().find(|r| r.path.eq_ignore_ascii_case("INBOX"));
+            if let Some(inbox) = inbox {
+                here.extend(rows.iter().filter(|r| parent(&r.path) == inbox.path));
+            }
+        }
+        here.sort_by_key(|r| (rank(role_of(r)), r.name.to_lowercase()));
+        for row in here {
+            let role = role_of(row);
+            out.push(FolderInfo {
+                id: format!("{account_id}/{}", row.id),
+                name: if role == Some("inbox") { "Inbox".into() } else { row.name.clone() },
+                depth,
+                total: row.total,
+                unread: row.unread,
+                role: role.map(String::from),
+            });
+            if !(hoist_inbox_children && role == Some("inbox")) {
+                place(account_id, rows, &row.path, depth.saturating_add(1), false, out);
+            }
+        }
+    }
+    let top: Vec<&store::index::FolderRow> = rows.iter().filter(|r| parent(&r.path).is_empty()).collect();
+    let only_inbox = top.len() == 1 && top[0].path.eq_ignore_ascii_case("INBOX") && rows.len() > 1;
+    let mut out = Vec::with_capacity(rows.len());
+    place(account_id, &rows, "", 1, only_inbox, &mut out);
+    out
+}
+
 fn internal(e: StoreError) -> CoreError {
     CoreError::new(ErrorCode::Internal, e.to_string())
+}
+
+/// Reads a message from its file and prepares it for the reading pane.
+fn open_message(store: &Store, id: i64) -> Result<MessageView, CoreError> {
+    let raw = match store.read_message(id) {
+        Ok(raw) => raw,
+        Err(StoreError::NotDownloaded(_)) => {
+            return Ok(MessageView {
+                id,
+                downloaded: false,
+                ..MessageView::default()
+            })
+        }
+        Err(StoreError::NoSuchMessage(_)) => {
+            return Err(CoreError::new(ErrorCode::UnknownMessage, format!("no message {id}")))
+        }
+        Err(e) => return Err(internal(e)),
+    };
+    let shown = store::parse::display(&raw);
+    let safe = shown.html.as_deref().map(render::safe_html);
+    Ok(MessageView {
+        id,
+        subject: shown.subject,
+        sender_name: shown.from_name,
+        sender_address: shown.from_addr,
+        to: shown.to,
+        cc: shown.cc,
+        date: shown.date.unwrap_or(0),
+        remote_content_blocked: safe.as_ref().is_some_and(|s| s.remote_content_blocked),
+        html: safe.map(|s| s.html),
+        text: shown.text,
+        attachments: shown
+            .attachments
+            .into_iter()
+            .map(|a| AttachmentInfo {
+                name: a.name,
+                mime_type: a.mime_type,
+                size: a.size,
+            })
+            .collect(),
+        downloaded: true,
+    })
 }
 
 fn message_rows(rows: Vec<ListRow>, first_index: u32) -> Vec<MessageRow> {
@@ -316,6 +460,7 @@ fn synthetic_folders() -> Vec<SyntheticFolder> {
             total,
             // Matches synthetic::row, which marks 12% unread.
             unread: total / 100 * 12,
+            role: (name == "Inbox").then(|| "inbox".to_string()),
         },
         seed,
     };

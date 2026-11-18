@@ -39,6 +39,13 @@ fn commands_decode_from_the_documented_json() {
             },
         ),
         (
+            json!({"type": "openMessage", "folder": "demo/inbox", "id": 7}),
+            Command::OpenMessage {
+                folder: "demo/inbox".into(),
+                id: 7,
+            },
+        ),
+        (
             json!({"type": "startDemoSync", "folder": "demo/inbox"}),
             Command::StartDemoSync {
                 folder: "demo/inbox".into(),
@@ -288,7 +295,82 @@ mod stored_mail {
             let err = core.handle(Command::FolderLayout { folder: bad.into() }).unwrap_err();
             assert_eq!(err.code, ErrorCode::UnknownFolder, "{bad}");
         }
+        // Reading: text and (made safe) HTML, and what is not there.
+        let open = |id: i64| core.handle(Command::OpenMessage { folder: inbox.clone(), id });
+        let Response::Message { message } = open(rows[4].id).unwrap() else { panic!("wrong response") };
+        assert!(message.downloaded);
+        assert_eq!(message.subject, "message 0");
+        assert_eq!(message.sender_address, "s0@example.com");
+        assert_eq!(message.text.as_deref().map(str::trim), Some("inbox body 0"));
+        assert_eq!(message.html, None);
+        assert_eq!(open(987_654).unwrap_err().code, ErrorCode::UnknownMessage);
+        let html_id = {
+            let store = Store::open(data.join("accounts/home")).unwrap();
+            let folder = store.index().folders().unwrap().into_iter().find(|f| f.path == "Inbox").unwrap();
+            let raw = b"From: x@example.com\r\nSubject: html\r\nContent-Type: text/html\r\n\r\n\
+<p onclick=\"steal()\">Hi <b>you</b></p><script>steal()</script><img src=\"https://t.example/p.gif\">\r\n";
+            store.add_message(folder.id, raw, Flags::SEEN, None).unwrap()
+        };
+        let Response::Message { message } = open(html_id).unwrap() else { panic!("wrong response") };
+        let html = message.html.unwrap();
+        assert!(html.contains("<b>you</b>") && !html.contains("steal") && !html.contains("t.example"), "{html}");
+        assert!(message.remote_content_blocked);
+
         drop(core);
         let _ = std::fs::remove_dir_all(&data);
+    }
+}
+
+mod folder_tree {
+    use super::*;
+    use outpost_core::store::Store;
+    use outpost_core::Config;
+
+    fn tree(folders: &[&[&str]]) -> Vec<(String, u8, Option<String>)> {
+        let data = std::env::temp_dir().join(format!("outpost-tree-test-{}-{}", std::process::id(), folders.len()));
+        let _ = std::fs::remove_dir_all(&data);
+        {
+            let store = Store::open(data.join("accounts/a")).unwrap();
+            for folder in folders {
+                store.create_folder(folder).unwrap();
+            }
+        }
+        let core = Core::start_with(Config { data_dir: Some(data.clone()) }, |_| {}).unwrap();
+        let Response::Folders { folders } = core.handle(Command::ListFolders).unwrap() else { panic!() };
+        drop(core);
+        let _ = std::fs::remove_dir_all(&data);
+        folders.into_iter().skip(1).map(|f| (f.name, f.depth, f.role)).collect()
+    }
+
+    fn names(tree: &[(String, u8, Option<String>)]) -> Vec<(&str, u8)> {
+        tree.iter().map(|(n, d, _)| (n.as_str(), *d)).collect()
+    }
+
+    #[test]
+    fn well_known_folders_come_first_then_the_rest_by_name() {
+        let t = tree(&[&["zebra"], &["Trash"], &["Apple"], &["Sent Items"], &["INBOX"], &["Spam"], &["Drafts"], &["Apple", "Core"], &["Archive"]]);
+        assert_eq!(
+            names(&t),
+            [("Inbox", 1), ("Drafts", 1), ("Sent Items", 1), ("Archive", 1), ("Spam", 1), ("Trash", 1), ("Apple", 1), ("Core", 2), ("zebra", 1)]
+        );
+        assert_eq!(t[0].2.as_deref(), Some("inbox"));
+        assert_eq!(t[2].2.as_deref(), Some("sent"));
+        assert_eq!(t[4].2.as_deref(), Some("junk"));
+        assert_eq!(t[6].2, None);
+    }
+
+    #[test]
+    fn folders_kept_inside_the_inbox_are_shown_beside_it() {
+        let t = tree(&[&["INBOX"], &["INBOX", "Sent"], &["INBOX", "Trash"], &["INBOX", "Clients"], &["INBOX", "Clients", "Acme"], &["INBOX", "spam"]]);
+        assert_eq!(
+            names(&t),
+            [("Inbox", 1), ("Sent", 1), ("spam", 1), ("Trash", 1), ("Clients", 1), ("Acme", 2)]
+        );
+    }
+
+    #[test]
+    fn inbox_children_stay_nested_when_there_are_other_top_level_folders() {
+        let t = tree(&[&["INBOX"], &["INBOX", "Receipts"], &["Sent"]]);
+        assert_eq!(names(&t), [("Inbox", 1), ("Receipts", 2), ("Sent", 1)]);
     }
 }

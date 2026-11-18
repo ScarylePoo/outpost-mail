@@ -413,6 +413,8 @@ pub struct ThreadMessage {
     pub guessed: bool,
     pub sender_name: String,
     pub sender_address: String,
+    /// The user wrote this message.
+    pub mine: bool,
     pub recipients: String,
     pub date: i64,
     pub unread: bool,

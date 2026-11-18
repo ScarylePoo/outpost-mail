@@ -94,8 +94,10 @@ function Message(props: {
   const context = createMemo(() => {
     const p = parent();
     if (!p) return m().recipients ? `to ${shortNames(m().recipients)}` : "";
-    if (p.senderAddress === m().senderAddress) return "replying to their own earlier message";
-    return `replying to ${firstName(p.senderName)}`;
+    if (p.senderAddress === m().senderAddress) {
+      return m().mine ? "replying to your own earlier message" : "replying to their own earlier message";
+    }
+    return `replying to ${p.mine ? "you" : firstName(p.senderName)}`;
   });
   let element!: HTMLElement;
 
@@ -111,8 +113,8 @@ function Message(props: {
     <article class="turn" classList={{ current: props.current, unread: m().unread }} ref={element}>
       <header class="turn-head">
         <span class="turn-who">
-          <strong>{m().senderName}</strong>
-          <Show when={m().senderAddress && m().senderAddress !== m().senderName}>
+          <strong>{m().mine ? "You" : m().senderName}</strong>
+          <Show when={!m().mine && m().senderAddress && m().senderAddress !== m().senderName}>
             <span class="turn-address">{m().senderAddress}</span>
           </Show>
           <span class="turn-context">{context()}</span>
@@ -193,7 +195,7 @@ export function Conversation(props: { thread: ThreadView; selected: number; fold
   const summary = createMemo(() => {
     const dates = all().map((m) => m.date);
     const [from, to] = [Math.min(...dates), Math.max(...dates)];
-    const names = [...new Set(all().map((m) => firstName(m.senderName)))];
+    const names = [...new Set(all().map((m) => (m.mine ? "You" : firstName(m.senderName))))];
     const span = to - from < DAY ? formatDate(to) : `${formatDate(from)} to ${formatDate(to)}`;
     return `${span} · ${names.join(", ")}`;
   });

@@ -98,6 +98,8 @@ export interface ThreadMessage {
   guessed: boolean;
   senderName: string;
   senderAddress: string;
+  /** The user wrote this message. */
+  mine: boolean;
   recipients: string;
   date: number;
   unread: boolean;

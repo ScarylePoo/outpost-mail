@@ -96,7 +96,9 @@ export function ThreadTree(props: {
                       ↳
                     </span>
                   </Show>
-                  <span class="tree-sender">{firstName(line.message.senderName) || line.message.senderAddress}</span>
+                  <span class="tree-sender">
+                    {line.message.mine ? "You" : firstName(line.message.senderName) || line.message.senderAddress}
+                  </span>
                   <Show when={line.message.guessed}>
                     <span class="chip guess">Placed by subject</span>
                   </Show>

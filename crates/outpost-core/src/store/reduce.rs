@@ -68,6 +68,13 @@ fn is_app_signature(line: &str) -> bool {
 }
 
 pub fn reduce(body: &str) -> Reduced {
+    reduce_reply(body, false)
+}
+
+/// As [`reduce`], knowing whether the message is a reply. In a reply, a
+/// dated "On … wrote:" line starts the quoted history even when the lines
+/// after it carry no `>` marks, as in mail written as HTML only.
+pub fn reduce_reply(body: &str, is_reply: bool) -> Reduced {
     let body = body.replace("\r\n", "\n");
     let lines: Vec<&str> = body.lines().collect();
 
@@ -79,6 +86,10 @@ pub fn reduce(body: &str) -> Reduced {
             break;
         }
         if is_attribution(lines[i]) {
+            if is_reply && lines[i].chars().any(|c| c.is_ascii_digit()) && lines[i].trim().len() > 12 {
+                end = i;
+                break;
+            }
             // An attribution counts when the next non-blank line is quoted,
             // or when nothing but quoted and blank lines follow.
             let mut rest = lines[i + 1..].iter().filter(|l| !l.trim().is_empty());
@@ -237,6 +248,20 @@ mod tests {
         assert_eq!(reduce(prose).text, prose);
         assert_eq!(reduce("").text, "");
         assert_eq!(reduce("> only a quote\n").text, "");
+    }
+
+    #[test]
+    fn quoted_history_without_marks_is_found_in_a_reply() {
+        // What an HTML-only reply looks like once turned into text.
+        let body = "Friday works for me.\n\nOn Mon, Nov 16, 2026 at 9:15 AM Bob <bob@example.com> wrote:\n\nHow about Friday?\n\nBob";
+        let r = reduce_reply(body, true);
+        assert_eq!(r.text, "Friday works for me.");
+        assert_eq!(r.quoted_lines, 3);
+        // Not in a message that is not a reply, and not for a sentence that
+        // merely ends with "wrote:".
+        assert_eq!(reduce_reply(body, false).quoted_lines, 0);
+        let prose = "As Dickens once wrote:\nIt was the best of times.";
+        assert_eq!(reduce_reply(prose, true).text, prose);
     }
 
     #[test]

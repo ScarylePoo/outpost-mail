@@ -1136,6 +1136,10 @@ fn open_thread(account: &Account, id: i64) -> Result<ThreadView, CoreError> {
         })
         .collect();
 
+    let own: Vec<String> = account
+        .config()
+        .map(|c| [c.identity().map(|i| i.address), Some(c.username)].into_iter().flatten().collect())
+        .unwrap_or_default();
     let mut messages: Vec<ThreadMessage> = Vec::with_capacity(rows.len());
     for row in &rows {
         let mut message = ThreadMessage {
@@ -1146,6 +1150,7 @@ fn open_thread(account: &Account, id: i64) -> Result<ThreadView, CoreError> {
             guessed: row.guessed,
             sender_name: if row.from_name.is_empty() { row.from_addr.clone() } else { row.from_name.clone() },
             sender_address: row.from_addr.clone(),
+            mine: own.iter().any(|o| o.eq_ignore_ascii_case(&row.from_addr)),
             recipients: row.recipients.clone(),
             date: row.date,
             unread: !row.flags.contains(Flags::SEEN),
@@ -1157,7 +1162,7 @@ fn open_thread(account: &Account, id: i64) -> Result<ThreadView, CoreError> {
         if row.downloaded {
             if let Ok(raw) = account.store.read_message(row.id) {
                 let shown = store::parse::display(&raw);
-                let reduced = reduce::reduce(shown.text.as_deref().unwrap_or_default());
+                let reduced = reduce::reduce_reply(shown.text.as_deref().unwrap_or_default(), row.parent.is_some());
                 message.text = reduced.text;
                 message.quoted = reduced.quoted;
                 message.quoted_lines = reduced.quoted_lines as u32;

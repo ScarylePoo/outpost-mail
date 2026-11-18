@@ -135,6 +135,25 @@ async function probe(details: string): Promise<string> {
     lines.push(
       `after flagging the reply in the tree: ${text(".tree-line").length} lines still open, picked: ${text(".tree-line.selected .tree-sender").join("")}`,
     );
+
+    // Sender checks. Message 2 was delivered as a forgery; the rest pass.
+    const open = async (subject: string) => {
+      const row = [...document.querySelectorAll(".list-holder .row:not(.idle)")].find((r) =>
+        r.querySelector(".row-subject")?.textContent?.startsWith(subject),
+      );
+      row?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      await sleep(1200);
+    };
+    const account = (await core.send({ type: "listAccounts" })).accounts[0];
+    lines.push(`checks believed from: ${account?.checkingServer} (confirmed: ${account?.checkingServerConfirmed})`);
+    lines.push(`rows marked as failed: ${text(".list-holder .row:not(.idle)").filter((t) => t.includes("Failed checks")).length}`);
+    await open("Selftest message 2");
+    lines.push(`forged message: ${text(".failed h2").join("")} | ${text(".failed-who dd").join(" ; ")}`);
+    lines.push(`its checks: ${text(".failed .check-lines li").join(" / ").replace(/\s+/g, " ")}`);
+    lines.push(`its actions: ${text(".failed-actions button").join(" | ")}`);
+    lines.push(`green checks on it: ${document.querySelectorAll(".message .check-label.verified").length}`);
+    await open("Selftest message 3");
+    lines.push(`genuine message: ${text(".message .check-label").join("")} (banner: ${document.querySelectorAll(".failed").length})`);
   } catch (e) {
     lines.push(`FAILED: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
   }

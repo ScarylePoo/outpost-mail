@@ -86,6 +86,10 @@ class Threaded(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
 def message(n, subject, body):
     return (
+        # Sender checks as the receiving server would record them. Message 2
+        # is a forgery: it fails.
+        f"Authentication-Results: mx.selftest.example; "
+        f"dmarc={'fail' if n == 2 else 'pass'} header.from=example.com\r\n"
         f"From: Sender {n} <sender{n}@example.com>\r\nTo: tester@example.com\r\n"
         f"Subject: {subject}\r\nDate: Mon, 2 Nov 2026 09:{n:02}:00 +0000\r\n"
         f"Message-ID: <{n}@selftest>\r\n\r\n{body}\r\n"

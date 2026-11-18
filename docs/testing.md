@@ -122,6 +122,22 @@ To see each state without any mail, run the interface in a browser
 (`npm run dev -w ui`): `/?select=12` is a failed message, `/?select=9` a
 verified one, `/?select=2` a lookalike, `/?panel=protection` the settings.
 
+## Intermittent failures seen and not explained
+
+Three, each seen once on 18 November 2026. None has been reproduced on
+demand. They are listed so that the next sighting is recognised and its
+output kept.
+
+- **On CI (Linux), run 44303721708:** `an_account_is_added_synced_and_kept_up_to_date`
+  in `tests/core_accounts.rs` timed out after 30 seconds "waiting for the
+  pushed message": mail delivered while the app was idle was not announced.
+  The runs before and after it passed. This is the one to take seriously,
+  because it is the push path that real use depends on; if it is real, new
+  mail would wait for the ten-minute poll. It is not known whether the test
+  or the sync engine is at fault.
+- Locally, under load: the next entry.
+- Locally: `tests/dav_core.rs`, described under the calendar tests above.
+
 **Seen once, 18 November 2026:** `first_sync_mirrors_the_account_and_changes_nothing`
 in `tests/sync_engine.rs` failed in one full run on Linux while the machine
 was also compiling the Windows build, and passed in the four runs after it.

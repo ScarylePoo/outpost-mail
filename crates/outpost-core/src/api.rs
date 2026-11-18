@@ -118,6 +118,37 @@ pub enum Command {
     },
     /// Sets or changes how an account sends mail.
     SetSending { account: FolderId, sending: SendingSettings },
+    /// The general settings.
+    GetGeneral,
+    /// Changes the general settings. `password` is needed if one is set.
+    SetGeneral {
+        general: crate::settings::General,
+        #[serde(default)]
+        password: Option<Secret>,
+    },
+    /// Changes where an account's mail is fetched from, and its signature.
+    /// The user name cannot be changed: that would be a different mailbox.
+    /// `password` is the settings password, needed if one is set.
+    UpdateAccount {
+        account: FolderId,
+        host: String,
+        port: u16,
+        encrypted: bool,
+        signature: String,
+        #[serde(default)]
+        password: Option<Secret>,
+    },
+    /// Removes an account from this computer: its settings, its stored
+    /// password and its downloaded mail. Nothing is changed on the server.
+    /// The interface asks the user first.
+    RemoveAccount {
+        account: FolderId,
+        #[serde(default)]
+        password: Option<Secret>,
+    },
+    /// Writes a message to the downloads folder as a standard mail file
+    /// (`.eml`), exactly as it was received.
+    ExportMessage { folder: FolderId, id: i64 },
     /// The protection settings.
     GetProtection,
     /// Changes the protection settings. `password` is needed if one is set.
@@ -216,6 +247,9 @@ pub enum Response {
     Thread {
         thread: ThreadView,
     },
+    General {
+        general: crate::settings::General,
+    },
     Protection {
         protection: crate::settings::Protection,
         /// A password is needed to change these or to override a warning.
@@ -281,6 +315,17 @@ pub enum Event {
     Notice { account: FolderId, text: String },
     /// `AddAccount` succeeded.
     AccountAdded { account: FolderId },
+    /// An account was removed from this computer.
+    AccountRemoved { account: FolderId },
+    /// Unread mail arrived in an inbox while the app was running. `sender`
+    /// and `subject` are the newest message's.
+    NewMail {
+        account: FolderId,
+        folder: FolderId,
+        count: u32,
+        sender: String,
+        subject: String,
+    },
     /// `AddAccount` failed. Nothing was saved.
     AccountSetupFailed { error: String },
 }
@@ -323,6 +368,11 @@ pub struct AccountInfo {
     pub status: SyncStatus,
     /// How the account sends mail, if that has been set up.
     pub sending: Option<SendingSettings>,
+    /// Where mail is fetched from.
+    pub port: u16,
+    pub encrypted: bool,
+    /// Text put at the end of messages written from this account.
+    pub signature: String,
     /// The server whose sender checks are believed. Empty if none is known.
     pub checking_server: String,
     /// False while that name is a guess the user has not confirmed.

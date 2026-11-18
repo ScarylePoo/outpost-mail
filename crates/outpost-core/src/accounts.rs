@@ -43,6 +43,9 @@ pub struct AccountConfig {
     /// guess from the account's newest mail.
     #[serde(default)]
     pub checking_server_confirmed: bool,
+    /// Text put at the end of messages written from this account.
+    #[serde(default)]
+    pub signature: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,7 +212,9 @@ mod tests {
             name: String::new(),
             address: String::new(),
             smtp: None,
-            checking_server: String::new(),            checking_server_confirmed: false,
+            checking_server: String::new(),
+            checking_server_confirmed: false,
+            signature: String::new(),
         };
         config.save(&dir).unwrap();
         assert_eq!(AccountConfig::load(&dir), Some(config.clone()));

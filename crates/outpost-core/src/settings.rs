@@ -1,6 +1,6 @@
 //! Settings that apply to the whole app, kept in `settings.json` in the
-//! data folder. So far these are the protection settings: each is its own
-//! switch.
+//! data folder: the general ones and the protection ones, each its own
+//! switch. (Settings of one account live with that account.)
 //!
 //! A password can be set. With one set, the settings cannot be changed and
 //! a warning cannot be overridden without it. It is there to stop someone at
@@ -17,6 +17,48 @@ use std::sync::Mutex;
 
 const FILE: &str = "settings.json";
 const ROUNDS: u32 = 210_000;
+
+/// How the app behaves in general.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct General {
+    /// Show a notification when new mail arrives in an inbox.
+    pub notify_new_mail: bool,
+    /// Start with the window hidden, in the tray.
+    pub start_minimised: bool,
+    /// Closing the window leaves the app running in the tray, so mail keeps
+    /// arriving.
+    pub close_to_tray: bool,
+    /// How long a message waits before it is sent, during which sending can
+    /// be undone. 0 sends at once.
+    pub undo_send_seconds: u32,
+    /// New folders open as conversations (one row each) rather than as
+    /// single messages.
+    pub conversations: bool,
+    /// How many lines of each message's text the list shows: 0 to 3.
+    pub preview_lines: u8,
+}
+
+impl Default for General {
+    fn default() -> Self {
+        General {
+            notify_new_mail: true,
+            start_minimised: false,
+            close_to_tray: false,
+            undo_send_seconds: 10,
+            conversations: true,
+            preview_lines: 3,
+        }
+    }
+}
+
+impl General {
+    fn tidy(mut self) -> General {
+        self.undo_send_seconds = self.undo_send_seconds.min(120);
+        self.preview_lines = self.preview_lines.min(3);
+        self
+    }
+}
 
 /// The protection settings. Everything is on unless switched off.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +131,7 @@ fn listed(list: &[String], address: &str) -> bool {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct Stored {
+    general: General,
     protection: Protection,
     password: Option<PasswordHash>,
 }
@@ -131,6 +174,14 @@ impl Settings {
 
     pub fn protection(&self) -> Protection {
         self.stored.lock().unwrap().protection.clone()
+    }
+
+    pub fn general(&self) -> General {
+        self.stored.lock().unwrap().general.clone()
+    }
+
+    pub fn set_general(&self, general: General, password: Option<&str>) -> Result<(), Denied> {
+        self.change(password, |stored| stored.general = general.tidy())
     }
 
     pub fn password_set(&self) -> bool {
@@ -257,6 +308,25 @@ mod tests {
         assert_eq!(again.allow_images_from, ["news@shop.example"]);
         assert!(again.images_allowed_from("NEWS@shop.example") && !again.images_allowed_from("other@shop.example"));
         assert!(again.is_blocked("pest@spam.example") && !again.is_blocked(""));
+    }
+
+    #[test]
+    fn general_settings_are_kept_and_kept_in_range() {
+        let dir = temp();
+        let settings = Settings::load(Some(&dir));
+        assert_eq!(settings.general(), General::default());
+        assert_eq!(settings.general().undo_send_seconds, 10);
+        let wanted = General { undo_send_seconds: 100_000, preview_lines: 9, close_to_tray: true, ..General::default() };
+        settings.set_general(wanted, None).unwrap();
+        let again = Settings::load(Some(&dir));
+        assert_eq!((again.general().undo_send_seconds, again.general().preview_lines), (120, 3));
+        assert!(again.general().close_to_tray);
+        // Changing one group leaves the other alone.
+        assert_eq!(again.protection(), Protection::default());
+        // The password guards these too.
+        again.set_password(None, Some("sesame")).unwrap();
+        assert_eq!(again.set_general(General::default(), None), Err(Denied::WrongPassword));
+        again.set_general(General::default(), Some("sesame")).unwrap();
     }
 
     #[test]

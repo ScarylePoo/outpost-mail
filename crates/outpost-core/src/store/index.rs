@@ -643,6 +643,30 @@ impl Index {
         Ok(known)
     }
 
+    /// The highest message number in use. Messages added later get higher
+    /// ones.
+    pub fn newest_id(&self) -> Result<i64> {
+        self.read(|conn| conn.query_row("SELECT coalesce(max(id), 0) FROM message", [], |r| r.get(0)))
+    }
+
+    /// Unread messages in a folder that were added after message number
+    /// `after`: how many, and the newest one's sender and subject.
+    pub fn unread_since(&self, folder_id: i64, after: i64) -> Result<(u32, String, String)> {
+        self.read(|conn| {
+            // The `+` keeps this on the primary key: only the new rows are
+            // looked at, however large the folder.
+            let rows: Vec<(String, String, String)> = conn
+                .prepare_cached(
+                    "SELECT from_name, from_addr, subject FROM message
+                     WHERE id > ?2 AND +folder_id = ?1 AND (flags & 1) = 0 ORDER BY id DESC LIMIT 500",
+                )?
+                .query_map(params![folder_id, after], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let newest = rows.first().cloned().unwrap_or_default();
+            Ok((rows.len() as u32, if newest.0.is_empty() { newest.1 } else { newest.0 }, newest.2))
+        })
+    }
+
     /// The newest messages in a folder from any of these addresses.
     pub fn recent_from(&self, folder_id: i64, addresses: &[String], newest: u32) -> Result<Vec<i64>> {
         if addresses.is_empty() {

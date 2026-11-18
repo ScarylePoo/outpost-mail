@@ -871,3 +871,107 @@ fn mail_arriving_while_the_connection_is_busy_is_not_missed() {
         }
     }
 }
+
+#[test]
+fn new_mail_is_announced_and_an_account_can_be_changed_and_removed() {
+    let Some(server) = TestServer::start() else { return };
+    let mut other = server.other_client("ann");
+    other.append("INBOX", "", &message(1, "was here before", "hello"));
+    let data = TempDir::new();
+    let downloads = TempDir::new();
+    let (tx, events) = mpsc::channel();
+    let secrets = Arc::new(MemorySecrets::default());
+    let config = Config { data_dir: Some(data.path().to_path_buf()), downloads_dir: Some(downloads.path().to_path_buf()) };
+    let core = Core::start_with_secrets(config, secrets.clone(), move |event| {
+        let _ = tx.send(event);
+    })
+    .unwrap();
+    add(&core, &server, "ann", PASSWORD, true);
+    wait_for_state(&events, SyncState::UpToDate);
+    let inbox = folders(&core).iter().find(|f| f.role.as_deref() == Some("inbox")).unwrap().id.clone();
+
+    // Mail that was already there is not announced; mail that arrives is,
+    // once, with how much and the newest message's sender and subject.
+    other.append("INBOX", "", &message(2, "first new", "hello"));
+    other.append("INBOX", "\\Seen", &message(3, "already read elsewhere", "hello"));
+    other.append("INBOX", "", &message(4, "second new", "hello"));
+    let mut announced = 0;
+    let mut subjects_seen = Vec::new();
+    while announced < 2 {
+        let (count, subject) = wait_for(&events, "new mail to be announced", |e| match e {
+            Event::NewMail { account, folder, count, subject, .. } => {
+                assert_eq!((account.as_str(), folder), ("acct/ann", &inbox));
+                Some((*count, subject.clone()))
+            }
+            _ => None,
+        });
+        announced += count;
+        subjects_seen.push(subject);
+    }
+    assert_eq!(announced, 2, "{subjects_seen:?}");
+    assert_eq!(subjects_seen.last().map(String::as_str), Some("second new"));
+    assert!(!subjects_seen.iter().any(|s| s == "was here before" || s == "already read elsewhere"));
+
+    // A message saved as a mail file is the message, byte for byte.
+    let Response::Messages { rows, .. } =
+        core.handle(Command::ListMessages { folder: inbox.clone(), offset: 0, limit: 10, conversations: false }).unwrap()
+    else {
+        panic!()
+    };
+    let row = rows.iter().find(|r| r.subject == "first new").unwrap();
+    let Response::AttachmentSaved { path, name } = core.handle(Command::ExportMessage { folder: inbox.clone(), id: row.id }).unwrap() else {
+        panic!()
+    };
+    assert_eq!(name, "first new.eml");
+    assert_eq!(std::fs::read(path).unwrap(), message(2, "first new", "hello"));
+
+    // The account's server and signature can be changed; the stored
+    // password follows the server's name.
+    let info = || match core.handle(Command::ListAccounts).unwrap() {
+        Response::Accounts { accounts } => accounts,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!((info()[0].port, info()[0].encrypted, info()[0].signature.as_str()), (server.port, false, ""));
+    core.handle(Command::UpdateAccount {
+        account: "acct/ann".into(),
+        host: "localhost".into(),
+        port: server.port,
+        encrypted: false,
+        signature: "Ann\nSent from Outpost\n\n".into(),
+        password: None,
+    })
+    .unwrap();
+    assert_eq!((info()[0].host.as_str(), info()[0].signature.as_str()), ("localhost", "Ann\nSent from Outpost"));
+    assert_eq!(secrets.get("ann:ann@localhost").as_deref(), Some(PASSWORD));
+    assert_eq!(secrets.get("ann:ann@127.0.0.1"), None);
+    let bad = core
+        .handle(Command::UpdateAccount { account: "acct/ann".into(), host: " ".into(), port: 1, encrypted: true, signature: String::new(), password: None })
+        .unwrap_err();
+    assert_eq!(bad.code, ErrorCode::NotPossible);
+    // It still syncs at the new address.
+    other.append("INBOX", "", &message(5, "after the change", "hello"));
+    wait_for(&events, "mail after the change", |e| match e {
+        Event::FolderChanged { .. } if subjects(&core, &inbox).contains(&"after the change".to_string()) => Some(()),
+        _ => None,
+    });
+
+    // With a settings password, removing the account needs it.
+    core.handle(Command::SetProtectionPassword { current: None, new: Some(Secret("sesame".into())) }).unwrap();
+    let no = core.handle(Command::RemoveAccount { account: "acct/ann".into(), password: None }).unwrap_err();
+    assert_eq!(no.code, ErrorCode::WrongPassword);
+    assert_eq!(info().len(), 1);
+    core.handle(Command::RemoveAccount { account: "acct/ann".into(), password: Some(Secret("sesame".into())) }).unwrap();
+    wait_for(&events, "the removal", |e| matches!(e, Event::AccountRemoved { .. }).then_some(()));
+    assert!(info().is_empty());
+    assert_eq!(secrets.get("ann:ann@localhost"), None, "the stored password goes too");
+    // Nothing was touched on the server.
+    assert_eq!(other.subjects_in("INBOX").len(), 5);
+    drop(core);
+    // After a restart the account is not there, and neither are its files.
+    let (again, _events) = start(&data, secrets);
+    assert!(match again.handle(Command::ListAccounts).unwrap() {
+        Response::Accounts { accounts } => accounts.is_empty(),
+        _ => false,
+    });
+    assert!(!data.path().join("accounts/ann").exists());
+}

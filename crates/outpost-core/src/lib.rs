@@ -86,6 +86,10 @@ struct Live {
     /// Stops the running sync when dropped or told to.
     running: Option<StopHandle>,
     status: SyncStatus,
+    /// The highest message number there was when new mail was last
+    /// announced. `None` until the first sync of this run has finished:
+    /// mail that came while the app was closed is not announced.
+    announced: Option<i64>,
 }
 
 impl Account {
@@ -371,6 +375,29 @@ impl Core {
         }
     }
 
+    /// Tells the interface about unread mail that has arrived in the inbox
+    /// since the last time this was called.
+    fn announce_new_mail(&self, account: &Account) {
+        let index = account.store.index();
+        let Ok(newest) = index.newest_id() else { return };
+        let before = account.live.lock().unwrap().announced.replace(newest);
+        let Some(before) = before else { return };
+        if newest <= before {
+            return;
+        }
+        let Ok(Some(inbox)) = self.folder_with_role(account, "inbox") else { return };
+        let Ok((count, sender, subject)) = index.unread_since(inbox, before) else { return };
+        if count > 0 {
+            self.inner.sink.emit(Event::NewMail {
+                account: account.id.clone(),
+                folder: format!("{}/{inbox}", account.id),
+                count,
+                sender,
+                subject,
+            });
+        }
+    }
+
     /// Until the user has confirmed which server's sender checks to believe,
     /// it is taken to be the one that wrote them on most of the newest mail.
     fn guess_checking_server(&self, account: &Account) {
@@ -418,6 +445,7 @@ impl Core {
             }
             Progress::Idle => {
                 self.guess_checking_server(account);
+                self.announce_new_mail(account);
                 self.set_status(account, status(SyncState::UpToDate, ""))
             }
             Progress::Offline { error, retry_in } => self.set_status(
@@ -732,6 +760,9 @@ impl Core {
                         username: a.config().map(|c| c.username).unwrap_or_default(),
                         status: a.live.lock().unwrap().status.clone(),
                         sending: a.config().and_then(|c| sending_settings(&c)),
+                        port: a.config().map(|c| c.port).unwrap_or_default(),
+                        encrypted: a.config().is_none_or(|c| c.encrypted),
+                        signature: a.config().map(|c| c.signature).unwrap_or_default(),
                         checking_server: a.checking_server(),
                         checking_server_confirmed: a.config().is_some_and(|c| c.checking_server_confirmed),
                     })
@@ -760,7 +791,9 @@ impl Core {
                     name: String::new(),
                     address: String::new(),
                     smtp: None,
-                    checking_server: String::new(),                    checking_server_confirmed: false,
+                    checking_server: String::new(),
+                    checking_server_confirmed: false,
+                    signature: String::new(),
                 };
                 let config = match sending {
                     Some(sending) => with_sending(config, sending)?,
@@ -793,6 +826,79 @@ impl Core {
                 // The running sync was started with the old settings.
                 self.start_sync(&account);
                 Ok(Response::Accepted)
+            }
+            Command::GetGeneral => Ok(Response::General { general: self.inner.settings.general() }),
+            Command::SetGeneral { general, password } => {
+                self.inner
+                    .settings
+                    .set_general(general, password.as_ref().map(|p| p.0.as_str()))
+                    .map_err(denied)?;
+                Ok(Response::General { general: self.inner.settings.general() })
+            }
+            Command::UpdateAccount { account, host, port, encrypted, signature, password } => {
+                let account = self.syncing_account(&account)?;
+                if !self.inner.settings.allows(password.as_ref().map(|p| p.0.as_str())) {
+                    return Err(denied(settings::Denied::WrongPassword));
+                }
+                let host = host.trim().to_string();
+                if host.is_empty() || port == 0 {
+                    return Err(CoreError::new(ErrorCode::NotPossible, "the server and its port are both needed"));
+                }
+                let old = account.config().expect("checked above");
+                let mut config = old.clone();
+                config.host = host;
+                config.port = port;
+                config.encrypted = encrypted;
+                config.signature = signature.trim_end().to_string();
+                config
+                    .save(&account.dir())
+                    .map_err(|e| CoreError::new(ErrorCode::Internal, format!("could not save the settings: {e}")))?;
+                // The stored password is filed under the server's name.
+                if config.host != old.host {
+                    if let Some(secret) = self.inner.secrets.get(&old.secret_key(&account.name)) {
+                        if self.inner.secrets.set(&config.secret_key(&account.name), &secret).is_ok() {
+                            self.inner.secrets.delete(&old.secret_key(&account.name));
+                        }
+                    }
+                }
+                let reconnect = (&config.host, config.port, config.encrypted) != (&old.host, old.port, old.encrypted);
+                *account.config.write().unwrap() = Some(config);
+                if reconnect {
+                    self.start_sync(&account);
+                }
+                Ok(Response::Accepted)
+            }
+            Command::RemoveAccount { account, password } => {
+                let account = self.syncing_account(&account)?;
+                if !self.inner.settings.allows(password.as_ref().map(|p| p.0.as_str())) {
+                    return Err(denied(settings::Denied::WrongPassword));
+                }
+                let config = account.config().expect("checked above");
+                if let Some(running) = account.live.lock().unwrap().running.take() {
+                    running.stop();
+                }
+                let dir = account.dir();
+                // Marked first: if the files cannot all be deleted now (on
+                // Windows, while they are open), the rest go at next start.
+                std::fs::write(dir.join(REMOVED_MARK), b"")
+                    .map_err(|e| CoreError::new(ErrorCode::Internal, format!("could not remove the account: {e}")))?;
+                self.inner.accounts.write().unwrap().retain(|a| a.id != account.id);
+                self.inner.secrets.delete(&config.secret_key(&account.name));
+                let _ = std::fs::remove_dir_all(&dir);
+                self.inner.sink.emit(Event::AccountRemoved { account: account.id.clone() });
+                Ok(Response::Accepted)
+            }
+            Command::ExportMessage { folder, id } => {
+                let account = self.account(&folder)?;
+                let Some(downloads) = &self.inner.downloads_dir else {
+                    return Err(CoreError::new(ErrorCode::NotPossible, "there is no downloads folder to save to"));
+                };
+                let raw = self.read(&account, id)?;
+                let subject = store::parse::display(&raw).subject;
+                let name = format!("{}.eml", if subject.trim().is_empty() { "message" } else { subject.trim() });
+                let (path, name) = save_download(downloads, &name, &raw)
+                    .map_err(|e| CoreError::new(ErrorCode::Internal, format!("could not save the file: {e}")))?;
+                Ok(Response::AttachmentSaved { path: path.to_string_lossy().into_owned(), name })
             }
             Command::GetProtection => Ok(Response::Protection {
                 protection: self.inner.settings.protection(),
@@ -1141,6 +1247,7 @@ impl Core {
                     password: Some(password),
                     running: None,
                     status: status(SyncState::Connecting, ""),
+                    announced: None,
                 }),
                 signals: Arc::default(),
             });
@@ -1672,6 +1779,9 @@ fn conversation_rows(
         .collect()
 }
 
+/// A file that marks an account's directory as removed by the user.
+const REMOVED_MARK: &str = "removed-by-user";
+
 fn open_accounts(data_dir: &Path) -> Result<Vec<Arc<Account>>, StoreError> {
     let root = data_dir.join("accounts");
     std::fs::create_dir_all(&root)?;
@@ -1682,6 +1792,16 @@ fn open_accounts(data_dir: &Path) -> Result<Vec<Arc<Account>>, StoreError> {
         .filter(|entry| entry.path().is_dir())
         .filter_map(|entry| entry.file_name().into_string().ok())
         .filter(|name| !name.starts_with('.'))
+        // An account the user removed whose files could not all be deleted
+        // at the time: finish the job, and do not show it.
+        .filter(|name| {
+            let dir = root.join(name);
+            let removed = dir.join(REMOVED_MARK).exists();
+            if removed {
+                let _ = std::fs::remove_dir_all(&dir);
+            }
+            !removed
+        })
         .collect();
     names.sort();
     names
@@ -1697,6 +1817,7 @@ fn open_accounts(data_dir: &Path) -> Result<Vec<Arc<Account>>, StoreError> {
                     password: None,
                     running: None,
                     status: status(SyncState::NotSyncing, ""),
+                    announced: None,
                 }),
                 signals: Arc::default(),
             }))

@@ -6,6 +6,7 @@ accounts, storing every message as its own file. Windows and Linux.
 **Status: early development (milestone 0).** There is no mail support yet. The
 app shows a synthetic mailbox to test the shell and the interface.
 
+- The full plan: [Outpost build handoff.md](Outpost%20build%20handoff.md)
 - Building and testing: [docs/testing.md](docs/testing.md)
 - Decisions made during the build: [docs/decision-log.md](docs/decision-log.md)
 

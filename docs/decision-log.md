@@ -7,6 +7,28 @@ started.
 Status words: **Decided** (owner agreed), **Proposal** (default in use, owner
 has not reviewed), **Finding** (a test result).
 
+## 2026-11-17 · Milestone 0 closed
+
+### Decided: the cPanel add-on is out of version 1
+
+The owner ran `tools/cpanel-probe.py` against his host. Neither the mailbox
+login on the webmail port nor a cPanel API token could reach the BoxTrapper or
+spam-settings calls. The handoff doc's rule for that outcome is that the
+add-on drops out of scope. The probe script stays in `tools/` for trying
+another host. Not investigated: why the host refuses (the probe's output was
+not captured here), so if this matters later, rerun it and keep the output.
+
+### Decided: IMAP protocol layer on `imap-codec`
+
+The owner agreed to the recommendation in `docs/imap-library-evaluation.md`.
+
+### Decided: name
+
+"Outpost Mail" for the repository, identifier and product name; "Outpost" in
+the window title.
+
+### Decided: the handoff doc is published in the repository
+
 ## 2026-11-17 · Milestone 0
 
 ### Decided (provisional): the shell is Tauri
@@ -63,17 +85,6 @@ small number per message (preview length) for the whole folder, about 400 kB
 of JSON for 100,000 messages. Line counts are estimated from that and the list
 width. Simple and fast, but the estimate is by character count, so a row is
 sometimes one line taller than its text. Revisit in milestone 3.
-
-### Proposal: IMAP protocol layer on `imap-codec`
-
-See `docs/imap-library-evaluation.md`.
-
-### Proposal: app identifier and name
-
-Identifier `io.github.scarylepoo.outpostmail`, product name "Outpost Mail",
-window title "Outpost". The handoff doc's open question (Outpost or Outpost
-Mail) is still the owner's to answer; changing it later is a one-line edit
-until the first release.
 
 ### Note: build environment
 

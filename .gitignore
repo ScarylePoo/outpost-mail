@@ -5,6 +5,3 @@ dist/
 *.log
 .env
 .env.*
-
-# The planning doc stays local until the owner decides whether to publish it.
-/Outpost build handoff.md

@@ -1,6 +1,6 @@
 # IMAP library evaluation
 
-Milestone 0 · 17 November 2026 · **Proposal, awaiting the owner's confirmation**
+Milestone 0 · 17 November 2026 · **Decided: the owner agreed on 17 November 2026**
 
 ## Recommendation
 

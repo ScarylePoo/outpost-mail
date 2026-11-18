@@ -411,6 +411,86 @@ pub fn related(a: &str, b: &str) -> bool {
     a == b || inside(a, b) || inside(b, a)
 }
 
+/// A domain reduced to what the eye sees: characters that pass for one
+/// another are made the same, and separators are dropped.
+fn skeleton(domain: &str) -> String {
+    let mut out = String::with_capacity(domain.len());
+    for c in domain.chars() {
+        match c.to_ascii_lowercase() {
+            '0' => out.push('o'),
+            '1' | 'i' | '|' => out.push('l'),
+            '5' => out.push('s'),
+            '-' | '_' => {}
+            c => out.push(c),
+        }
+    }
+    out.replace("rn", "m").replace("vv", "w").replace("cl", "d")
+}
+
+/// The number of single-character edits (insert, delete, replace, or swap
+/// of neighbours) between two short strings, counted up to `most + 1`.
+fn edits(a: &str, b: &str, most: usize) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    if a.len().abs_diff(b.len()) > most {
+        return most + 1;
+    }
+    let mut before: Vec<usize> = Vec::new();
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    for i in 1..=a.len() {
+        let mut row = vec![i; b.len() + 1];
+        for j in 1..=b.len() {
+            let same = a[i - 1] == b[j - 1];
+            row[j] = (previous[j] + 1).min(row[j - 1] + 1).min(previous[j - 1] + usize::from(!same));
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                row[j] = row[j].min(before[j - 2] + 1);
+            }
+        }
+        before = std::mem::replace(&mut previous, row);
+    }
+    previous[b.len()]
+}
+
+/// A domain the user hears from that `domain` could be mistaken for, if
+/// there is one. `known` is every sender domain with how many messages have
+/// come from it.
+///
+/// Only a domain with next to no history here is ever called a lookalike,
+/// and only of a domain with real history: three messages at least, and
+/// more than three times as many as the newcomer.
+pub fn lookalike(domain: &str, known: &[(String, u32)]) -> Option<String> {
+    let domain = domain.to_ascii_lowercase();
+    let own = known.iter().find(|k| k.0 == domain).map_or(0, |k| k.1);
+    if domain.is_empty() || own >= 3 {
+        return None;
+    }
+    let look = skeleton(&domain);
+    let mut best: Option<(&str, u32)> = None;
+    for (other, messages) in known {
+        if *messages < 3 || *messages <= own.saturating_mul(3) || *other == domain || related(other, &domain) {
+            continue;
+        }
+        let other_look = skeleton(other);
+        // Short names are too close to each other to compare by edits:
+        // "abc.com" and "abd.com" are simply different companies.
+        let allowed = match other.len().min(domain.len()) {
+            0..=7 => 0,
+            8..=14 => 1,
+            _ => 2,
+        };
+        // The well-known name with something added: "bank.example.evil.net",
+        // "bank.example-login.net".
+        let wraps = other.len() >= 8 && other.contains('.') && domain.starts_with(&format!("{other}."))
+            || domain.starts_with(&format!("{other}-"));
+        if (look == other_look || wraps || edits(&look, &other_look, allowed) <= allowed)
+            && best.is_none_or(|b| *messages > b.1)
+        {
+            best = Some((other, *messages));
+        }
+    }
+    best.map(|b| b.0.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,6 +653,44 @@ mod tests {
         assert_eq!(state(&h, "alice@bank.example", MX), State::Verified);
         // No usable From address.
         assert_eq!(state(pass, "", MX), State::Unverified);
+    }
+
+    #[test]
+    fn lookalike_domains_are_spotted() {
+        let known: Vec<(String, u32)> = [
+            ("firstnational.example", 40),
+            ("paypal.com", 25),
+            ("shop.example", 12),
+            ("abc.com", 30),
+            ("rare.example", 1),
+            ("mail.firstnational.example", 9),
+        ]
+        .map(|(d, n)| (d.to_string(), n))
+        .into();
+        let like = |d: &str| lookalike(d, &known);
+        // One character out, swapped, added or dropped.
+        assert_eq!(like("firstnationa1.example").as_deref(), Some("firstnational.example"));
+        assert_eq!(like("firstnatoinal.example").as_deref(), Some("firstnational.example"));
+        assert_eq!(like("firstnationall.example").as_deref(), Some("firstnational.example"));
+        assert_eq!(like("first-national.example").as_deref(), Some("firstnational.example"));
+        // Characters that pass for each other.
+        assert_eq!(like("paypa1.com").as_deref(), Some("paypal.com"));
+        assert_eq!(like("PAYPAI.com").as_deref(), Some("paypal.com"));
+        assert_eq!(like("firstnationai.example").as_deref(), Some("firstnational.example"));
+        // The real name with something attached.
+        assert_eq!(like("paypal.com.account-check.example").as_deref(), Some("paypal.com"));
+        assert_eq!(like("paypal.com-login.example").as_deref(), Some("paypal.com"));
+
+        // Not lookalikes: the domain itself, its own subdomains, unrelated
+        // names, short names that differ by a letter, and anything that
+        // only resembles a domain the user barely hears from.
+        for d in ["paypal.com", "mail.paypal.com", "news.shop.example", "example.org", "abd.com", "rars.example", ""] {
+            assert_eq!(like(d), None, "{d}");
+        }
+        // A domain with history of its own is never called a lookalike.
+        let mut both = known.clone();
+        both.push(("firstnationa1.example".into(), 5));
+        assert_eq!(lookalike("firstnationa1.example", &both), None);
     }
 
     #[test]

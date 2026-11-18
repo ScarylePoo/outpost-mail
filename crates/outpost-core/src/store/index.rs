@@ -16,7 +16,7 @@ use std::sync::{Mutex, MutexGuard};
 type Result<T> = std::result::Result<T, StoreError>;
 
 /// Bump when the schema changes, and add a step to `migrate`.
-const SCHEMA_VERSION: i32 = 9;
+const SCHEMA_VERSION: i32 = 10;
 
 const TABLES: &str = r#"
 CREATE TABLE folder (
@@ -92,6 +92,14 @@ CREATE TABLE message (
     auth_server    TEXT NOT NULL DEFAULT ''
 );
 
+-- How many messages there are from each sender domain: the domains the
+-- user hears from, against which a new sender's domain is compared for
+-- lookalikes. Kept by triggers.
+CREATE TABLE sender_domain (
+    domain   TEXT PRIMARY KEY,
+    messages INTEGER NOT NULL
+) WITHOUT ROWID;
+
 -- Which Message-IDs each message cites (its In-Reply-To and References),
 -- so that a message arriving after its replies can find them.
 CREATE TABLE reference_to (
@@ -140,6 +148,8 @@ const INDEXES: &[(&str, &str)] = &[
     ("message_folder_thread", "CREATE INDEX IF NOT EXISTS message_folder_thread ON message(folder_id, thread_id, sort_key)"),
     ("message_thread", "CREATE INDEX IF NOT EXISTS message_thread ON message(thread_id)"),
     ("message_subject", "CREATE INDEX IF NOT EXISTS message_subject ON message(subject_key, date) WHERE subject_key != ''"),
+    // Finds earlier mail under the same display name.
+    ("message_from_name", "CREATE INDEX IF NOT EXISTS message_from_name ON message(from_name COLLATE NOCASE, date) WHERE from_name != ''"),
     ("message_nobody", "CREATE INDEX IF NOT EXISTS message_nobody ON message(folder_id, sort_key DESC) WHERE base = ''"),
 ];
 
@@ -171,9 +181,20 @@ const TRIGGERS: &[(&str, &str)] = &[
          END",
     ),
     (
+        "message_added",
+        "CREATE TRIGGER IF NOT EXISTS message_added AFTER INSERT ON message WHEN instr(NEW.from_addr, '@') > 0 BEGIN
+            INSERT OR IGNORE INTO sender_domain (domain, messages)
+              VALUES (lower(substr(NEW.from_addr, instr(NEW.from_addr, '@') + 1)), 0);
+            UPDATE sender_domain SET messages = messages + 1
+              WHERE domain = lower(substr(NEW.from_addr, instr(NEW.from_addr, '@') + 1));
+         END",
+    ),
+    (
         "message_gone",
         "CREATE TRIGGER IF NOT EXISTS message_gone AFTER DELETE ON message BEGIN
             DELETE FROM reference_to WHERE message = OLD.sort_key;
+            UPDATE sender_domain SET messages = messages - 1
+              WHERE domain = lower(substr(OLD.from_addr, instr(OLD.from_addr, '@') + 1));
             UPDATE message SET is_head = (sort_key = (SELECT max(sort_key) FROM message
                 WHERE folder_id = OLD.folder_id AND thread_id IS OLD.thread_id))
               WHERE folder_id = OLD.folder_id AND thread_id IS OLD.thread_id;
@@ -231,6 +252,21 @@ fn list_row(row: &rusqlite::Row) -> rusqlite::Result<ListRow> {
         verdict: row.get(10)?,
         auth_server: row.get(11)?,
     })
+}
+
+/// What earlier mail says about a message's sender.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SenderHistory {
+    /// An earlier message was from, or to, this address.
+    pub known_address: bool,
+    /// Another address that earlier mail under the same display name came
+    /// from.
+    pub name_used_by: Option<String>,
+    /// The sender's domain, and how many messages here are from it.
+    pub domain: String,
+    pub domain_messages: u32,
+    /// Every sender domain and its message count.
+    pub domains: Vec<(String, u32)>,
 }
 
 /// A conversation as a folder's list shows it.
@@ -571,6 +607,56 @@ impl Index {
         })
     }
 
+    /// What earlier mail says about a message's sender. "Earlier" is by
+    /// date: mail dated before this message.
+    pub fn sender_history(&self, id: i64) -> Result<Option<SenderHistory>> {
+        self.read(|conn| {
+            let found: Option<(String, String, i64)> = conn
+                .prepare_cached("SELECT from_name, from_addr, date FROM message WHERE id = ?1")?
+                .query_row([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .optional()?;
+            let Some((name, address, date)) = found else { return Ok(None) };
+            let domain = crate::verify::domain_of(&address);
+
+            // Known if any earlier message has this address among its
+            // sender and recipients: mail from them, or mail to them.
+            let words: Vec<String> = address
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .map(|w| w.to_string())
+                .collect();
+            let known_address = !words.is_empty()
+                && conn
+                    .prepare_cached("SELECT 1 FROM message_fts WHERE message_fts MATCH ?1 AND rowid < ?2 LIMIT 1")?
+                    .query_row(params![format!("participants : \"{}\"", words.join(" ")), sort_key(date, 0)], |_| Ok(()))
+                    .optional()?
+                    .is_some();
+
+            // The address that most earlier mail under this name came from.
+            let name_used_by: Option<String> = if name.trim().is_empty() || name.eq_ignore_ascii_case(&address) {
+                None
+            } else {
+                conn.prepare_cached(
+                    "SELECT from_addr FROM
+                       (SELECT from_addr FROM message
+                        WHERE from_name = ?1 COLLATE NOCASE AND date < ?2 AND from_name != ''
+                        ORDER BY date DESC LIMIT 200)
+                     WHERE from_addr != ?3 COLLATE NOCASE
+                     GROUP BY lower(from_addr) ORDER BY count(*) DESC LIMIT 1",
+                )?
+                .query_row(params![name, date, address], |r| r.get(0))
+                .optional()?
+            };
+
+            let domains: Vec<(String, u32)> = conn
+                .prepare_cached("SELECT domain, messages FROM sender_domain WHERE messages > 0")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let domain_messages = domains.iter().find(|d| d.0 == domain).map_or(0, |d| d.1);
+            Ok(Some(SenderHistory { known_address, name_used_by, domain, domain_messages, domains }))
+        })
+    }
+
     /// The server that wrote the sender checks on most of the newest mail:
     /// the account's own receiving server, in all likelihood. `None` unless
     /// one name clearly leads.
@@ -684,6 +770,7 @@ impl Index {
             "PRAGMA load.journal_mode = OFF; PRAGMA load.synchronous = OFF;
              CREATE TABLE load.message AS SELECT {MESSAGE_COLUMNS} FROM main.message WHERE 0;
              DELETE FROM main.message; DELETE FROM folder; DELETE FROM reference_to;
+             DELETE FROM sender_domain;
              INSERT INTO message_fts(message_fts) VALUES('delete-all');
              BEGIN"
         ))?;
@@ -781,6 +868,11 @@ impl Bulk<'_> {
         for (_, sql) in INDEXES {
             self.conn.execute_batch(sql)?;
         }
+        self.conn.execute_batch(
+            "INSERT INTO sender_domain (domain, messages)
+               SELECT lower(substr(message.from_addr, instr(message.from_addr, '@') + 1)), count(*) FROM message
+               WHERE instr(from_addr, '@') > 0 GROUP BY 1",
+        )?;
         for (_, sql) in TRIGGERS {
             self.conn.execute_batch(sql)?;
         }
@@ -938,7 +1030,7 @@ fn migrate(conn: &Connection) -> Result<bool> {
             conn.execute_batch(
                 "DROP TABLE IF EXISTS message_fts; DROP TABLE IF EXISTS message;
                  DROP TABLE IF EXISTS folder; DROP TABLE IF EXISTS action;
-                 DROP TABLE IF EXISTS reference_to;
+                 DROP TABLE IF EXISTS reference_to; DROP TABLE IF EXISTS sender_domain;
                  PRAGMA user_version = 0",
             )?;
             migrate(conn)?;

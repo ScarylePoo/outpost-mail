@@ -18,6 +18,7 @@ pub mod accounts;
 pub mod api;
 pub mod compose;
 pub mod imap;
+pub mod recheck;
 pub mod render;
 pub mod smtp;
 pub mod verify;
@@ -158,6 +159,8 @@ struct Inner {
     accounts: RwLock<Vec<Arc<Account>>>,
     synthetic: Vec<SyntheticFolder>,
     secrets: Arc<dyn Secrets>,
+    /// Re-checks signatures, keeping the keys it has fetched.
+    rechecker: Arc<recheck::Rechecker>,
     /// Runs the sync engine. Commands never wait on it.
     runtime: tokio::runtime::Runtime,
 }
@@ -206,6 +209,7 @@ impl Core {
                 accounts: RwLock::new(accounts),
                 synthetic: synthetic_folders(),
                 secrets,
+                rechecker: Arc::new(recheck::Rechecker::new()),
                 runtime,
             }),
         };
@@ -496,7 +500,25 @@ impl Core {
                         }
                     }
                     Target::Folder(account, _) | Target::Account(account) => {
-                        open_message(&account.store, id, &account.checking_server())?
+                        let mut view = open_message(&account.store, id, &account.checking_server())?;
+                        let own: Vec<String> = account
+                            .config()
+                            .map(|c| [c.identity().map(|i| i.address), Some(c.username)].into_iter().flatten().collect())
+                            .unwrap_or_default();
+                        let mine = own.iter().any(|o| o.eq_ignore_ascii_case(&view.sender_address));
+                        if view.downloaded && !mine {
+                            if let Some(history) = account.store.index().sender_history(id).map_err(internal)? {
+                                let check = &mut view.sender_check;
+                                check.first_time = !history.known_address;
+                                // A familiar name on an unfamiliar address.
+                                if check.first_time {
+                                    check.name_seen_from = history.name_used_by.unwrap_or_default();
+                                }
+                                check.lookalike_of =
+                                    verify::lookalike(&history.domain, &history.domains).unwrap_or_default();
+                            }
+                        }
+                        view
                     }
                 };
                 Ok(Response::Message { message: view })
@@ -730,6 +752,36 @@ impl Core {
                 // The running sync was started with the old settings.
                 self.start_sync(&account);
                 Ok(Response::Accepted)
+            }
+            Command::RecheckSignature { folder, id } => {
+                let account = self.account(&folder)?;
+                let raw = self.read(&account, id)?;
+                let from = store::parse::display(&raw).from_addr;
+                // The lookups run on the core's own runtime; this thread
+                // only waits for them.
+                let (done, result) = std::sync::mpsc::channel();
+                let rechecker = self.inner.rechecker.clone();
+                self.inner.runtime.spawn(async move {
+                    let _ = done.send(rechecker.check(&raw).await);
+                });
+                let checks = result.recv().unwrap_or_default();
+                let from_domain = verify::domain_of(&from);
+                Ok(Response::SignatureRechecked {
+                    signatures: checks
+                        .into_iter()
+                        .map(|c| api::SignatureLine {
+                            aligned: verify::related(&c.domain, &from_domain),
+                            domain: c.domain,
+                            outcome: match c.outcome {
+                                recheck::Outcome::Valid => "valid",
+                                recheck::Outcome::Mismatch => "mismatch",
+                                recheck::Outcome::Unknown => "unknown",
+                            }
+                            .into(),
+                            sentence: c.sentence,
+                        })
+                        .collect(),
+                })
             }
             Command::SetCheckingServer { account, server } => {
                 let account = self.syncing_account(&account)?;
@@ -1372,6 +1424,7 @@ fn sender_check(raw: &[u8], from_addr: &str, checking_server: &str) -> SenderChe
         reply_to,
         reply_elsewhere,
         ambiguous_from: found.ambiguous_from,
+        ..SenderCheck::default()
     }
 }
 

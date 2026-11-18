@@ -44,6 +44,9 @@ pub enum Command {
     /// A message, prepared for reading. `folder` is any folder of the
     /// message's account.
     OpenMessage { folder: FolderId, id: i64 },
+    /// Checks a message's signatures again on this computer, which means
+    /// looking up the signers' keys. May take a few seconds.
+    RecheckSignature { folder: FolderId, id: i64 },
     /// The whole conversation a message belongs to, across folders, each
     /// message reduced to what its sender wrote.
     OpenThread { folder: FolderId, id: i64 },
@@ -186,6 +189,10 @@ pub enum Response {
     },
     Thread {
         thread: ThreadView,
+    },
+    /// One entry per signature on the message; empty if it has none.
+    SignatureRechecked {
+        signatures: Vec<SignatureLine>,
     },
     AttachmentSaved {
         /// Where it was written.
@@ -422,6 +429,27 @@ pub struct SenderCheck {
     pub reply_elsewhere: bool,
     /// The message names more than one sender, so it is never verified.
     pub ambiguous_from: bool,
+    /// No earlier mail here is from or to this address.
+    pub first_time: bool,
+    /// The address that earlier mail under this display name came from,
+    /// when this message comes from a new one.
+    pub name_seen_from: String,
+    /// A domain the user hears from that the sender's domain resembles.
+    pub lookalike_of: String,
+}
+
+/// A signature checked again on this computer.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignatureLine {
+    /// The domain that signed.
+    pub domain: String,
+    /// `valid`, `mismatch` (the message is not what was signed) or
+    /// `unknown` (could not be re-checked, which is not a failure).
+    pub outcome: String,
+    pub sentence: String,
+    /// Whether the signer is the domain in the From line.
+    pub aligned: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

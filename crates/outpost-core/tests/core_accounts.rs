@@ -638,3 +638,70 @@ fn the_known_result_set_shows_the_right_state_every_time() {
     assert_eq!(account().checking_server, "");
     assert_eq!(checks(&core, &inbox)["later"], "notChecked");
 }
+
+#[test]
+fn a_new_sender_is_compared_with_what_came_before() {
+    let Some(server) = TestServer::start() else { return };
+    let mut other = server.other_client("ann");
+    let mail = |minute: u32, name: &str, address: &str, to: &str, subject: &str| {
+        format!(
+            "From: {name} <{address}>\r\nTo: {to}\r\nSubject: {subject}\r\nDate: Mon, 16 Nov 2026 10:{minute:02}:00 +0000\r\nMessage-ID: <{minute}@history>\r\n\r\nHello.\r\n"
+        )
+    };
+    // Mail the user is used to getting from the bank, and one message the
+    // user wrote to a friend.
+    for i in 0..4 {
+        other.append("INBOX", "", mail(i, "First National", "service@firstnational.example", "ann@example.com", &format!("statement {i}")).as_bytes());
+    }
+    other.append("Sent", "", mail(5, "Ann", "ann@example.com", "Old Friend <friend@elsewhere.example>", "hello friend").as_bytes());
+    // Then: the bank again, the friend answering, a stranger, the bank's
+    // name on a new address at a lookalike domain, and Ann herself.
+    other.append("INBOX", "", mail(10, "First National", "service@firstnational.example", "ann@example.com", "the bank again").as_bytes());
+    other.append("INBOX", "", mail(11, "Old Friend", "friend@elsewhere.example", "ann@example.com", "the friend answers").as_bytes());
+    other.append("INBOX", "", mail(12, "Stranger", "someone@new.example", "ann@example.com", "a stranger").as_bytes());
+    other.append("INBOX", "", mail(13, "First National", "service@firstnationa1.example", "ann@example.com", "an impostor").as_bytes());
+    other.append("INBOX", "", mail(14, "Ann", "ann@example.com", "ann@example.com", "a note to self").as_bytes());
+
+    let data = TempDir::new();
+    let (core, events) = start(&data, Arc::new(MemorySecrets::default()));
+    add(&core, &server, "ann", PASSWORD, true);
+    wait_for_state(&events, SyncState::UpToDate);
+    core.handle(Command::SetSending {
+        account: "acct/ann".into(),
+        sending: outpost_core::api::SendingSettings {
+            name: "Ann".into(),
+            address: "ann@example.com".into(),
+            host: "127.0.0.1".into(),
+            port: 1,
+            security: "plaintext".into(),
+            ..Default::default()
+        },
+    })
+    .unwrap();
+    let inbox = folders(&core).iter().find(|f| f.role.as_deref() == Some("inbox")).unwrap().id.clone();
+    let Response::Messages { rows, .. } =
+        core.handle(Command::ListMessages { folder: inbox.clone(), offset: 0, limit: 100, conversations: false }).unwrap()
+    else {
+        panic!()
+    };
+    let open = |subject: &str| {
+        let id = rows.iter().find(|r| r.subject == subject).unwrap_or_else(|| panic!("no {subject}")).id;
+        match core.handle(Command::OpenMessage { folder: inbox.clone(), id }).unwrap() {
+            Response::Message { message } => message.sender_check,
+            other => panic!("{other:?}"),
+        }
+    };
+    let seen = |subject: &str| {
+        let c = open(subject);
+        (c.first_time, c.name_seen_from, c.lookalike_of)
+    };
+    assert_eq!(seen("statement 0"), (true, String::new(), String::new()), "the very first message from the bank");
+    assert_eq!(seen("the bank again"), (false, String::new(), String::new()));
+    assert_eq!(seen("the friend answers"), (false, String::new(), String::new()), "someone the user wrote to is no stranger");
+    assert_eq!(seen("a stranger"), (true, String::new(), String::new()));
+    assert_eq!(
+        seen("an impostor"),
+        (true, "service@firstnational.example".to_string(), "firstnational.example".to_string())
+    );
+    assert_eq!(seen("a note to self"), (false, String::new(), String::new()), "the user's own mail is never warned about");
+}

@@ -473,9 +473,9 @@ These are unresolved. The first group needs the owner. The second is for the bui
 - [ ] Does Tauri pass the shell test on Linux? (Windows: the measured half passed on 17 Nov 2026, see `docs/shell-test-results.md`. Linux: only WSL is available; the measured half passed there too. Tauri adopted provisionally on 17 Nov 2026, to be re-tested on a native Linux desktop. The by-eye half is still to do.)
 - [x] Does the owner's host allow cPanel API calls with a mailbox login, a token, or neither? Neither (17 Nov 2026). The add-on is out of scope.
 - [ ] Does the owner's mail server record sender-check results on incoming mail, and under what server name?
-- [ ] How do Windows and common antivirus tools behave with several hundred thousand files in one folder?
+- [ ] How do Windows and common antivirus tools behave with several hundred thousand files in one folder? (Partly answered 17 Nov 2026: holding and listing 352,000 files in one folder is fine; creating small files is about 60 times slower than on Linux, probably Defender. See `docs/performance-results.md`. Still to test: a Defender exclusion, and other antivirus tools.)
 - [x] Is there a maintained Rust IMAP library that meets the sync requirements? Decided 17 Nov 2026: build Outpost's own sync layer on `imap-codec`, see `docs/imap-library-evaluation.md`. To be confirmed by a spike against Dovecot at the start of milestone 2.)
-- [ ] How large is the search index for an 80 GB mailbox, and how long does the first build take?
+- [ ] How large is the search index for an 80 GB mailbox, and how long does the first build take? (Synthetic answer 17 Nov 2026: 2.4 GB of index and a 4-minute rebuild for a million messages of nearly pure text, 6.9 GB. Real mail, with attachments, is still to be measured.)
 - [ ] The Google and Microsoft sign-in details listed under Accounts and sign-in.
 
 **Provenance.** This doc was written from a planning conversation. The statements about Google, Microsoft, cPanel and Tauri come from the linked pages as read on 17 November 2026. Everything else is design intent that has not been built or tested.

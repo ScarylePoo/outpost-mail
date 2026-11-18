@@ -19,9 +19,9 @@ On Windows, if `rustup show` says the default host is `x86_64-pc-windows-gnu`,
 either run `rustup default stable-msvc` or set
 `RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc` for the commands below.
 
-`node_modules` holds platform-specific programs. If the same checkout is used
-from both Windows and WSL, run `npm install` again after switching, or keep
-two checkouts.
+`node_modules` holds platform-specific programs, so do not share one checkout
+between Windows and WSL. Keep a second clone on the Linux side (a clone inside
+the WSL home folder also builds far faster than one on a Windows drive).
 
 ## Commands
 

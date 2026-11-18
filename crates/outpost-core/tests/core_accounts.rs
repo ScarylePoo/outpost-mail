@@ -618,7 +618,7 @@ fn the_known_result_set_shows_the_right_state_every_time() {
 
     // The user names a different server: nothing the old one said counts,
     // and what the newly named one "said" now does.
-    core.handle(Command::SetCheckingServer { account: "acct/ann".into(), server: " MX.Evil.Example. ".into() }).unwrap();
+    core.handle(Command::SetCheckingServer { account: "acct/ann".into(), server: " MX.Evil.Example. ".into(), password: None }).unwrap();
     assert_eq!((account().checking_server.as_str(), account().checking_server_confirmed), ("mx.evil.example", true));
     let now = checks(&core, &inbox);
     assert_eq!(now["dmarc pass"], "notChecked");
@@ -627,7 +627,7 @@ fn the_known_result_set_shows_the_right_state_every_time() {
 
     // No server named: nothing is believed. A confirmed choice is not
     // replaced by a guess on the next sync.
-    core.handle(Command::SetCheckingServer { account: "acct/ann".into(), server: String::new() }).unwrap();
+    core.handle(Command::SetCheckingServer { account: "acct/ann".into(), server: String::new(), password: None }).unwrap();
     assert!(checks(&core, &inbox).values().all(|state| state == "notChecked"));
     other.append("INBOX", "", b"Authentication-Results: mx.home.example; dmarc=pass header.from=bank.example\r\nFrom: alice@bank.example\r\nSubject: later\r\n\r\nHello.\r\n");
     wait_for(&events, "the later message", |e| match e {
@@ -788,6 +788,8 @@ fn a_failed_message_is_held_at_arms_length_until_trusted() {
             password: password.map(|p| Secret(p.into())),
         })
     };
+    let renamed = core.handle(Command::SetCheckingServer { account: "acct/ann".into(), server: "mx.evil.example".into(), password: None });
+    assert_eq!(renamed.unwrap_err().code, ErrorCode::WrongPassword, "whose checks are believed is guarded too");
     assert_eq!(trust(None).unwrap_err().code, ErrorCode::WrongPassword);
     assert_eq!(trust(Some("guess")).unwrap_err().code, ErrorCode::WrongPassword);
     assert!(open("forged").restricted);

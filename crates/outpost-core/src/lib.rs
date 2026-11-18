@@ -980,8 +980,13 @@ impl Core {
                         .collect(),
                 })
             }
-            Command::SetCheckingServer { account, server } => {
+            Command::SetCheckingServer { account, server, password } => {
                 let account = self.syncing_account(&account)?;
+                // Naming a different server changes which messages show as
+                // verified, so it is guarded like any protection setting.
+                if !self.inner.settings.allows(password.as_ref().map(|p| p.0.as_str())) {
+                    return Err(denied(settings::Denied::WrongPassword));
+                }
                 let mut config = account.config().expect("checked above");
                 config.checking_server = server.trim().trim_end_matches('.').to_ascii_lowercase();
                 config.checking_server_confirmed = true;

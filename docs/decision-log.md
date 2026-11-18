@@ -7,6 +7,132 @@ started.
 Status words: **Decided** (owner agreed), **Proposal** (default in use, owner
 has not reviewed), **Finding** (a test result).
 
+## 2026-11-18 · Milestone 8: settings, shortcuts and system integration
+
+**Order (Decided, owner, 18 November 2026):** milestone 7 (OAuth) is parked
+until there are client IDs to test with; milestone 8 was built next, on
+Fable 5.2 rather than switching models; phase two follows.
+
+**Proposals** unless marked otherwise.
+
+### One settings page, searchable, one level deep
+
+Settings opens in the reading area (Ctrl+comma, the toolbar, the File menu).
+Everything is on one scrolling page under plain headings; the search box
+narrows the page as you type and nothing opens a second level. Each account
+is a heading on the same page: incoming server, password, sending and
+identity, signature, whose sender checks are believed, and Remove. The
+protection panel from milestone 6 is now a section of it. The menus' "Protection
+settings", "Account settings" and "Keyboard shortcuts" open the page already
+narrowed to that topic.
+
+A switch that needs the settings password shows its old state until the
+change has really been made.
+
+### The settings password guards the whole page
+
+With a password set, the core refuses to change any general or protection
+setting, to change an account's server, or to remove an account without it.
+Naming the server whose sender checks are believed is guarded too. Two things
+are not: setting up sending and entering a mailbox password, which are
+needed to keep mail working.
+
+### Removing an account
+
+Deletes the account's settings, stored password and downloaded mail from
+this computer, after a yes-or-no question. Nothing is changed on the server.
+The directory is marked first and deleted second, so if Windows will not
+delete open files there and then, the rest goes at the next start and the
+account never reappears. Mail that is only browsed (no server details) cannot
+be removed this way.
+
+### Shortcuts come from one table
+
+`ui/src/shortcuts.ts` lists every shortcut. The main window acts on the
+table and the settings page prints it, so the two cannot disagree. Outlook's
+keys are used where it has one (Ctrl+N, Ctrl+R, Ctrl+Shift+R, Ctrl+F, Ctrl+Q,
+Ctrl+U, Insert, Delete, Backspace, F9, Ctrl+E, Ctrl+P, Ctrl+Enter).
+Shortcuts are not yet editable.
+
+### The menu bar is drawn in the window
+
+A plain File / View / Message / Tools / Help bar, drawn by the interface
+rather than by the operating system: it looks the same on Windows and Linux
+and every entry calls the same function as its toolbar button and shortcut.
+
+### Tray icon and notifications
+
+- The tray icon's tooltip (and, where the desktop shows it, the text beside
+  the icon) carries the unread count of the inboxes. A click opens the
+  window; the menu has Open and Quit. Drawing the number onto the icon
+  itself is not done.
+- "Keep running in the tray when the window is closed" and "Start
+  minimised" are off by default. If the desktop has no tray, the window is
+  never hidden: there would be no way to get it back.
+- A notification is shown for unread mail that arrives in an inbox while
+  the app is running. Mail that came while it was closed is not announced
+  one by one; the tray count covers it. Mail a blocked sender's rule moved
+  to junk is not announced.
+
+### Smaller things
+
+- **Signature**, one per account, put under what the user will write and
+  above anything quoted. A reopened draft is left as saved.
+- **Undo-send delay** is a setting: off, or 5 to 60 seconds.
+- **Lines of preview** in the list: none to three.
+- **Sent, Drafts and Outbox show who a message is to** in place of the
+  sender (Decided in the handoff doc).
+- **Save message as a file** writes the message to Downloads as `.eml`,
+  byte for byte as received. **Print** prints the open message or
+  conversation.
+
+### Every setting the handoff doc names, and where it stands
+
+"Done when: every setting in this doc exists." It does not, yet, and the gap
+is features, not switches: a setting is only on the page if something obeys
+it. Dead switches were not added.
+
+| Setting in the handoff doc | State |
+| --- | --- |
+| The seven protection settings | Done (milestone 6), now on the settings page |
+| Which server's checks to believe, per account | Done |
+| Account: servers, sign-in, identity, signature | Done. One identity per account, not several |
+| Account: sync choices (headers only, skip large attachments, exclude a folder) | **Not built.** The sync engine downloads everything |
+| Account: OAuth sign-in | Parked with milestone 7 |
+| Account: cPanel add-on | Dropped in milestone 0 |
+| Undo send delay | Done |
+| New mail notifications | Done |
+| Tray icon with unread count | Done as tooltip and label, not drawn on the icon |
+| Start minimised | Done |
+| Register as the default mail app | **Not built.** Needs the installers (milestone 9) |
+| Check for updates | **Not built.** Belongs with the first release (milestone 9) |
+| Composer: rich text, or plain text only | **Not built.** The composer is plain text only |
+| Drafts saved as you type | **Not built.** Drafts are saved when asked |
+| Several identities per account | **Not built** |
+| Views: named layouts, reset this folder, apply to all | Partly. Conversations or messages, and preview lines, apply everywhere. No per-folder layouts, columns, sorting or grouping |
+| Favorites and All inboxes | **Not built** |
+| Rules | Out of version 1 per the handoff doc |
+| Search scope | Done in the list (this folder, or all of the account) |
+| Logging and a sync status panel | **Not built.** Status is the status bar |
+| Import (Maildir, mbox) | **Not built** |
+| Printing and export | Done, basic |
+| Dark theme, density | Later, per the handoff doc |
+| Language | English only, per the handoff doc |
+
+### Not done yet in milestone 8
+
+- The rows marked "Not built" above.
+- Tray, notifications, start-minimised and close-to-tray are built and
+  compile on both systems, and the app starts with them, but nobody has
+  looked at them on a real desktop: the automated run cannot see a tray or a
+  notification. Printing likewise.
+- No native (operating-system) menu; no editable shortcuts.
+
+### Dependencies added
+
+- `tauri-plugin-notification` (MIT or Apache-2.0) and Tauri's `tray-icon`
+  feature. On Linux the tray needs `libayatana-appindicator3` installed.
+
 ## 2026-11-18 · Milestone 6: sender verification
 
 **Proposals** unless marked otherwise. Built and tested against made-up mail

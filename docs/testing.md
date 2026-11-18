@@ -122,6 +122,34 @@ To see each state without any mail, run the interface in a browser
 (`npm run dev -w ui`): `/?select=12` is a failed message, `/?select=9` a
 verified one, `/?select=2` a lookalike, `/?panel=protection` the settings.
 
+**Seen once, 18 November 2026:** `first_sync_mirrors_the_account_and_changes_nothing`
+in `tests/sync_engine.rs` failed in one full run on Linux while the machine
+was also compiling the Windows build, and passed in the four runs after it.
+The failure text was not captured. If it shows up again, capture it: a test
+that fails only under load is usually a timing assumption in the test.
+
+## Tests of settings and accounts (milestone 8)
+
+Part of `cargo test`: `settings.rs` (general settings kept and kept in
+range, the password guarding them) and, against Dovecot in
+`tests/core_accounts.rs`, new mail being announced once and only when it is
+new and unread, a message saved as a file being the message byte for byte,
+an account's server and signature being changed, and an account being
+removed with its files and stored password while the server is untouched.
+
+The app self-test opens Settings, searches it and closes it with Escape.
+
+**By eye, not automated** (nothing in the test run can see these):
+
+1. Settings, General: switch on "Keep running in the tray". Close the
+   window. The tray icon should remain; clicking it should bring the window
+   back, and its menu should have Quit.
+2. Send yourself a message from somewhere else. A notification should
+   appear, and the tray icon's tooltip should say how much is unread.
+3. Open a message and press Ctrl+P. Only the message should be on the page.
+4. Linux: the tray needs a desktop that shows tray icons, and
+   `libayatana-appindicator3`.
+
 ## The app self-test (milestone 3)
 
 ```sh

@@ -29,6 +29,7 @@ npm) and ship the notices with the app.
 | `ammonia` | Making HTML mail safe to display | MIT or Apache-2.0 |
 | `keyring` | Passwords in the operating system's credential store | MIT or Apache-2.0 |
 | `tauri-plugin-opener` | Opening links and showing saved files | MIT or Apache-2.0 |
+| `tauri-plugin-notification` | New-mail notifications | MIT or Apache-2.0 |
 | `imap-codec` | Parsing and writing the IMAP protocol | MIT or Apache-2.0 |
 | `tokio` | Networking and timers | MIT |
 | `tokio-rustls`, `rustls` | TLS | MIT, Apache-2.0 or ISC |

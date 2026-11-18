@@ -178,7 +178,13 @@ pub enum Command {
     /// Confirms or changes which server's sender checks are believed for
     /// an account. An empty name means none: every message then shows as
     /// not checked.
-    SetCheckingServer { account: FolderId, server: String },
+    /// `password` is the settings password, needed if one is set.
+    SetCheckingServer {
+        account: FolderId,
+        server: String,
+        #[serde(default)]
+        password: Option<Secret>,
+    },
     /// The starting point for a reply to, or a forward of, a message.
     /// `mode` is `reply`, `replyAll` or `forward`.
     ComposeReply { folder: FolderId, id: i64, mode: String },

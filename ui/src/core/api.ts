@@ -23,7 +23,7 @@ export type Command =
   | { type: "setProtection"; protection: Protection; password?: string | null }
   | { type: "setProtectionPassword"; current?: string | null; new?: string | null }
   | { type: "trustMessage"; folder: FolderId; id: number; trusted: boolean; password?: string | null }
-  | { type: "setCheckingServer"; account: FolderId; server: string }
+  | { type: "setCheckingServer"; account: FolderId; server: string; password?: string | null }
   | { type: "search"; scope: FolderId; text: string; limit: number }
   | { type: "changeFlags"; folder: FolderId; ids: number[]; seen: boolean | null; flagged: boolean | null }
   | { type: "moveMessages"; ids: number[]; to: FolderId }

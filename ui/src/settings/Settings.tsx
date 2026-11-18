@@ -241,9 +241,11 @@ function accountItems(
           class="panel-server"
           onSubmit={(e) => {
             e.preventDefault();
-            core
-              .send({ type: "setCheckingServer", account: id, server: server() })
-              .then(() => {
+            withPassword("To change whose sender checks are believed", (password) =>
+              core.send({ type: "setCheckingServer", account: id, server: server(), password }),
+            )
+              .then((done) => {
+                if (!done) return;
                 say("Saved.");
                 changed();
               })

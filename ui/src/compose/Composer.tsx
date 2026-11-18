@@ -6,6 +6,7 @@
 
 import { createSignal, For, Show } from "solid-js";
 import { core, type AccountInfo, type DraftContent, type SendingSettings } from "../core";
+import { general } from "../core/protection";
 
 export const EMPTY_DRAFT: DraftContent = {
   to: "",
@@ -22,7 +23,6 @@ export const EMPTY_DRAFT: DraftContent = {
 };
 
 /** How long a sent message waits in the outbox, where Undo can catch it. */
-export const UNDO_SECONDS = 10;
 
 function errorText(e: unknown): string {
   return String((e as { message?: string })?.message ?? e);
@@ -123,6 +123,18 @@ function SendingSetup(props: { account: AccountInfo; onDone: () => void; onCance
   );
 }
 
+/**
+ * The text a message starts with: the account's signature goes under what
+ * the user will write, and above anything quoted. A draft being reopened is
+ * left exactly as it was saved.
+ */
+function withSignature(draft: DraftContent, signature: string): string {
+  if (!signature.trim() || draft.replaces !== null) return draft.body;
+  const block = `-- \n${signature.trim()}`;
+  if (draft.body.includes(block)) return draft.body;
+  return draft.body.trim() ? `\n\n${block}\n\n${draft.body.replace(/^\n+/, "")}` : `\n\n${block}\n`;
+}
+
 export function Composer(props: {
   account: AccountInfo;
   initial: DraftContent;
@@ -135,7 +147,7 @@ export function Composer(props: {
   const [cc, setCc] = createSignal(props.initial.cc);
   const [bcc, setBcc] = createSignal(props.initial.bcc);
   const [subject, setSubject] = createSignal(props.initial.subject);
-  const [body, setBody] = createSignal(props.initial.body);
+  const [body, setBody] = createSignal(withSignature(props.initial, props.account.signature));
   const [attachments, setAttachments] = createSignal(props.initial.attachments);
   const [showCopies, setShowCopies] = createSignal(Boolean(props.initial.cc || props.initial.bcc));
   const [busy, setBusy] = createSignal(false);
@@ -172,7 +184,7 @@ export function Composer(props: {
     setBusy(true);
     setError("");
     core
-      .send({ type: "sendMessage", account: props.account.id, draft: draft(), delaySeconds: UNDO_SECONDS })
+      .send({ type: "sendMessage", account: props.account.id, draft: draft(), delaySeconds: general().undoSendSeconds })
       .then((r) => props.onSent(r.id, subject()))
       .catch((e) => {
         setBusy(false);
@@ -205,7 +217,13 @@ export function Composer(props: {
       fallback={<SendingSetup account={props.account} onDone={props.onSendingSet} onCancel={() => props.onClose()} />}
     >
       {(sending) => (
-        <form class="composer" onSubmit={send}>
+        <form
+          class="composer"
+          onSubmit={send}
+          onKeyDown={(e) => {
+            if (e.ctrlKey && e.key === "Enter") send(e);
+          }}
+        >
           <div class="composer-from">
             From {sending().name ? `${sending().name} <${sending().address}>` : sending().address}
           </div>

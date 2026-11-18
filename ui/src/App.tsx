@@ -1,6 +1,6 @@
 // The main window: folder tree, message list, reading pane, status bar.
 
-import { createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch } from "solid-js";
+import { createEffect, createMemo, createSignal, For, Match, onCleanup, onMount, Show, Switch } from "solid-js";
 import {
   core,
   type AccountInfo,
@@ -9,20 +9,22 @@ import {
   type MessageRow,
   type SyncStatus,
 } from "./core";
-import { Composer, EMPTY_DRAFT, UNDO_SECONDS } from "./compose/Composer";
+import { Composer, EMPTY_DRAFT } from "./compose/Composer";
 import { runScrollTest } from "./bench";
 import { MessageList, type ListHandle } from "./list/MessageList";
 import { SearchResults } from "./list/SearchResults";
 import { Reader } from "./reader/Reader";
 import { AddAccount, PasswordPrompt } from "./accounts/AccountPanels";
 import { autoShellTest } from "./autotest";
-import { asking, loadProtection, messageActions } from "./core/protection";
-import { PasswordAsk, ProtectionPanel } from "./settings/ProtectionPanel";
+import { asking, general, loadProtection, messageActions } from "./core/protection";
+import { PasswordAsk, Settings } from "./settings/Settings";
+import { MenuBar, type Menu } from "./MenuBar";
+import { pressed, SHORTCUTS } from "./shortcuts";
 
 type Panel =
   | { kind: "none" }
   | { kind: "add" }
-  | { kind: "protection" }
+  | { kind: "settings"; find?: string }
   | { kind: "password"; account: string }
   | { kind: "compose"; account: string; draft: DraftContent; key: number };
 
@@ -60,9 +62,12 @@ export function App() {
   const [folderId, setFolderId] = createSignal<string>();
   const [message, setMessage] = createSignal<MessageRow>();
   /** Whether the list shows one row per conversation or one per message. */
-  const [conversations, setConversations] = createSignal(localStorage.getItem("outpost.layout") !== "messages");
+  // The setting says how folders open; the button on the list switches for
+  // the time being, and that choice is remembered on this computer.
+  const [layoutChoice, setLayoutChoice] = createSignal(localStorage.getItem("outpost.layout"));
+  const conversations = () => (layoutChoice() ? layoutChoice() !== "messages" : general().conversations);
   function chooseLayout(grouped: boolean) {
-    setConversations(grouped);
+    setLayoutChoice(grouped ? "conversations" : "messages");
     setMessage(undefined);
     try {
       localStorage.setItem("outpost.layout", grouped ? "conversations" : "messages");
@@ -99,6 +104,10 @@ export function App() {
   const passwordAccount = createMemo(() => {
     const p = panel();
     return p.kind === "password" ? accounts().find((a) => a.id === p.account) : undefined;
+  });
+  const settingsOpen = createMemo(() => {
+    const p = panel();
+    return p.kind === "settings" ? p : undefined;
   });
   const searching = () => query().trim().length > 0;
   /** The junk folder of the account on show, if it has one. */
@@ -138,7 +147,7 @@ export function App() {
     setQuery("");
     setFolderId(id);
     // A message being written stays open while the user looks elsewhere.
-    if (["add", "password", "protection"].includes(panel().kind)) setPanel({ kind: "none" });
+    if (["add", "password", "settings"].includes(panel().kind)) setPanel({ kind: "none" });
   }
 
   onMount(() => {
@@ -160,7 +169,8 @@ export function App() {
     const params = new URLSearchParams(location.search);
     void loadFolders().then(() => {
       if (params.get("panel") === "add") setPanel({ kind: "add" });
-      if (params.get("panel") === "protection") setPanel({ kind: "protection" });
+      if (params.get("panel") === "protection") setPanel({ kind: "settings", find: "protection" });
+      if (params.get("panel") === "settings") setPanel({ kind: "settings", find: params.get("find") ?? "" });
       if (params.get("q")) setQuery(params.get("q")!);
     });
 
@@ -191,6 +201,18 @@ export function App() {
           break;
         case "accountAdded":
           void loadAccounts();
+          break;
+        case "accountRemoved":
+          setMessage(undefined);
+          void loadAccounts();
+          void loadFolders();
+          break;
+        case "newMail":
+          if (general().notifyNewMail) {
+            const title = event.count === 1 ? event.sender || "New message" : `${event.count} new messages`;
+            const body = event.count === 1 ? event.subject || "(no subject)" : `Newest: ${event.sender}: ${event.subject || "(no subject)"}`;
+            void core.notify(title, body).catch(() => {});
+          }
           break;
         case "notice":
           setNotice(event.text);
@@ -411,8 +433,9 @@ export function App() {
   function sent(accountId: string, id: number, subject: string) {
     setPanel({ kind: "none" });
     clearTimeout(undoTimer);
-    setUndo({ account: accountId, id, subject });
-    undoTimer = setTimeout(() => setUndo(undefined), UNDO_SECONDS * 1000);
+    if (general().undoSendSeconds > 0) setUndo({ account: accountId, id, subject });
+    if (general().undoSendSeconds === 0) return;
+    undoTimer = setTimeout(() => setUndo(undefined), general().undoSendSeconds * 1000);
   }
 
   function undoSend() {
@@ -437,27 +460,52 @@ export function App() {
   });
   const editable = () => ["drafts", "outbox"].includes(folder()?.role ?? "");
 
-  // Outlook's shortcuts, when the keyboard is not in a text field.
+  /** Writes the open message to the downloads folder as a mail file. */
+  function exportMessage() {
+    const t = target() ?? (message() && folderId() ? { row: message()!, folder: folderId()! } : undefined);
+    if (!t) return;
+    core
+      .send({ type: "exportMessage", folder: t.folder, id: t.row.id })
+      .then((r) => setNotice(`Saved to your Downloads folder as ${r.name}`))
+      .catch((e) => setNotice(String(e?.message ?? e)));
+  }
+
+  function focusSearch() {
+    setPanel({ kind: "none" });
+    queueMicrotask(() => (document.querySelector(".search input") as HTMLInputElement | null)?.focus());
+  }
+
+  /** What each shortcut does, and whether it can be done right now. */
+  const actions: Record<string, { run: () => void; can: () => boolean }> = {
+    new: { run: () => compose(EMPTY_DRAFT), can: () => writingAccount() !== undefined },
+    reply: { run: () => respond("reply"), can: () => target() !== undefined },
+    replyAll: { run: () => respond("replyAll"), can: () => target() !== undefined },
+    forward: { run: () => respond("forward"), can: () => target() !== undefined },
+    delete: { run: () => void remove(), can: () => target() !== undefined },
+    archive: { run: () => void archive(), can: () => target() !== undefined },
+    flag: { run: () => void toggleFlag(), can: () => target() !== undefined },
+    read: { run: () => void markRead(true), can: () => target() !== undefined },
+    unread: { run: () => void markRead(false), can: () => target() !== undefined },
+    search: { run: focusSearch, can: () => folderId() !== undefined },
+    sync: { run: syncNow, can: () => canSync() },
+    print: { run: () => window.print(), can: () => message() !== undefined },
+    settings: { run: () => setPanel({ kind: "settings" }), can: () => true },
+    close: { run: () => setPanel({ kind: "none" }), can: () => ["settings", "add", "password"].includes(panel().kind) },
+  };
+
+  // Outlook's shortcuts. Most apply only when the keyboard is not in a text
+  // field and no panel is open; a few always do.
   function onKey(e: KeyboardEvent) {
     const typing = (e.target as HTMLElement | null)?.closest?.("input, textarea, select, [contenteditable]");
-    if (typing || panel().kind !== "none") return;
-    const key = e.key.toLowerCase();
-    if (e.ctrlKey && key === "n") {
-      compose(EMPTY_DRAFT);
+    const busy = Boolean(typing) || panel().kind !== "none";
+    for (const shortcut of SHORTCUTS) {
+      if (shortcut.elsewhere || !pressed(e, shortcut.keys)) continue;
+      const action = actions[shortcut.id];
+      if (!action || (busy && !shortcut.always) || !action.can()) return;
+      action.run();
       e.preventDefault();
       return;
     }
-    if (!message()) return;
-    if (e.ctrlKey && e.shiftKey && key === "r") respond("replyAll");
-    else if (e.ctrlKey && key === "r") respond("reply");
-    else if (e.ctrlKey && key === "f") respond("forward");
-    else if (e.key === "Delete") void remove();
-    else if (e.key === "Backspace") void archive();
-    else if (e.key === "Insert") void toggleFlag();
-    else if (e.ctrlKey && key === "q") void markRead(true);
-    else if (e.ctrlKey && key === "u") void markRead(false);
-    else return;
-    e.preventDefault();
   }
   onMount(() => {
     window.addEventListener("keydown", onKey);
@@ -475,13 +523,84 @@ export function App() {
     return state !== undefined && state !== "notSyncing" && state !== "needsPassword";
   };
 
+  // The tray icon shows how much unread mail the inboxes hold.
+  createEffect(() => {
+    const unread = folders()
+      .filter((f) => f.role === "inbox")
+      .reduce((sum, f) => sum + f.unread, 0);
+    void core.setUnread(unread).catch(() => {});
+  });
+
+  const key = (id: string) => SHORTCUTS.find((s) => s.id === id)?.keys;
+  const entry = (id: string, label: string) => ({ label, keys: key(id), run: actions[id]!.run, disabled: !actions[id]!.can() });
+  const menus = (): Menu[] => [
+    {
+      title: "File",
+      entries: [
+        entry("new", "New message"),
+        { label: "Add account…", run: () => setPanel({ kind: "add" }) },
+        null,
+        { label: "Save message as a file", run: exportMessage, disabled: !message() },
+        entry("print", "Print…"),
+        null,
+        entry("settings", "Settings"),
+      ],
+    },
+    {
+      title: "View",
+      entries: [
+        { label: "Conversations", run: () => chooseLayout(true), checked: conversations() },
+        { label: "Single messages", run: () => chooseLayout(false), checked: !conversations() },
+        null,
+        entry("search", "Search"),
+      ],
+    },
+    {
+      title: "Message",
+      entries: [
+        entry("reply", "Reply"),
+        entry("replyAll", "Reply to all"),
+        entry("forward", "Forward"),
+        null,
+        entry("read", "Mark as read"),
+        entry("unread", "Mark as unread"),
+        entry("flag", message()?.flagged ? "Unflag" : "Flag"),
+        null,
+        entry("archive", "Archive"),
+        {
+          label: "Move to junk",
+          run: () => messageActions.moveToJunk?.(),
+          disabled: !target() || !messageActions.hasJunk?.(),
+        },
+        entry("delete", "Delete"),
+      ],
+    },
+    {
+      title: "Tools",
+      entries: [
+        entry("sync", "Check for new mail"),
+        null,
+        { label: "Protection settings", run: () => setPanel({ kind: "settings", find: "protection" }) },
+        { label: "Account settings", run: () => setPanel({ kind: "settings", find: "account" }) },
+      ],
+    },
+    {
+      title: "Help",
+      entries: [
+        { label: "Keyboard shortcuts", run: () => setPanel({ kind: "settings", find: "shortcut" }) },
+        { label: "About Outpost", run: () => setPanel({ kind: "settings", find: "about" }) },
+      ],
+    },
+  ];
+
   return (
     <div class="app">
+      <MenuBar menus={menus()} />
       <header class="toolbar">
         <span class="brand">Outpost</span>
         <button onClick={() => setPanel({ kind: "add" })}>Add account</button>
-        <button onClick={() => setPanel({ kind: "protection" })} title="Sender checks, pictures, links and warnings">
-          Protection
+        <button onClick={() => setPanel({ kind: "settings" })} title="Settings (Ctrl+,)">
+          Settings
         </button>
         <button onClick={syncNow} disabled={!canSync()} title="Check every folder for changes now">
           Sync now
@@ -665,6 +784,8 @@ export function App() {
                 <MessageList
                   folder={id()}
                   conversations={conversations()}
+                  previewLines={general().previewLines}
+                  showRecipients={["sent", "drafts", "outbox"].includes(folder()?.role ?? "")}
                   onSelect={(row) => !searching() && setMessage(row)}
                   onCount={setCount}
                   handle={(h) => (list = h)}
@@ -680,15 +801,21 @@ export function App() {
           <Match when={panel().kind === "add"}>
             <AddAccount onDone={accountAdded} onCancel={() => setPanel({ kind: "none" })} />
           </Match>
-          <Match when={panel().kind === "protection"}>
-            <ProtectionPanel
-              accounts={accounts()}
-              onAccountsChanged={() => {
-                void loadAccounts();
-                list?.refresh();
-              }}
-              onClose={() => setPanel({ kind: "none" })}
-            />
+          <Match when={settingsOpen()} keyed>
+            {(open) => (
+              <Settings
+                accounts={accounts()}
+                coreVersion={coreVersion()}
+                find={open.find}
+                onAccountsChanged={() => {
+                  void loadAccounts();
+                  list?.refresh();
+                }}
+                onAddAccount={() => setPanel({ kind: "add" })}
+                onPassword={(account) => setPanel({ kind: "password", account })}
+                onClose={() => setPanel({ kind: "none" })}
+              />
+            )}
           </Match>
           <Match when={composing()} keyed>
             {(c) => (

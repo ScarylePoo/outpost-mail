@@ -47,6 +47,10 @@ export function MessageList(props: {
   folder: FolderId;
   /** One row per conversation, each of which can be opened into its tree. */
   conversations?: boolean;
+  /** The most lines of text a row shows (0 to 3). */
+  previewLines?: number;
+  /** Show who each message was sent to, not who sent it (Sent, Drafts). */
+  showRecipients?: boolean;
   onSelect: (row: MessageRow | undefined) => void;
   /** Called with how many messages are selected whenever that changes. */
   onCount?: (count: number) => void;
@@ -227,7 +231,7 @@ export function MessageList(props: {
   function relayout() {
     const anchor = visFirst;
     const into = count() > 0 ? virtualTop - layout.offsets[anchor]! : 0;
-    layout = buildLayout(previewLens, width, extraHeights());
+    layout = buildLayout(previewLens, width, extraHeights(), props.previewLines);
     setTotal(count());
     resize();
     setLayoutTick((t) => t + 1);
@@ -294,7 +298,7 @@ export function MessageList(props: {
       if (gen !== generation) return;
       const extra = new Map<number, number>();
       for (const [index, thread] of reopened) extra.set(index, treeHeight(thread));
-      const nextLayout = buildLayout(fresh.previewLens, width, extra);
+      const nextLayout = buildLayout(fresh.previewLens, width, extra, props.previewLines);
       const n = nextLayout.lines.length;
       let nextTop = 0;
       if (anchor && anchorIndex !== null && anchorIndex < n) {
@@ -424,6 +428,7 @@ export function MessageList(props: {
       threadUnread: head?.threadUnread ?? 0,
       senders: head?.senders ?? "",
       check: message.check,
+      recipients: message.recipients,
       inFolder: message.folder,
     });
   }
@@ -552,6 +557,15 @@ export function MessageList(props: {
   );
 
   // Tell the owner of the list which row is selected, once its data is here.
+  // The setting for preview lines changed: every row's height changes.
+  createEffect(
+    on(
+      () => props.previewLines,
+      () => status() === "ready" && relayout(),
+      { defer: true },
+    ),
+  );
+
   createEffect(() => {
     dataTick();
     const i = selected();
@@ -656,7 +670,13 @@ export function MessageList(props: {
                             {tree() ? "▾" : "▸"}
                           </button>
                         </Show>
-                        <span class="row-sender">{many() ? r().senders : r().senderName}</span>
+                        <span class="row-sender">
+                          {props.showRecipients && r().recipients
+                            ? `To: ${r().recipients.replace(/\s*<[^>]*>/g, "")}`
+                            : many()
+                              ? r().senders
+                              : r().senderName}
+                        </span>
                         <Show when={r().check === "failed"}>
                           <span class="row-warning" title="This message failed its sender checks">
                             ⚠ Failed checks

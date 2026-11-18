@@ -14,6 +14,11 @@ export type Command =
   | { type: "openMessage"; folder: FolderId; id: number }
   | { type: "openThread"; folder: FolderId; id: number }
   | { type: "recheckSignature"; folder: FolderId; id: number }
+  | { type: "getGeneral" }
+  | { type: "setGeneral"; general: General; password?: string | null }
+  | { type: "updateAccount"; account: FolderId; host: string; port: number; encrypted: boolean; signature: string; password?: string | null }
+  | { type: "removeAccount"; account: FolderId; password?: string | null }
+  | { type: "exportMessage"; folder: FolderId; id: number }
   | { type: "getProtection" }
   | { type: "setProtection"; protection: Protection; password?: string | null }
   | { type: "setProtectionPassword"; current?: string | null; new?: string | null }
@@ -92,6 +97,19 @@ export interface SignatureLine {
   aligned: boolean;
 }
 
+/** How the app behaves in general. */
+export interface General {
+  notifyNewMail: boolean;
+  startMinimised: boolean;
+  closeToTray: boolean;
+  /** Seconds a message waits, undoable, before it is sent. */
+  undoSendSeconds: number;
+  /** Folders open as conversations rather than single messages. */
+  conversations: boolean;
+  /** Lines of each message's text in the list: 0 to 3. */
+  previewLines: number;
+}
+
 /** The protection settings: each its own switch. */
 export interface Protection {
   disableFailed: boolean;
@@ -110,6 +128,8 @@ export interface MessageRow {
   index: number;
   senderName: string;
   senderAddress: string;
+  /** Who it was sent to, as display text. Shown in Sent and Drafts. */
+  recipients: string;
   /** Unix time, seconds, UTC. */
   date: number;
   subject: string;
@@ -211,6 +231,10 @@ export interface AccountInfo {
   status: SyncStatus;
   /** How the account sends mail, once that has been set up. */
   sending: SendingSettings | null;
+  port: number;
+  encrypted: boolean;
+  /** Text put at the end of messages written from this account. */
+  signature: string;
   /** The server whose sender checks are believed; empty if none is known. */
   checkingServer: string;
   /** False while that is a guess the user has not confirmed. */
@@ -249,6 +273,7 @@ export type Response =
   | { type: "message"; message: MessageView }
   | { type: "thread"; thread: ThreadView }
   | { type: "signatureRechecked"; signatures: SignatureLine[]; verified: boolean }
+  | { type: "general"; general: General }
   | { type: "protection"; protection: Protection; passwordSet: boolean }
   | { type: "attachmentSaved"; path: string; name: string }
   | { type: "draft"; draft: DraftContent }
@@ -266,6 +291,8 @@ export type CoreEvent =
   | { type: "foldersChanged"; account: FolderId }
   | { type: "notice"; account: FolderId; text: string }
   | { type: "accountAdded"; account: FolderId }
+  | { type: "accountRemoved"; account: FolderId }
+  | { type: "newMail"; account: FolderId; folder: FolderId; count: number; sender: string; subject: string }
   | { type: "accountSetupFailed"; error: string };
 
 export interface CoreError {
@@ -283,6 +310,11 @@ type ResponseFor = {
   openMessage: "message";
   openThread: "thread";
   recheckSignature: "signatureRechecked";
+  getGeneral: "general";
+  setGeneral: "general";
+  updateAccount: "accepted";
+  removeAccount: "accepted";
+  exportMessage: "attachmentSaved";
   getProtection: "protection";
   setProtection: "protection";
   setProtectionPassword: "protection";
@@ -323,4 +355,8 @@ export interface Transport {
   openLink(url: string): Promise<void>;
   /** Shows a saved attachment in the system's file manager. */
   revealDownload(path: string): Promise<void>;
+  /** Shows a system notification. */
+  notify(title: string, body: string): Promise<void>;
+  /** Shows the unread count on the tray icon. */
+  setUnread(count: number): Promise<void>;
 }

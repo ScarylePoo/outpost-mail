@@ -30,9 +30,9 @@ export function charsPerLine(listWidth: number): number {
   return Math.max(16, Math.floor((listWidth - ROW_PAD_X) / AVG_CHAR));
 }
 
-export function linesFor(previewLen: number, perLine: number): number {
+export function linesFor(previewLen: number, perLine: number, most = MAX_PREVIEW_LINES): number {
   if (previewLen <= 0) return 0;
-  return Math.min(MAX_PREVIEW_LINES, Math.ceil(previewLen / perLine));
+  return Math.min(most, MAX_PREVIEW_LINES, Math.ceil(previewLen / perLine));
 }
 
 export function buildLayout(
@@ -40,6 +40,8 @@ export function buildLayout(
   listWidth: number,
   /** Extra height for particular rows: an expanded conversation's tree. */
   extra?: ReadonlyMap<number, number>,
+  /** The most preview lines a row may have: the user's setting. */
+  mostLines = MAX_PREVIEW_LINES,
 ): Layout {
   const count = previewLens.length;
   const perLine = charsPerLine(listWidth);
@@ -47,7 +49,7 @@ export function buildLayout(
   const offsets = new Float64Array(count + 1);
   let y = 0;
   for (let i = 0; i < count; i++) {
-    const n = linesFor(previewLens[i]!, perLine);
+    const n = linesFor(previewLens[i]!, perLine, mostLines);
     lines[i] = n;
     offsets[i] = y;
     y += ROW_FIXED + n * LINE + (extra?.get(i) ?? 0);

@@ -1726,6 +1726,7 @@ fn message_rows(rows: Vec<ListRow>, first_index: u32, checking_server: &str) -> 
             index: first_index + i as u32,
             sender_name: if r.from_name.is_empty() { r.from_addr.clone() } else { r.from_name },
             sender_address: r.from_addr,
+            recipients: r.recipients,
             date: r.date,
             subject: r.subject,
             preview: r.preview,

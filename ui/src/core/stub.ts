@@ -9,6 +9,7 @@ import type {
   Command,
   CoreEvent,
   FolderInfo,
+  General,
   MessageRow,
   Protection,
   Response,
@@ -101,6 +102,14 @@ let protection: Protection = {
   recheckSignatures: true,
   blockedSenders: [],
 };
+let general: General = {
+  notifyNewMail: true,
+  startMinimised: false,
+  closeToTray: false,
+  undoSendSeconds: 10,
+  conversations: true,
+  previewLines: 3,
+};
 let password: string | null = null;
 const trusted = new Set<number>();
 const wrongPassword = () => ({ code: "wrongPassword", message: "the settings password is needed, and that was not it" });
@@ -122,6 +131,7 @@ function row(i: number): MessageRow {
     threadUnread: i % 5 === 0 ? 2 : flags < 12 ? 1 : 0,
     senders: i % 5 === 0 ? "Dana, You, Sam, Priya" : "",
     check: checkOf(i),
+    recipients: "You <you@example.com>",
     hasAttachment: flags >= 90,
   };
 }
@@ -259,6 +269,17 @@ function answer(command: Command): Response {
               },
         ],
       };
+    case "getGeneral":
+      return { type: "general", general };
+    case "setGeneral":
+      if (password !== null && command.password !== password) throw wrongPassword();
+      general = command.general;
+      return { type: "general", general };
+    case "updateAccount":
+    case "removeAccount":
+      return { type: "accepted" };
+    case "exportMessage":
+      return { type: "attachmentSaved", path: "/downloads/message.eml", name: "message.eml" };
     case "getProtection":
       return { type: "protection", protection, passwordSet: password !== null };
     case "setProtection":
@@ -347,6 +368,8 @@ export const stubTransport: Transport = {
     window.open(url, "_blank", "noopener");
   },
   async revealDownload() {},
+  async notify() {},
+  async setUnread() {},
   onEvent(listener) {
     listeners.add(listener);
     return () => listeners.delete(listener);

@@ -154,6 +154,22 @@ async function probe(details: string): Promise<string> {
     lines.push(`green checks on it: ${document.querySelectorAll(".message .check-label.verified").length}`);
     await open("Selftest message 3");
     lines.push(`genuine message: ${text(".message .check-label").join("")} (banner: ${document.querySelectorAll(".failed").length})`);
+
+    // The settings window: every section on one page, narrowed by search.
+    press("Settings");
+    await sleep(500);
+    lines.push(`settings sections: ${text(".settings-body h2").join(" | ")}`);
+    const search = document.querySelector(".settings-search") as HTMLInputElement | null;
+    if (search) {
+      search.value = "signature";
+      search.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    }
+    await sleep(300);
+    lines.push(`settings matching "signature": ${text(".settings-body h2").join(" | ")} (${text(".settings-body .setting").length} settings)`);
+    lines.push(`menus: ${text(".menubar .menu-title").join(" | ")}`);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await sleep(300);
+    lines.push(`settings closed by Escape: ${document.querySelector(".settings") ? "NO" : "yes"}`);
   } catch (e) {
     lines.push(`FAILED: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
   }

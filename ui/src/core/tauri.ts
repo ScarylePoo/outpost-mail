@@ -15,6 +15,12 @@ export const tauriTransport: Transport = {
   revealDownload(path) {
     return invoke("reveal_download", { path });
   },
+  notify(title, body) {
+    return invoke("notify", { title, body });
+  },
+  setUnread(count) {
+    return invoke("set_unread", { count });
+  },
   onEvent(listener) {
     let stop: (() => void) | undefined;
     let stopped = false;

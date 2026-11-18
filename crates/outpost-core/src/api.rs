@@ -410,6 +410,8 @@ pub struct FolderInfo {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageRow {
+    /// Who the message was sent to, as display text.
+    pub recipients: String,
     /// Identifies the message within its account.
     pub id: i64,
     /// Position in the folder's current sort order, or in the search results.

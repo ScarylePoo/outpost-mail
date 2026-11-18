@@ -7,7 +7,7 @@
 
 import { createSignal } from "solid-js";
 import { core } from "./index";
-import type { Protection } from "./api";
+import type { General, Protection } from "./api";
 
 const DEFAULTS: Protection = {
   disableFailed: true,
@@ -21,14 +21,26 @@ const DEFAULTS: Protection = {
   blockedSenders: [],
 };
 
+const [general, setGeneral] = createSignal<General>({
+  notifyNewMail: true,
+  startMinimised: false,
+  closeToTray: false,
+  undoSendSeconds: 10,
+  conversations: true,
+  previewLines: 3,
+});
 const [protection, setProtection] = createSignal<Protection>(DEFAULTS);
 const [passwordSet, setPasswordSet] = createSignal(false);
 /** Counts changes that affect how an open message is shown. */
 const [protectionVersion, setProtectionVersion] = createSignal(0);
 
-export { protection, passwordSet, protectionVersion };
+export { general, protection, passwordSet, protectionVersion };
 
 export function loadProtection(): Promise<void> {
+  void core
+    .send({ type: "getGeneral" })
+    .then((r) => setGeneral(r.general))
+    .catch(() => {});
   return core
     .send({ type: "getProtection" })
     .then((r) => {
@@ -89,6 +101,14 @@ export async function saveProtection(why: string, next: Protection): Promise<boo
   setProtection(done.protection);
   setPasswordSet(done.passwordSet);
   setProtectionVersion((v) => v + 1);
+  return true;
+}
+
+/** Changes the general settings. Resolves to whether they were changed. */
+export async function saveGeneral(next: General): Promise<boolean> {
+  const done = await withPassword("To change the settings", (password) => core.send({ type: "setGeneral", general: next, password }));
+  if (!done) return false;
+  setGeneral(done.general);
   return true;
 }
 

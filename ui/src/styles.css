@@ -49,8 +49,9 @@ input[type="checkbox"] {
   height: 100%;
   display: grid;
   grid-template-columns: 220px minmax(300px, 420px) minmax(0, 1fr);
-  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
   grid-template-areas:
+    "menu menu menu"
     "toolbar toolbar toolbar"
     "folders list reading"
     "undo undo undo"
@@ -1547,4 +1548,227 @@ button.inline:hover {
   border: 1px solid var(--border);
   border-radius: 6px;
   font: inherit;
+}
+
+/* Menu bar */
+
+.menubar {
+  grid-area: menu;
+  display: flex;
+  padding: 0 6px;
+  border-bottom: 1px solid var(--hairline);
+  background: var(--pane);
+  user-select: none;
+}
+
+.menu {
+  position: relative;
+}
+
+.menu-title {
+  padding: 3px 9px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+}
+
+.menu-title:hover,
+.menu-title.open {
+  background: var(--accent-soft);
+}
+
+.menu-list {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 30;
+  min-width: 230px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--pane);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 0.14);
+}
+
+.menu-list button {
+  display: flex;
+  width: 100%;
+  gap: 8px;
+  padding: 4px 10px 4px 4px;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  text-align: left;
+}
+
+.menu-list button:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+
+.menu-list button:disabled {
+  color: var(--text-3);
+}
+
+.menu-tick {
+  width: 14px;
+  color: var(--accent);
+}
+
+.menu-label {
+  flex: 1;
+}
+
+.menu-keys {
+  color: var(--text-3);
+}
+
+.menu-line {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--hairline);
+}
+
+/* Settings window */
+
+.settings {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.settings-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 32px 10px;
+}
+
+.settings-head h1 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.settings-search {
+  flex: 1;
+  max-width: 340px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+}
+
+.settings > .panel-note {
+  margin: 0 32px 8px;
+}
+
+.settings-body {
+  flex: 1;
+  min-height: 0;
+  max-width: 660px;
+  padding-top: 0;
+  overflow-y: auto;
+  user-select: text;
+}
+
+.settings-body h2 {
+  margin: 20px 0 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+
+.setting {
+  padding: 6px 0;
+}
+
+.setting form > button,
+.setting form > .panel-row + button {
+  margin-top: 2px;
+}
+
+.setting-title {
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+
+.setting-line {
+  display: flex !important;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 0 !important;
+  font-weight: 400 !important;
+}
+
+.setting-aside {
+  display: block;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.setting-line.shortcut {
+  padding: 1px 0;
+}
+
+.setting kbd {
+  padding: 1px 7px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.panel textarea,
+.panel select {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--pane);
+  font: inherit;
+  font-weight: 400;
+}
+
+.setting-line select {
+  width: auto;
+  margin-top: 0;
+}
+
+button.danger {
+  border-color: #f0b4ae;
+  color: var(--danger);
+}
+
+/* Printing: the open message and nothing else. */
+
+@media print {
+  .menubar,
+  .toolbar,
+  .folders,
+  .list-pane,
+  main,
+  .statusbar,
+  .undo-bar,
+  .link-bar,
+  .modes,
+  .turn-links,
+  .failed-actions {
+    display: none !important;
+  }
+
+  .app {
+    display: block !important;
+    height: auto !important;
+  }
+
+  .reading {
+    overflow: visible !important;
+    height: auto !important;
+    border: 0 !important;
+  }
 }

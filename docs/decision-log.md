@@ -7,6 +7,144 @@ started.
 Status words: **Decided** (owner agreed), **Proposal** (default in use, owner
 has not reviewed), **Finding** (a test result).
 
+## 2026-11-18 · Phase two: calendar, tasks and contacts
+
+**Started early on the owner's instruction (18 November 2026).** The handoff
+doc says phase two is not to begin until version 1 is in daily use; the owner
+asked for it now. Version 1's own open items (milestones 7 and 9, and the
+real-mail trials of 4 to 6) are unchanged by this.
+
+**Proposals** unless marked otherwise. Tested against Radicale, a real
+CalDAV and CardDAV server run privately by the tests. Not tried against
+Nextcloud, Fastmail, iCloud, Google or the owner's own server.
+
+### Shape
+
+A calendar-and-contacts account is a server address plus a sign-in, in a
+list of its own, separate from mail accounts (Decided in the handoff doc).
+Outpost finds the calendars, task lists and address books on it; each can be
+switched off and given a colour. Everything merges in the interface: one
+calendar with every calendar overlaid in its colour, one task list, one
+people list.
+
+The bottom-left switcher (Mail, Calendar, People, Tasks; Ctrl+1 to 4) is now
+shown. The core is the same core: the new commands and events go through the
+same interface as mail, and the passwords through the same credential store.
+
+### Stored as standard files, as mail is
+
+Each event and task is its own `.ics` file and each contact its own `.vcf`,
+exactly as the server gave it, in a folder per calendar or address book
+under `dav/<account>/`, with a small SQLite index beside them.
+
+### A file is changed one line at a time
+
+Changing an event's title replaces the line that holds the title. Every
+other line, including ones Outpost does not understand (attendees, alarms,
+another program's private fields, a contact's photo), is kept exactly as it
+was written. Reading for the index is by line too. One thing is left to a
+library: working out when an event happens, time zones and repeats included
+(`calcard`, by the authors of `mail-auth`). The handoff doc says not to
+write repeat expansion by hand, and it was not.
+
+- **Found and worked around:** `calcard` 0.3.14 treats a repeating event
+  whose start is written in UTC as local time, shifting every occurrence by
+  the computer's offset from UTC. Single events are not affected. Such
+  events are expanded with UTC as the default zone, which gives the right
+  moments; a test (`repeats_written_in_utc_stay_in_utc`) holds this in place
+  and will show if a later version of the library changes. Worth reporting
+  upstream.
+- Text is escaped when written. An unescaped comma made the test server
+  silently keep only the text before it.
+
+### Its own small HTTP client
+
+About 300 lines over the TLS stack already used for mail, for the reason
+the SMTP client was written: certificates are checked exactly as for mail
+and nothing else comes into the build. One request per connection, which is
+slower than keeping connections open and simple to be sure of.
+
+The user's name and password are sent only to the server the user named. A
+redirect or a link to a different server is refused with a message saying
+where it pointed, not followed. An address typed with `http://` is used
+unencrypted, with a warning on the form; anything else is `https`.
+
+### Sync, and never overwriting what has not been seen
+
+One pass every five minutes, and at once when the user changes something:
+find the collections; send what was changed here; then for each collection
+whose change tag has moved, compare versions and fetch, replace or remove.
+
+Every save and delete names the version it was made against, and the server
+refuses it if that is no longer current. When that happens **the server's
+version is kept, the local change is dropped, and the user is told** in the
+status bar ("... was changed somewhere else at the same time. That version
+was kept and your change was not saved."). This loses the user's edit rather
+than someone else's, and says so. Merging the two, or keeping both, is not
+attempted.
+
+What the user does shows at once and is sent in the background; with the
+server unreachable it waits and nothing is lost (tested).
+
+### What can be edited
+
+- **Events:** title, start and end, all day, place, notes; created and
+  deleted. Times are written in UTC.
+- **Repeating events are shown and expanded correctly but their rule cannot
+  be made or changed here.** Editing a repeating event changes the whole
+  series and the editor says so; one occurrence cannot be changed alone.
+  Outpost cannot create a repeating event.
+- **Tasks:** title, due day, notes, done; a due *time* set elsewhere is kept
+  unless the day is changed.
+- **Contacts:** name, email addresses, phone numbers, organisation, note.
+  Labels such as "work" on an address that was already there are kept.
+- Reminders and alarms are kept in the file and not shown or sounded.
+
+### Meeting invitations
+
+A message carrying a calendar file shows it as a card: what, when, where,
+who organised it, with Accept, Maybe and Decline. Answering puts the event
+in the chosen calendar (replacing an earlier copy of the same event, so
+changing one's mind does not double it) and mails the answer to the
+organiser as a standard calendar reply, from the account the invitation
+arrived in. Declining removes it from the calendar and still tells the
+organiser. A cancellation is shown as one, with "Remove from my calendar",
+which mails nothing.
+
+- The calendar is checked before anything is mailed: an answer that has been
+  sent cannot be taken back.
+- An invitation on a message that failed its sender checks cannot be
+  answered.
+- Not done: sending invitations, updated invitations replacing the stored
+  event by themselves (the user answers again), counter-proposals, and
+  showing other attendees' answers.
+
+### Not done yet in phase two
+
+- **Tried only against Radicale.** Other servers differ in discovery and in
+  what they accept; the first real server is the test that matters.
+- Sign-in is a password (or an app password). No OAuth, so Google needs an
+  app password and may not work at all for calendars.
+- Month view only: no week or day view, no dragging.
+- Creating or editing repeat rules; changing one occurrence; time zones
+  other than UTC on events made here.
+- Reminders.
+- Address suggestions in the composer from contacts. People has a Write
+  button; the composer's To field does not yet look contacts up.
+- Creating, renaming and deleting calendars from Outpost.
+- Contact photos, postal addresses, birthdays (kept in the file, not shown).
+- Each request opens its own connection; a large first sync is slower than
+  it need be.
+- The index is rebuilt by syncing, not from the files alone.
+
+### Dependencies added
+
+- `calcard` 0.3 (Apache-2.0 or MIT), with `chrono` and `chrono-tz`.
+- `quick-xml` (MIT), `httparse` (MIT or Apache-2.0), `iana-time-zone` (MIT
+  or Apache-2.0).
+- For tests only: Radicale (GPL-3.0), a separate program the tests start.
+  It is not linked into or shipped with Outpost.
+
 ## 2026-11-18 · Milestone 8: settings, shortcuts and system integration
 
 **Order (Decided, owner, 18 November 2026):** milestone 7 (OAuth) is parked

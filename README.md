@@ -11,7 +11,9 @@ conversations: one row each in the list, opening into a tree, and shown in
 the reading pane without the quoted text. Each message shows whether your
 mail server verified its sender, and a message that failed is held at arm's
 length. Settings are one searchable page; there is a menu bar, a tray icon
-and new-mail notifications. Changing and sending mail
+and new-mail notifications. Calendars, tasks and contacts sync with
+CalDAV and CardDAV servers, and meeting invitations can be answered from the
+message. Changing and sending mail
 has so far only been tested against a local test server, not real providers.
 The store and search are tested at a million messages.
 

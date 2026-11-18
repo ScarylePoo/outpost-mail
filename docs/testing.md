@@ -128,6 +128,48 @@ was also compiling the Windows build, and passed in the four runs after it.
 The failure text was not captured. If it shows up again, capture it: a test
 that fails only under load is usually a timing assumption in the test.
 
+## Tests of calendars, tasks and contacts (phase two)
+
+These need **Radicale**, a small CalDAV and CardDAV server, the way the mail
+tests need Dovecot. Each test starts its own on a free port with its own
+storage and one user, and removes it afterwards. Without it they print
+`SKIPPED` (CI sets `OUTPOST_REQUIRE_RADICALE=1`, which makes that a failure).
+
+```sh
+pip install --target ~/outpost-dav radicale
+```
+
+The tests look in the system Python and in `~/outpost-dav` (or wherever
+`OUTPOST_RADICALE` points). Nothing is installed system-wide.
+
+Part of `cargo test`:
+
+- `dav/http.rs`, `dav/client.rs`: addresses, reading answers, reading the
+  server's XML.
+- `dav/item.rs`: events in every time form, repeats across a clock change
+  and with exceptions, edits that keep what other programs wrote, tasks,
+  contacts, invitations and replies.
+- `dav/store.rs`: the lists, the user's choices, changes waiting to be sent.
+- `tests/dav_client.rs`: the client against Radicale.
+- `tests/dav_sync.rs`: two-way sync with a second client changing things at
+  the same moment; an edit made in two places; an unreachable server.
+- `tests/dav_core.rs`: an account end to end through the core's commands.
+- `tests/invitations.rs`: needs Dovecot **and** Radicale: an invitation
+  arrives by mail, is accepted into the calendar, the organiser is
+  answered, it is cancelled and removed.
+
+The app self-test also starts a Radicale if there is one: it adds the
+account, makes an event and a task in the window, ticks the task off, and
+prints what the calendar server ended up holding.
+
+To see the views without a server, run the interface in a browser:
+`/?view=calendar`, `/?view=tasks`, `/?view=people`, and `/?select=3` for a
+message carrying an invitation.
+
+**Seen once, 18 November 2026:** `tests/dav_core.rs` failed once in a run
+where the test's own second client could not list a collection, and passed
+in the 57 runs after it. The message was not captured.
+
 ## Tests of settings and accounts (milestone 8)
 
 Part of `cargo test`: `settings.rs` (general settings kept and kept in

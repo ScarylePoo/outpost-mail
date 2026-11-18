@@ -39,6 +39,10 @@ npm) and ship the notices with the app.
 | `hickory-resolver` (through `mail-auth`) | Looking up signing keys in DNS | MIT or Apache-2.0 |
 | `rsa`, `sha1`, `sha2` (through `mail-auth`) | Verifying signatures | MIT or Apache-2.0 |
 | `ed25519-dalek` (through `mail-auth`) | Verifying signatures | BSD-3-Clause |
+| `calcard` | Reading calendar files and expanding repeating events | MIT or Apache-2.0 |
+| `chrono`, `chrono-tz`, `iana-time-zone` | Dates and time zones | MIT or Apache-2.0 |
+| `quick-xml` | Reading CalDAV and CardDAV answers | MIT |
+| `httparse` | Reading HTTP responses | MIT or Apache-2.0 |
 | `rustls-platform-verifier` | Checking certificates against the system's trust store | MIT or Apache-2.0 |
 | `solid-js` | Interface framework | MIT |
 | `@tauri-apps/api` | Interface side of the Tauri adapter | MIT or Apache-2.0 |
@@ -52,3 +56,4 @@ npm) and ship the notices with the app.
 | `vite`, `vite-plugin-solid` | MIT |
 | `typescript` | Apache-2.0 |
 | `rpassword` (in `outpost-sync` only) | Apache-2.0 |
+| Radicale (a separate program the calendar tests start; not linked or shipped) | GPL-3.0 |

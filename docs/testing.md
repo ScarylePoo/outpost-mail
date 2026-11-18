@@ -79,6 +79,21 @@ keeps what it is given and delivers nothing; it can be told to refuse a
 password or a recipient, to be busy, or to drop the connection after taking a
 message. No test sends mail anywhere.
 
+## Tests of conversations (milestone 5)
+
+Part of `cargo test`. `store/thread.rs` covers how messages are joined
+(reply headers in any arrival order, merging, placing by subject and when
+not to, copies in two folders, one row per conversation through arrivals,
+moves, deletions and a rebuild). `store/reduce.rs` covers what is hidden as
+quoted text or signature and, as important, what is left alone. The
+`conversations` test in `tests/wire_format.rs` goes through the core's
+commands end to end.
+
+To look at the conversation layout without any mail, run the interface in a
+browser (`npm run dev -w ui`) and open `/?open=0&select=0`: the stub account
+has a six-message conversation with a fork, an added person, an attachment
+and a guessed link.
+
 ## The app self-test (milestone 3)
 
 ```sh
@@ -90,6 +105,8 @@ Needs Dovecot and a built app; run it on Linux. Under WSL, pass the path to
 runs the real app against it, adds an account through the interface, delivers
 one more message while the window is open, then works the window as a person
 would: opens a message, flags it, deletes it, searches, replies and sends.
+It then opens the conversation its reply made and reports the tree and the
+reading pane.
 It prints what the window showed and then what the mail server and the (fake)
 outgoing server ended up with. Expect the deleted message in Trash with its
 flag, the reply in Sent, the original marked answered, and one message handed

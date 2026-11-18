@@ -7,6 +7,90 @@ started.
 Status words: **Decided** (owner agreed), **Proposal** (default in use, owner
 has not reviewed), **Finding** (a test result).
 
+## 2026-11-18 · Milestone 5: conversations
+
+**Proposals** unless marked otherwise. Built and tested on made-up mail and
+the throwaway Dovecot. It has not yet been tried on the owner's messiest real
+conversations, which is what the handoff doc asks for before this milestone
+closes.
+
+### How messages are put into conversations
+
+A message joins the conversation of anything it names in `In-Reply-To` or
+`References`, and of anything that names it, whichever arrives first. Two
+conversations that turn out to be one are merged. Copies of a message in
+several folders (Inbox and Sent, say) are one message of the conversation.
+
+A reply that names nothing (some phones and ticket systems) is **placed by
+subject**: under the newest message with the same subject, less `Re:`-style
+prefixes, from the last 30 days, that shares a participant with it. Such a
+link is recorded as a guess and shown as one (dashed connector, "Placed by
+subject" chip), never passed off as certain. A message that is not a reply
+(no `Re:`) is never placed by subject, so two unrelated "Hello" messages stay
+apart. A forward starts a new conversation.
+
+### Conversations are recorded by sort key, not row number
+
+A conversation, and each message's parent, is named by a message's sort key,
+which is fixed when the message is first seen. That lets a rebuild work
+conversations out in memory before rows get their final positions, so rows
+are written once, complete and in list order. (Threading a million messages
+one at a time was far too slow; in memory it is seconds.)
+
+### The list shows one row per conversation, served by the index
+
+In each folder the newest message of each conversation is marked as its
+head, and the conversation list is simply the folder's heads: the same kind
+of index scan as the message list, so it is as fast at any size. Triggers
+keep the mark right when a message arrives, is linked, moves or goes.
+
+A row shows who wrote in the conversation (the user as "You"), how many
+messages it has in every folder, and how many are unread. The row is where
+the conversation's newest message *in that folder* is: a reply the user sent
+does not move the conversation in the inbox, a reply received does.
+
+Opening a row shows the tree: each reply under what it answers, connector
+lines, nesting drawn five deep and flat beyond, a divider where two or more
+days passed, and chips for people added or dropped and for attachments.
+Every line has a fixed height, so the list still never measures anything.
+The list header switches between Conversations and Messages; the choice is
+remembered on this computer.
+
+### The reading pane shows a conversation reduced
+
+Each message is shown without what it quotes and without its signature, with
+"Show quoted text (N lines)", "Show signature" and "Show original" to bring
+each back. Three modes: **This branch** (the selected message and what it
+answers, up to the start), **Whole thread** (the tree order) and **By date**.
+Each message says whom it replies to and who was added or dropped.
+
+Reduction is conservative: when the rules are unsure, text stays visible.
+Quoted history is found by `>` marks, by "On … wrote:" lines, by the header
+block Outlook puts above a quote, and by comparing with the text of the
+message being answered (which catches quotes with no marks at all). In a
+reply, a dated "On … wrote:" line starts the history even when nothing after
+it is marked, as in mail written as HTML only.
+
+### A rebuild compacts the index file
+
+Measured: after a rebuild the index's pages were scattered through the file
+and a first, cold read of a 350,000-message folder's layout took 360 to
+430 ms against a 100 ms target. Rewriting the file at the end of the rebuild
+(`VACUUM`) brings it to 35 to 65 ms, for about 20 seconds more at a million
+messages. Results in `docs/performance-results.md`.
+
+### Not done yet in milestone 5
+
+- Not tried on real, messy conversations (needs the owner's mail).
+- Open conversations close when the folder refreshes (new mail arrives).
+- Keyboard movement inside an open tree; arrow keys move between rows only.
+- Actions on a conversation row (delete, move, mark) apply to the message
+  shown for it, not to the whole conversation.
+- Search results are still single messages.
+- An index from the previous version is discarded and rebuilt from the mail
+  files on first start (as before; proper migrations are still owed before
+  release).
+
 ## 2026-11-18 · Milestone 4 (in progress)
 
 **Proposals** unless marked otherwise. From this milestone the app changes

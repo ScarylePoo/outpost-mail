@@ -2,6 +2,31 @@
 
 How to run these: `docs/testing.md`. Targets come from the handoff doc.
 
+## Milestone 5 · 18 November 2026 · conversations, one million messages
+
+Same mailbox and machine as below. The index now also holds conversations
+(schema 8); the rebuild threads every message and compacts the file.
+
+Linux, file cache emptied before the run ("first" is a truly cold read):
+
+| Operation | First | Typical | Target |
+| --- | --- | --- | --- |
+| Open Inbox (162,790 messages) | 40 ms | 8.5 ms | 100 ms |
+| Open Archive (352,194 messages) | 35 ms | 18.5 ms | 100 ms |
+| Open Inbox as conversations (92,029) | 42 ms | 9.5 ms | 100 ms |
+| Open Archive as conversations (200,206) | 65 ms | 15 ms | 100 ms |
+| Search, word in nearly every message | 5 ms | 0.1 ms | 300 ms |
+| Search, rare word | 17 ms | 0.1 ms | 300 ms |
+
+Rebuild from the mail files: 285 s (212 s reading and indexing, 71 s
+threading, ordering, building indexes and compacting). Index file 2.54 GB,
+36.9% of the mail.
+
+Before compacting was added, the cold figures for the same four opens were
+147, 359, 124 and 218 ms: all missed. See the decision log.
+
+WINDOWS_RESULTS
+
 ## Milestone 1 · 17 November 2026 · one million messages
 
 Same machine for both systems (32 logical CPUs, 16 GB given to WSL2). The

@@ -3,9 +3,11 @@
 A desktop mail client with the layout of classic Outlook, for ordinary IMAP
 accounts, storing every message as its own file. Windows and Linux.
 
-**Status: early development (milestone 4 of 9).** You can add an IMAP account,
+**Status: early development (milestone 5 of 9).** You can add an IMAP account,
 read and search your mail, mark, move, archive and delete it, and write,
-reply to and forward messages, online or offline. Changing and sending mail
+reply to and forward messages, online or offline. Mail is grouped into
+conversations: one row each in the list, opening into a tree, and shown in
+the reading pane without the quoted text. Changing and sending mail
 has so far only been tested against a local test server, not real providers.
 The store and search are tested at a million messages.
 

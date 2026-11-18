@@ -13,6 +13,12 @@ export type Command =
   | { type: "listMessages"; folder: FolderId; offset: number; limit: number; conversations?: boolean }
   | { type: "openMessage"; folder: FolderId; id: number }
   | { type: "openThread"; folder: FolderId; id: number }
+  | { type: "recheckSignature"; folder: FolderId; id: number }
+  | { type: "getProtection" }
+  | { type: "setProtection"; protection: Protection; password?: string | null }
+  | { type: "setProtectionPassword"; current?: string | null; new?: string | null }
+  | { type: "trustMessage"; folder: FolderId; id: number; trusted: boolean; password?: string | null }
+  | { type: "setCheckingServer"; account: FolderId; server: string }
   | { type: "search"; scope: FolderId; text: string; limit: number }
   | { type: "changeFlags"; folder: FolderId; ids: number[]; seen: boolean | null; flagged: boolean | null }
   | { type: "moveMessages"; ids: number[]; to: FolderId }
@@ -52,6 +58,53 @@ export interface FolderInfo {
   role: string | null;
 }
 
+/** Only `verified` may ever be shown with a green check. */
+export type CheckState = "verified" | "unverified" | "notChecked" | "failed";
+
+/** What is known about whether a message is from who it says. */
+export interface SenderCheck {
+  state: CheckState;
+  /** The server whose results these are; empty if there were none to believe. */
+  server: string;
+  checks: {
+    name: "SPF" | "DKIM" | "DMARC";
+    outcome: "pass" | "fail" | "neutral";
+    word: string;
+    sentence: string;
+    aligned: boolean;
+  }[];
+  /** Where a reply would go, when that is not the sender's address. */
+  replyTo: string;
+  replyElsewhere: boolean;
+  ambiguousFrom: boolean;
+  firstTime: boolean;
+  /** The address earlier mail under this name came from. */
+  nameSeenFrom: string;
+  /** A domain the user hears from that the sender's resembles. */
+  lookalikeOf: string;
+}
+
+/** A signature checked again on this computer. */
+export interface SignatureLine {
+  domain: string;
+  outcome: "valid" | "mismatch" | "unknown";
+  sentence: string;
+  aligned: boolean;
+}
+
+/** The protection settings: each its own switch. */
+export interface Protection {
+  disableFailed: boolean;
+  blockRemoteImages: boolean;
+  allowImagesFrom: string[];
+  firstTimeBanner: boolean;
+  lookalikeWarning: boolean;
+  replyWarning: boolean;
+  showLinkDestination: boolean;
+  recheckSignatures: boolean;
+  blockedSenders: string[];
+}
+
 export interface MessageRow {
   id: number;
   index: number;
@@ -68,6 +121,8 @@ export interface MessageRow {
   threadCount: number;
   threadUnread: number;
   senders: string;
+  /** The sender checks. A failed message gets a warning in the list. */
+  check: CheckState;
   /**
    * Not sent by the core. Set by the list for a message picked inside an
    * open conversation: the folder that message is in, which need not be the
@@ -92,6 +147,13 @@ export interface MessageView {
   remoteContentBlocked: boolean;
   /** False while only the message's list data has been synced. */
   downloaded: boolean;
+  senderCheck: SenderCheck;
+  /** Failed its checks: links taken out, attachments off. */
+  restricted: boolean;
+  /** The user chose to trust it despite its failed checks. */
+  trusted: boolean;
+  /** Pictures on the internet were left in for this sender. */
+  remoteImagesShown: boolean;
 }
 
 /** One message of a conversation, reduced to what its sender wrote. */
@@ -106,6 +168,7 @@ export interface ThreadMessage {
   senderAddress: string;
   /** The user wrote this message. */
   mine: boolean;
+  check: CheckState;
   recipients: string;
   date: number;
   unread: boolean;
@@ -148,6 +211,10 @@ export interface AccountInfo {
   status: SyncStatus;
   /** How the account sends mail, once that has been set up. */
   sending: SendingSettings | null;
+  /** The server whose sender checks are believed; empty if none is known. */
+  checkingServer: string;
+  /** False while that is a guess the user has not confirmed. */
+  checkingServerConfirmed: boolean;
 }
 
 export interface SendingSettings {
@@ -181,6 +248,8 @@ export type Response =
   | { type: "searchResults"; rows: MessageRow[] }
   | { type: "message"; message: MessageView }
   | { type: "thread"; thread: ThreadView }
+  | { type: "signatureRechecked"; signatures: SignatureLine[] }
+  | { type: "protection"; protection: Protection; passwordSet: boolean }
   | { type: "attachmentSaved"; path: string; name: string }
   | { type: "draft"; draft: DraftContent }
   | { type: "draftSaved"; id: number }
@@ -200,7 +269,7 @@ export type CoreEvent =
   | { type: "accountSetupFailed"; error: string };
 
 export interface CoreError {
-  code: "badCommand" | "unknownFolder" | "unknownMessage" | "notPossible" | "internal";
+  code: "badCommand" | "unknownFolder" | "unknownMessage" | "notPossible" | "wrongPassword" | "internal";
   message: string;
 }
 
@@ -213,6 +282,12 @@ type ResponseFor = {
   search: "searchResults";
   openMessage: "message";
   openThread: "thread";
+  recheckSignature: "signatureRechecked";
+  getProtection: "protection";
+  setProtection: "protection";
+  setProtectionPassword: "protection";
+  trustMessage: "accepted";
+  setCheckingServer: "accepted";
   changeFlags: "accepted";
   moveMessages: "accepted";
   archiveMessages: "accepted";

@@ -16,10 +16,13 @@ import { SearchResults } from "./list/SearchResults";
 import { Reader } from "./reader/Reader";
 import { AddAccount, PasswordPrompt } from "./accounts/AccountPanels";
 import { autoShellTest } from "./autotest";
+import { asking, loadProtection, messageActions } from "./core/protection";
+import { PasswordAsk, ProtectionPanel } from "./settings/ProtectionPanel";
 
 type Panel =
   | { kind: "none" }
   | { kind: "add" }
+  | { kind: "protection" }
   | { kind: "password"; account: string }
   | { kind: "compose"; account: string; draft: DraftContent; key: number };
 
@@ -98,6 +101,11 @@ export function App() {
     return p.kind === "password" ? accounts().find((a) => a.id === p.account) : undefined;
   });
   const searching = () => query().trim().length > 0;
+  /** The junk folder of the account on show, if it has one. */
+  const junkFolder = () => {
+    const id = folderId();
+    return id ? folders().find((f) => f.role === "junk" && accountOf(f.id) === accountOf(id)) : undefined;
+  };
   const needsSignIn = (a: AccountInfo) => a.status.state === "needsPassword" || a.status.state === "signInFailed";
 
   function loadFolders(select?: (all: FolderInfo[]) => FolderInfo | undefined) {
@@ -130,7 +138,7 @@ export function App() {
     setQuery("");
     setFolderId(id);
     // A message being written stays open while the user looks elsewhere.
-    if (panel().kind === "add" || panel().kind === "password") setPanel({ kind: "none" });
+    if (["add", "password", "protection"].includes(panel().kind)) setPanel({ kind: "none" });
   }
 
   onMount(() => {
@@ -139,11 +147,20 @@ export function App() {
       .then((r) => setCoreVersion(r.coreVersion))
       .catch((e) => setNotice(`Core not responding: ${e?.message ?? e}`));
     void loadAccounts();
+    void loadProtection();
+    // What the reading pane's failed-message view can ask for.
+    messageActions.remove = () => void remove();
+    messageActions.moveToJunk = () => {
+      const junk = junkFolder();
+      if (junk) void moveTo(junk.id);
+    };
+    messageActions.hasJunk = () => junkFolder() !== undefined && folder()?.role !== "junk";
     // Development aids, applied once the first folder is open:
     // `?panel=add` opens the add-account panel, `?q=words` starts a search.
     const params = new URLSearchParams(location.search);
     void loadFolders().then(() => {
       if (params.get("panel") === "add") setPanel({ kind: "add" });
+      if (params.get("panel") === "protection") setPanel({ kind: "protection" });
       if (params.get("q")) setQuery(params.get("q")!);
     });
 
@@ -164,7 +181,13 @@ export function App() {
           break;
         case "foldersChanged":
           clearTimeout(foldersTimer);
-          foldersTimer = setTimeout(() => void loadFolders(), 100);
+          foldersTimer = setTimeout(() => {
+            void loadFolders();
+            // Also sent when the server whose sender checks are believed
+            // changes, which changes what the list shows.
+            void loadAccounts();
+            if (accountOf(folderId() ?? "") === event.account) list?.refresh();
+          }, 100);
           break;
         case "accountAdded":
           void loadAccounts();
@@ -457,6 +480,9 @@ export function App() {
       <header class="toolbar">
         <span class="brand">Outpost</span>
         <button onClick={() => setPanel({ kind: "add" })}>Add account</button>
+        <button onClick={() => setPanel({ kind: "protection" })} title="Sender checks, pictures, links and warnings">
+          Protection
+        </button>
         <button onClick={syncNow} disabled={!canSync()} title="Check every folder for changes now">
           Sync now
         </button>
@@ -654,6 +680,16 @@ export function App() {
           <Match when={panel().kind === "add"}>
             <AddAccount onDone={accountAdded} onCancel={() => setPanel({ kind: "none" })} />
           </Match>
+          <Match when={panel().kind === "protection"}>
+            <ProtectionPanel
+              accounts={accounts()}
+              onAccountsChanged={() => {
+                void loadAccounts();
+                list?.refresh();
+              }}
+              onClose={() => setPanel({ kind: "none" })}
+            />
+          </Match>
           <Match when={composing()} keyed>
             {(c) => (
               <Composer
@@ -690,6 +726,8 @@ export function App() {
           <Match when={folderId()}>{(id) => <Reader folder={id()} row={message()} onOpened={opened} />}</Match>
         </Switch>
       </section>
+
+      <Show when={asking()}>{(a) => <PasswordAsk why={a().why} error={a().error} answer={a().answer} />}</Show>
 
       <Show when={undo()}>
         {(u) => (

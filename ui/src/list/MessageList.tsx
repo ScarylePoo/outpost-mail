@@ -423,6 +423,7 @@ export function MessageList(props: {
       threadCount: head?.threadCount ?? thread.messages.length,
       threadUnread: head?.threadUnread ?? 0,
       senders: head?.senders ?? "",
+      check: message.check,
       inFolder: message.folder,
     });
   }
@@ -656,6 +657,11 @@ export function MessageList(props: {
                           </button>
                         </Show>
                         <span class="row-sender">{many() ? r().senders : r().senderName}</span>
+                        <Show when={r().check === "failed"}>
+                          <span class="row-warning" title="This message failed its sender checks">
+                            ⚠ Failed checks
+                          </span>
+                        </Show>
                         <Show when={r().flagged}>
                           <span class="row-flag" title="Flagged">
                             ⚑

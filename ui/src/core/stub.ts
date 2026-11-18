@@ -4,7 +4,18 @@
 // are exercised. It is not a port of the Rust generator and the two will not
 // produce the same rows.
 
-import type { Command, CoreEvent, FolderInfo, MessageRow, Response, ResponseTo, Transport } from "./api";
+import type {
+  CheckState,
+  Command,
+  CoreEvent,
+  FolderInfo,
+  MessageRow,
+  Protection,
+  Response,
+  ResponseTo,
+  SenderCheck,
+  Transport,
+} from "./api";
 
 const FOLDERS: FolderInfo[] = [
   { id: "stub", name: "Browser stub account", depth: 0, total: 0, unread: 0, role: null },
@@ -39,6 +50,61 @@ function preview(i: number): string {
   return parts.join(" ");
 }
 
+// Sender checks, so each state can be seen in a browser: message 1 (text)
+// and message 12 (HTML) fail, message 2 is a lookalike first-time sender.
+function checkOf(i: number): CheckState {
+  if (i % 11 === 1) return "failed";
+  return (["notChecked", "verified", "unverified", "verified"] as const)[i % 4]!;
+}
+
+function senderCheckOf(i: number, address: string): SenderCheck {
+  const state = checkOf(i);
+  const domain = address.split("@")[1] ?? "example.com";
+  const line = (name: "SPF" | "DKIM" | "DMARC", outcome: "pass" | "fail" | "neutral", word: string, sentence: string, aligned: boolean) => ({ name, outcome, word, sentence, aligned });
+  const checks =
+    state === "failed"
+      ? [
+          line("SPF", "pass", "pass", "The server that delivered this is allowed to send for mailer.example. That is not the domain in the From line.", false),
+          line("DKIM", "pass", "pass", "Signed by mailer.example, and the signature is valid. That is not the domain in the From line.", false),
+          line("DMARC", "fail", "fail", `Does not meet ${domain}'s own rules for mail that uses its name.`, true),
+        ]
+      : state === "verified"
+        ? [
+            line("SPF", "pass", "pass", `The server that delivered this is allowed to send for ${domain}.`, true),
+            line("DKIM", "pass", "pass", `Signed by ${domain}, and the signature is valid.`, true),
+            line("DMARC", "pass", "pass", `Meets ${domain}'s own rules for mail that uses its name.`, true),
+          ]
+        : state === "unverified"
+          ? [line("DKIM", "pass", "pass", "Signed by lists.example, and the signature is valid. That is not the domain in the From line.", false)]
+          : [];
+  return {
+    state,
+    server: state === "notChecked" ? "" : "mx.home.example",
+    checks,
+    replyTo: state === "failed" ? "collect@elsewhere.example" : "",
+    replyElsewhere: state === "failed",
+    ambiguousFrom: false,
+    firstTime: state === "failed" || i % 11 === 2,
+    nameSeenFrom: state === "failed" ? `service@${domain}` : "",
+    lookalikeOf: i % 11 === 2 ? "exarnple.com" : "",
+  };
+}
+
+let protection: Protection = {
+  disableFailed: true,
+  blockRemoteImages: true,
+  allowImagesFrom: [],
+  firstTimeBanner: true,
+  lookalikeWarning: true,
+  replyWarning: true,
+  showLinkDestination: true,
+  recheckSignatures: true,
+  blockedSenders: [],
+};
+let password: string | null = null;
+const trusted = new Set<number>();
+const wrongPassword = () => ({ code: "wrongPassword", message: "the settings password is needed, and that was not it" });
+
 function row(i: number): MessageRow {
   const name = NAMES[hash(i) % NAMES.length]!;
   const flags = hash(i * 13 + 5) % 100;
@@ -55,6 +121,7 @@ function row(i: number): MessageRow {
     threadCount: i % 5 === 0 ? 6 : 1,
     threadUnread: i % 5 === 0 ? 2 : flags < 12 ? 1 : 0,
     senders: i % 5 === 0 ? "Dana, You, Sam, Priya" : "",
+    check: checkOf(i),
     hasAttachment: flags >= 90,
   };
 }
@@ -119,6 +186,10 @@ function answer(command: Command): Response {
           attachments: r.hasAttachment ? [{ name: "report.pdf", mimeType: "application/pdf", size: 48_213 }] : [],
           remoteContentBlocked: kind === "html" && command.id % 2 === 0,
           downloaded: kind !== "pending",
+          senderCheck: senderCheckOf(command.id, r.senderAddress),
+          restricted: checkOf(command.id) === "failed" && protection.disableFailed && !trusted.has(command.id),
+          trusted: trusted.has(command.id),
+          remoteImagesShown: false,
         },
       };
     }
@@ -134,6 +205,7 @@ function answer(command: Command): Response {
         senderName: r.senderName,
         senderAddress: r.senderAddress,
         mine: false,
+        check: checkOf(command.id),
         recipients: "You <you@example.com>, Sam Okafor <sam@example.com>",
         date: r.date,
         unread: r.unread,
@@ -164,6 +236,43 @@ function answer(command: Command): Response {
         },
       };
     }
+    case "recheckSignature":
+      return {
+        type: "signatureRechecked",
+        signatures: [
+          checkOf(command.id) === "failed"
+            ? {
+                domain: "mailer.example",
+                outcome: "unknown",
+                sentence:
+                  "Could not re-check the signature from mailer.example: the sender no longer publishes the key it was made with. That is normal for older mail and does not mean the message is forged.",
+                aligned: false,
+              }
+            : {
+                domain: "example.com",
+                outcome: "valid",
+                sentence: "Outpost checked the signature from example.com again itself, and it is valid.",
+                aligned: true,
+              },
+        ],
+      };
+    case "getProtection":
+      return { type: "protection", protection, passwordSet: password !== null };
+    case "setProtection":
+      if (password !== null && command.password !== password) throw wrongPassword();
+      protection = command.protection;
+      return { type: "protection", protection, passwordSet: password !== null };
+    case "setProtectionPassword":
+      if (password !== null && command.current !== password) throw wrongPassword();
+      password = command.new || null;
+      return { type: "protection", protection, passwordSet: password !== null };
+    case "trustMessage":
+      if (command.trusted && password !== null && command.password !== password) throw wrongPassword();
+      if (command.trusted) trusted.add(command.id);
+      else trusted.delete(command.id);
+      return { type: "accepted" };
+    case "setCheckingServer":
+      return { type: "accepted" };
     case "saveAttachment":
       return { type: "attachmentSaved", path: "/downloads/report.pdf", name: "report.pdf" };
     case "locateMessage":

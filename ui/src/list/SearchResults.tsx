@@ -65,6 +65,11 @@ export function SearchResults(props: {
             <div class="row-top">
               <span class="row-dot" />
               <span class="row-sender">{row.senderName}</span>
+              <Show when={row.check === "failed"}>
+                <span class="row-warning" title="This message failed its sender checks">
+                  ⚠ Failed checks
+                </span>
+              </Show>
               <Show when={row.flagged}>
                 <span class="row-flag" title="Flagged">
                   ⚑

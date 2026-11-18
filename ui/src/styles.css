@@ -1281,3 +1281,270 @@ button.inline:hover {
   height: 1px;
   background: var(--border);
 }
+
+/* Sender checks */
+
+:root {
+  --ok: #1a7f37;
+  --warn-back: #fff4d6;
+  --warn-edge: #e2b93b;
+  --danger-back: #fdecea;
+}
+
+.sender-check {
+  margin: 0 0 10px;
+  user-select: text;
+}
+
+.check-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 9px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.check-label.verified {
+  border-color: #b7dfc2;
+  background: #e9f6ec;
+  color: var(--ok);
+}
+
+.check-mark {
+  font-weight: 700;
+}
+
+.check-details {
+  margin: 8px 0 4px;
+  font-size: 13px;
+}
+
+.check-details p {
+  margin: 0 0 6px;
+  color: var(--text-2);
+}
+
+.check-lines {
+  margin: 0 0 6px;
+  padding: 0;
+  list-style: none;
+}
+
+.check-lines li {
+  display: grid;
+  grid-template-columns: 52px 72px 1fr;
+  gap: 8px;
+  padding: 3px 0;
+  border-top: 1px solid var(--hairline);
+}
+
+.check-name {
+  font-weight: 650;
+}
+
+.check-word {
+  color: var(--text-2);
+}
+
+.check-lines li.pass .check-word {
+  color: var(--ok);
+  font-weight: 650;
+}
+
+.check-lines li.fail .check-word {
+  color: var(--danger);
+  font-weight: 650;
+}
+
+.check-source {
+  font-size: 12px;
+}
+
+.check-source.mismatch {
+  color: var(--danger);
+}
+
+.failed {
+  margin: 0 0 10px;
+  padding: 12px 14px;
+  border: 1px solid #f0b4ae;
+  border-left: 4px solid var(--danger);
+  border-radius: 6px;
+  background: var(--danger-back);
+}
+
+.failed h2 {
+  margin: 0 0 4px;
+  color: var(--danger);
+  font-size: 15px;
+}
+
+.failed > p {
+  margin: 0 0 10px;
+}
+
+.failed-who {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 3px 14px;
+  margin: 0 0 10px;
+}
+
+.failed-who dt {
+  color: var(--text-2);
+}
+
+.failed-who dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.failed-who dd.odd {
+  color: var(--danger);
+  font-weight: 650;
+}
+
+.failed-aside {
+  color: var(--text-2);
+  font-weight: 400;
+}
+
+.failed .check-lines li {
+  border-top-color: #f3cdc9;
+}
+
+.failed-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.failed-gap {
+  flex: 1;
+}
+
+.low-key {
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.warning {
+  margin: 0 0 8px;
+  padding: 7px 12px;
+  border: 1px solid var(--warn-edge);
+  border-radius: 6px;
+  background: var(--warn-back);
+  overflow-wrap: anywhere;
+}
+
+.failed-turn {
+  border-color: #f0b4ae;
+  background: var(--danger-back);
+}
+
+.message-text.dimmed {
+  opacity: 0.55;
+}
+
+.row-warning {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--danger-back);
+  color: var(--danger);
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.turn-verified {
+  color: var(--ok);
+  font-weight: 700;
+}
+
+/* Protection panel */
+
+.panel.wide {
+  max-width: 620px;
+  overflow-y: auto;
+  max-height: 100%;
+  user-select: text;
+}
+
+.panel h2 {
+  margin: 22px 0 6px;
+  font-size: 14px;
+}
+
+.panel-hint.flush {
+  margin: 0 0 10px;
+}
+
+.panel-list {
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+}
+
+.panel-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 0;
+  border-top: 1px solid var(--hairline);
+}
+
+.panel-server {
+  display: grid;
+  grid-template-columns: 1fr max-content;
+  align-items: end;
+  gap: 4px 10px;
+  margin-bottom: 8px;
+}
+
+.panel-server label {
+  margin-bottom: 0;
+}
+
+.panel-server .panel-hint {
+  grid-column: 1 / -1;
+}
+
+.ask-back {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  background: rgb(28 31 35 / 0.35);
+}
+
+.ask {
+  width: min(380px, 90vw);
+  padding: 20px 22px;
+  border-radius: 10px;
+  background: var(--pane);
+  box-shadow: 0 12px 40px rgb(0 0 0 / 0.25);
+}
+
+.ask p {
+  margin: 0 0 10px;
+}
+
+.ask input {
+  display: block;
+  width: 100%;
+  margin-bottom: 12px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+}

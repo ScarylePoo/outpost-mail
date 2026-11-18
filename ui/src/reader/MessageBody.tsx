@@ -8,8 +8,12 @@
 
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { core, type FolderId, type MessageView } from "../core";
+import { protection, protectionVersion, saveProtection } from "../core/protection";
+import { SenderCheckPanel } from "./SenderCheck";
 
-const FRAME_POLICY = "default-src 'none'; img-src data:; style-src 'unsafe-inline'";
+/** Nothing from the network, unless this sender's pictures are allowed. */
+const framePolicy = (pictures: boolean) =>
+  `default-src 'none'; img-src data:${pictures ? " https: http:" : ""}; style-src 'unsafe-inline'`;
 
 const FRAME_STYLE = `
   html { color-scheme: light; }
@@ -26,11 +30,12 @@ const FRAME_STYLE = `
   blockquote { margin: 8px 0; padding-left: 12px; border-left: 3px solid #dcdfe4; color: #5b626c; }
 `;
 
-function frameDocument(html: string): string {
+function frameDocument(html: string, pictures: boolean, dimmed: boolean): string {
   return (
     `<!doctype html><html><head><meta charset="utf-8">` +
-    `<meta http-equiv="Content-Security-Policy" content="${FRAME_POLICY}">` +
-    `<style>${FRAME_STYLE}</style></head><body>${html}</body></html>`
+    `<meta http-equiv="Content-Security-Policy" content="${framePolicy(pictures)}">` +
+    `<meta name="referrer" content="no-referrer">` +
+    `<style>${FRAME_STYLE}${dimmed ? "body { opacity: 0.55; }" : ""}</style></head><body>${html}</body></html>`
   );
 }
 
@@ -45,6 +50,8 @@ export function Attachments(props: {
   folder: FolderId;
   id: number;
   attachments: { name: string; mimeType: string; size: number }[];
+  /** The message failed its sender checks: nothing can be saved. */
+  locked?: boolean;
 }) {
   const [saved, setSaved] = createSignal<{ path: string; name: string }>();
   const [error, setError] = createSignal("");
@@ -65,11 +72,16 @@ export function Attachments(props: {
             <li title={a.mimeType}>
               <span class="attachment-name">{a.name}</span>
               <span class="attachment-size">{formatSize(a.size)}</span>
-              <button onClick={() => save(index())}>Save</button>
+              <Show when={!props.locked}>
+                <button onClick={() => save(index())}>Save</button>
+              </Show>
             </li>
           )}
         </For>
       </ul>
+      <Show when={props.locked}>
+        <div class="message-note">Attachments are switched off because this message failed its sender checks.</div>
+      </Show>
       <Show when={saved()}>
         {(s) => (
           <div class="message-note">
@@ -99,12 +111,18 @@ export function MessageBody(props: {
   const [link, setLink] = createSignal("");
   const [copied, setCopied] = createSignal(false);
   const shown = createMemo(() => props.id);
+  /** Bumped to read the same message again (after trusting it, say). */
+  const [again, setAgain] = createSignal(0);
   let request = 0;
+  let last: number | undefined;
 
   createEffect(
-    on(shown, (id) => {
+    on([shown, again, protectionVersion], ([id]) => {
       const mine = ++request;
-      setView(undefined);
+      // The same message read again keeps what is on screen until the new
+      // version arrives.
+      if (id !== last) setView(undefined);
+      last = id;
       setError("");
       setLink("");
       core
@@ -136,11 +154,28 @@ export function MessageBody(props: {
       const href = linkAt(e.target);
       if (href) {
         e.preventDefault();
+        if (!protection().showLinkDestination && /^(https?:|mailto:)/i.test(href.trim())) {
+          core.openLink(href).catch((err) => setError(`Could not open the link: ${err?.message ?? err}`));
+          return;
+        }
         setCopied(false);
         setLink(href);
       }
     });
     doc.addEventListener("auxclick", (e) => linkAt(e.target) && e.preventDefault());
+  }
+
+  async function allowPictures(address: string) {
+    const p = protection();
+    const sender = address.toLowerCase();
+    try {
+      await saveProtection(`To always load pictures from ${sender}`, {
+        ...p,
+        allowImagesFrom: [...p.allowImagesFrom.filter((a) => a !== sender), sender],
+      });
+    } catch (e) {
+      setError(String((e as Error)?.message ?? e));
+    }
   }
 
   async function copyLink() {
@@ -163,18 +198,34 @@ export function MessageBody(props: {
               </div>
             }
           >
+            <SenderCheckPanel folder={props.folder} view={v()} onChanged={() => setAgain((n) => n + 1)} />
             <Show when={v().remoteContentBlocked}>
-              <div class="message-note">Pictures from the internet were not loaded.</div>
+              <div class="message-note">
+                Pictures from the internet were not loaded.
+                <Show when={!v().restricted && v().senderAddress}>
+                  {" "}
+                  <button class="inline" onClick={() => void allowPictures(v().senderAddress)}>
+                    Always load pictures from {v().senderAddress}
+                  </button>
+                </Show>
+              </div>
             </Show>
             <Show when={!props.bare}>
-              <Attachments folder={props.folder} id={props.id} attachments={v().attachments} />
+              <Attachments folder={props.folder} id={props.id} attachments={v().attachments} locked={v().restricted} />
             </Show>
-            <Show when={v().html !== null} fallback={<pre class="message-text">{v().text ?? ""}</pre>}>
+            <Show
+              when={v().html !== null}
+              fallback={
+                <pre class="message-text" classList={{ dimmed: v().restricted }}>
+                  {v().text ?? ""}
+                </pre>
+              }
+            >
               <iframe
                 class="message-frame"
                 title="Message"
                 sandbox="allow-same-origin"
-                srcdoc={frameDocument(v().html!)}
+                srcdoc={frameDocument(v().html!, v().remoteImagesShown, v().restricted)}
                 onLoad={(e) => watchFrame(e.currentTarget)}
               />
             </Show>

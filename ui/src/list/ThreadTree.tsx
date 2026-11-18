@@ -99,6 +99,11 @@ export function ThreadTree(props: {
                   <span class="tree-sender">
                     {line.message.mine ? "You" : firstName(line.message.senderName) || line.message.senderAddress}
                   </span>
+                  <Show when={line.message.check === "failed"}>
+                    <span class="row-warning" title="This message failed its sender checks">
+                      ⚠
+                    </span>
+                  </Show>
                   <Show when={line.message.guessed}>
                     <span class="chip guess">Placed by subject</span>
                   </Show>

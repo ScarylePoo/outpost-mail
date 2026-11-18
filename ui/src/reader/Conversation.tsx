@@ -117,12 +117,27 @@ function Message(props: {
           <Show when={!m().mine && m().senderAddress && m().senderAddress !== m().senderName}>
             <span class="turn-address">{m().senderAddress}</span>
           </Show>
+          <Show when={m().check === "verified"}>
+            <span class="turn-verified" title="Verified sender">
+              ✓
+            </span>
+          </Show>
           <span class="turn-context">{context()}</span>
         </span>
         <span class="turn-date" title={formatLongDate(m().date)}>
           {formatDate(m().date)}
         </span>
       </header>
+      <Show when={m().check === "failed"}>
+        <div class="warning failed-turn">
+          This message failed its sender checks and may not be from who it says.{" "}
+          <Show when={!original()}>
+            <button class="inline" onClick={() => setOriginal(true)}>
+              Show the checks
+            </button>
+          </Show>
+        </div>
+      </Show>
       <Show when={m().guessed || m().added.length > 0 || m().dropped.length > 0 || m().folder !== props.listFolder}>
         <div class="turn-chips">
           <Show when={m().guessed}>

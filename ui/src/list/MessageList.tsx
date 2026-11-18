@@ -22,6 +22,11 @@ export interface ListHandle {
   rowCount(): number;
   /** Selects the row at this position and scrolls it into view. */
   select(index: number): void;
+  /**
+   * Reloads the folder after it changed, keeping the reader's place: the
+   * same message stays at the top of the view and the same one selected.
+   */
+  refresh(): void;
 }
 
 export function MessageList(props: {
@@ -38,6 +43,11 @@ export function MessageList(props: {
   let pages = new Map<number, MessageRow[]>();
   let pending = new Set<number>();
   let generation = 0;
+  /** Bumped when the cached rows are replaced, so late replies are dropped. */
+  let epoch = 0;
+  let selectedId: number | undefined;
+  let refreshing = false;
+  let refreshAgain = false;
   let lastTop = 0;
   let visFirst = 0;
   let visLast = -1;
@@ -62,17 +72,18 @@ export function MessageList(props: {
     if (pages.has(page) || pending.has(page)) return;
     pending.add(page);
     const gen = generation;
+    const from = epoch;
     core
       .send({ type: "listMessages", folder: props.folder, offset: page * PAGE, limit: PAGE })
       .then((r) => {
-        if (gen !== generation) return;
+        if (gen !== generation || from !== epoch) return;
         pending.delete(page);
         pages.set(page, r.rows);
         evict(page);
         setDataTick((t) => t + 1);
       })
       .catch((e) => {
-        if (gen !== generation) return;
+        if (gen !== generation || from !== epoch) return;
         pending.delete(page);
         setError(String(e?.message ?? e));
       });
@@ -132,9 +143,96 @@ export function MessageList(props: {
     update();
   }
 
+  async function refresh() {
+    if (status() !== "ready") return;
+    if (refreshing) {
+      refreshAgain = true;
+      return;
+    }
+    refreshing = true;
+    const gen = generation;
+    const folder = props.folder;
+    try {
+      // Remember what is at the top of the view, by message rather than by
+      // position: positions shift when mail arrives above it.
+      const top = scroller.scrollTop;
+      let anchor: { id: number; into: number } | undefined;
+      if (top > 4) {
+        for (let i = visFirst; i <= visLast; i++) {
+          const row = getRow(i);
+          if (row) {
+            anchor = { id: row.id, into: top - layout.offsets[i]! };
+            break;
+          }
+        }
+      }
+      const locate = (id: number | undefined) =>
+        id === undefined
+          ? Promise.resolve(null)
+          : core.send({ type: "locateMessage", folder, id }).then((r) => r.index);
+      const [fresh, anchorIndex, selectedIndex] = await Promise.all([
+        core.send({ type: "folderLayout", folder }),
+        locate(anchor?.id),
+        locate(selectedId),
+      ]);
+      if (gen !== generation) return;
+
+      const nextLayout = buildLayout(fresh.previewLens, width);
+      const n = nextLayout.lines.length;
+      let nextTop = 0;
+      if (anchor && anchorIndex !== null && anchorIndex < n) {
+        nextTop = nextLayout.offsets[anchorIndex]! + anchor.into;
+      } else if (anchor) {
+        nextTop = Math.min(top, nextLayout.offsets[n]!);
+      }
+
+      // Fetch what will be on screen before swapping anything, so the list
+      // changes in one step with no blank rows in between.
+      const rows = new Map<number, MessageRow[]>();
+      if (n > 0) {
+        const first = Math.max(0, rowAt(nextLayout, nextTop) - OVERSCAN);
+        const last = Math.min(n - 1, rowAt(nextLayout, nextTop + scroller.clientHeight) + OVERSCAN);
+        const fetches: Promise<unknown>[] = [];
+        for (let p = Math.floor(first / PAGE); p <= Math.floor(last / PAGE); p++) {
+          fetches.push(
+            core
+              .send({ type: "listMessages", folder, offset: p * PAGE, limit: PAGE })
+              .then((r) => rows.set(p, r.rows)),
+          );
+        }
+        await Promise.all(fetches);
+        if (gen !== generation) return;
+      }
+
+      epoch++;
+      pages = rows;
+      pending = new Set();
+      previewLens = fresh.previewLens;
+      layout = nextLayout;
+      setTotal(n);
+      setHeight(layout.offsets[n]!);
+      setLayoutTick((t) => t + 1);
+      scroller.scrollTop = nextTop;
+      lastTop = nextTop;
+      if (selectedIndex === null) selectedId = undefined;
+      setSelected(selectedIndex ?? -1);
+      setDataTick((t) => t + 1);
+      update();
+    } catch {
+      // The list stays as it was; the next change tries again.
+    } finally {
+      refreshing = false;
+      if (refreshAgain) {
+        refreshAgain = false;
+        void refresh();
+      }
+    }
+  }
+
   function select(i: number, reveal: boolean) {
     if (i < 0 || i >= count()) return;
     setSelected(i);
+    selectedId = getRow(i)?.id;
     if (!reveal) return;
     const top = layout.offsets[i]!;
     const bottom = layout.offsets[i + 1]!;
@@ -167,6 +265,7 @@ export function MessageList(props: {
       () => props.folder,
       (folder) => {
         const gen = ++generation;
+        selectedId = undefined;
         pages = new Map();
         pending = new Set();
         previewLens = [];
@@ -202,7 +301,9 @@ export function MessageList(props: {
   createEffect(() => {
     dataTick();
     const i = selected();
-    props.onSelect(i >= 0 ? getRow(i) : undefined);
+    const row = i >= 0 ? getRow(i) : undefined;
+    if (row) selectedId = row.id;
+    props.onSelect(row);
   });
 
   onMount(() => {
@@ -222,6 +323,7 @@ export function MessageList(props: {
       scroller,
       rowCount: count,
       select: (index) => select(index, true),
+      refresh: () => void refresh(),
       blankVisible() {
         let blank = 0;
         for (let i = visFirst; i <= visLast; i++) if (!getRow(i)) blank++;

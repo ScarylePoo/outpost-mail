@@ -41,6 +41,10 @@ button {
   color: inherit;
 }
 
+input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+
 .app {
   height: 100%;
   display: grid;
@@ -91,6 +95,12 @@ button {
   color: var(--text-3);
 }
 
+.toolbar button.quiet {
+  border-color: transparent;
+  background: none;
+  color: var(--text-3);
+}
+
 /* Folder tree */
 
 .folders {
@@ -100,9 +110,34 @@ button {
 }
 
 .account {
-  padding: 6px 8px 4px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 8px 4px;
   font-weight: 600;
   color: var(--text-2);
+}
+
+.account:first-child {
+  padding-top: 4px;
+}
+
+.account-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sign-in {
+  flex: none;
+  padding: 1px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  background: none;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .folder {
@@ -162,6 +197,69 @@ button {
 
 .list-header strong {
   color: var(--text);
+}
+
+.search {
+  display: flex;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.search input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font: inherit;
+  color: inherit;
+  background: var(--pane);
+  user-select: text;
+}
+
+.search input:focus {
+  outline: 2px solid var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.search-scope {
+  flex: none;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.list-holder {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Hidden, not removed: the list keeps its scroll position and loaded rows. */
+.list-holder.hidden {
+  display: none;
+}
+
+/* Search results are an ordinary flowing list. */
+.results .row.result {
+  position: static;
+  contain: none;
+  height: auto;
+}
+
+.result-preview {
+  -webkit-line-clamp: 2;
+  max-height: calc(var(--line) * 2);
+}
+
+.results-more {
+  padding: 12px 14px;
+  color: var(--text-3);
+  text-align: center;
 }
 
 .list {
@@ -446,6 +544,121 @@ button {
   font: 12px/1.5 ui-monospace, "Cascadia Mono", "DejaVu Sans Mono", Consolas, monospace;
 }
 
+/* Panels: forms shown in the reading area */
+
+.panel {
+  max-width: 460px;
+  padding: 28px 32px;
+  user-select: none;
+}
+
+.panel h1 {
+  margin: 0 0 8px;
+  font-size: 20px;
+  line-height: 1.3;
+  font-weight: 650;
+}
+
+.panel-note,
+.panel-hint {
+  margin: 0 0 16px;
+  color: var(--text-2);
+}
+
+.panel-hint {
+  margin: -6px 0 14px 24px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.panel label {
+  display: block;
+  margin-bottom: 12px;
+  font-weight: 600;
+}
+
+.panel input[type="text"],
+.panel input[type="password"] {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font: inherit;
+  font-weight: 400;
+  color: inherit;
+  user-select: text;
+}
+
+.panel input:focus {
+  outline: 2px solid var(--accent-soft);
+  border-color: var(--accent);
+}
+
+.panel-row {
+  display: flex;
+  gap: 10px;
+}
+
+.panel-row .grow {
+  flex: 1;
+}
+
+.panel-row .narrow {
+  width: 84px;
+}
+
+.panel label.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 400;
+}
+
+.panel-warning,
+.panel-error {
+  margin: 0 0 14px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.panel-warning {
+  background: #fff4e0;
+  color: #7a4b00;
+}
+
+.panel-error {
+  background: #fdecea;
+  color: var(--danger);
+  user-select: text;
+}
+
+.panel-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.panel-actions button {
+  padding: 6px 14px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--pane);
+}
+
+.panel-actions button.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+.panel-actions button:disabled {
+  opacity: 0.6;
+}
+
 /* Status bar */
 
 .statusbar {
@@ -456,4 +669,19 @@ button {
   border-top: 1px solid var(--border);
   color: var(--text-2);
   font-size: 12px;
+}
+
+.status-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-text.problem {
+  color: var(--danger);
+}
+
+.statusbar-right {
+  flex: none;
+  margin-left: 12px;
 }

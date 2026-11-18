@@ -31,13 +31,27 @@ fn shell_test_requested() -> bool {
 #[tauri::command]
 fn shell_test_report(app: tauri::AppHandle, report: String) {
     if let Some(path) = std::env::var_os(SHELL_TEST_VAR) {
+        // "READY" is a progress marker from the app self-test: the test
+        // driver waits for it, and the app carries on.
+        let finished = report != "READY";
         if let Err(e) = std::fs::write(&path, report) {
             eprintln!("could not write shell test report: {e}");
             app.exit(1);
             return;
         }
-        app.exit(0);
+        if finished {
+            app.exit(0);
+        }
     }
+}
+
+/// App self-test support (docs/testing.md). When OUTPOST_PROBE_ACCOUNT holds
+/// account details as JSON, the interface adds that account, watches what
+/// happens for a few seconds and reports what the window shows through
+/// `shell_test_report`. Only ever pointed at a local test server.
+#[tauri::command]
+fn probe_account() -> Option<String> {
+    std::env::var("OUTPOST_PROBE_ACCOUNT").ok()
 }
 
 fn main() {
@@ -62,7 +76,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             core_command,
             shell_test_requested,
-            shell_test_report
+            shell_test_report,
+            probe_account
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Outpost");

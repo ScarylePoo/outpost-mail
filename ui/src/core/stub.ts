@@ -82,8 +82,16 @@ function answer(command: Command): Response {
       for (let i = start; i < end; i++) rows.push(row(i));
       return { type: "messages", folder: command.folder, offset: start, total, rows };
     }
-    case "search":
-      return { type: "searchResults", rows: [] };
+    case "search": {
+      // Pretend: rows whose text contains the last word typed.
+      const word = command.text.trim().split(/\s+/).pop()?.toLowerCase() ?? "";
+      const rows: MessageRow[] = [];
+      for (let i = 0; i < 3000 && rows.length < command.limit; i++) {
+        const r = row(i);
+        if (word && `${r.subject} ${r.preview} ${r.senderName}`.toLowerCase().includes(word)) rows.push(r);
+      }
+      return { type: "searchResults", rows };
+    }
     case "openMessage": {
       const r = row(command.id);
       // Every third message is HTML, one in nine is not downloaded yet, so

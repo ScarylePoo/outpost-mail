@@ -22,6 +22,8 @@ function statusText(status: SyncStatus | undefined): string {
       return "";
     case "notSyncing":
       return "Not syncing: this mail is only stored here";
+    case "indexing":
+      return status.detail || "Reading the mail on this computer…";
     case "needsPassword":
       return "Password needed to sync";
     case "connecting":

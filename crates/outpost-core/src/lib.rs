@@ -151,13 +151,22 @@ impl Core {
             }),
         };
         for account in core.accounts() {
-            let Some(config) = &account.config else { continue };
-            match core.inner.secrets.get(&config.secret_key(&account.name)) {
-                Some(password) => {
-                    account.live.lock().unwrap().password = Some(password);
-                    core.start_sync(&account);
-                }
-                None => core.set_status(&account, status(SyncState::NeedsPassword, "")),
+            if let Some(config) = &account.config {
+                let stored = core.inner.secrets.get(&config.secret_key(&account.name));
+                account.live.lock().unwrap().password = stored;
+            }
+            // Also covers an index that is simply empty while there is mail
+            // on disk: a rebuild that was interrupted, or mail copied in.
+            let index = account.store.index();
+            let empty_but_mail = index.folders().map(|f| f.is_empty()).unwrap_or(false)
+                && std::fs::read_dir(account.store.mail_root()).is_ok_and(|mut d| d.next().is_some());
+            if index.discarded_old() || empty_but_mail {
+                // The index was from an older version and is now empty. The
+                // mail is all still on disk: read it back in before anything
+                // else, so the account is never shown empty.
+                core.reindex_then_sync(&account);
+            } else {
+                core.begin(&account);
             }
         }
         Ok(core)
@@ -188,6 +197,45 @@ impl Core {
         self.inner.sink.emit(Event::AccountStatus {
             account: account.id.clone(),
             status: new,
+        });
+    }
+
+    /// Starts an account's sync if it can sync, or says what it is waiting
+    /// for.
+    fn begin(&self, account: &Arc<Account>) {
+        if account.config.is_none() {
+            self.set_status(account, status(SyncState::NotSyncing, ""));
+        } else if account.live.lock().unwrap().password.is_none() {
+            self.set_status(account, status(SyncState::NeedsPassword, ""));
+        } else {
+            self.start_sync(account);
+        }
+    }
+
+    /// Rebuilds an account's index from its mail files in the background,
+    /// reporting progress, and then starts its sync.
+    fn reindex_then_sync(&self, account: &Arc<Account>) {
+        self.set_status(account, status(SyncState::Indexing, "Reading the mail on this computer…"));
+        let (core, account) = (self.clone(), account.clone());
+        self.inner.runtime.spawn_blocking(move || {
+            let result = account.store.rebuild(true, |progress| {
+                if let store::rebuild::Progress::Loading { done, total } = progress {
+                    core.set_status(
+                        &account,
+                        status(SyncState::Indexing, format!("Reading the mail on this computer: {done} of {total}")),
+                    );
+                }
+            });
+            core.inner.sink.emit(Event::FoldersChanged {
+                account: account.id.clone(),
+            });
+            match result {
+                Ok(_) => core.begin(&account),
+                Err(e) => core.set_status(
+                    &account,
+                    status(SyncState::Offline, format!("Could not read the mail on this computer: {e}")),
+                ),
+            }
         });
     }
 

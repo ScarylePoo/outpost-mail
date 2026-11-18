@@ -185,3 +185,37 @@ fn adding_an_account_needs_somewhere_to_keep_it() {
         .unwrap_err();
     assert_eq!(refused.code, ErrorCode::NotPossible);
 }
+
+#[test]
+fn an_out_of_date_index_is_rebuilt_from_the_mail_files_by_itself() {
+    use outpost_core::store::maildir::Flags;
+    use outpost_core::store::Store;
+    let data = TempDir::new();
+    let dir = data.path().join("accounts/old");
+    {
+        let store = Store::open(&dir).unwrap();
+        let inbox = store.create_folder(&["INBOX"]).unwrap();
+        for n in 0..25 {
+            store.add_message(inbox, &message(n, &format!("kept {n}"), "still here"), Flags::SEEN, Some(n + 1)).unwrap();
+        }
+    }
+    // Make the index look as if an older Outpost wrote it.
+    for file in ["index.sqlite-wal", "index.sqlite-shm"] {
+        let _ = std::fs::remove_file(dir.join(file));
+    }
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        // SQLite keeps user_version as a big-endian number at byte 60.
+        let mut file = std::fs::OpenOptions::new().write(true).open(dir.join("index.sqlite")).unwrap();
+        file.seek(SeekFrom::Start(60)).unwrap();
+        file.write_all(&1u32.to_be_bytes()).unwrap();
+    }
+
+    let (core, events) = start(&data, Arc::new(MemorySecrets::default()));
+    wait_for(&events, "the rebuild to finish", |e| matches!(e, Event::FoldersChanged { .. }).then_some(()));
+    wait_for_state(&events, SyncState::NotSyncing);
+    let tree = folders(&core);
+    let inbox = tree.iter().find(|f| f.role.as_deref() == Some("inbox")).expect("the inbox is back");
+    assert_eq!(inbox.total, 25);
+    assert_eq!(subjects(&core, &inbox.id).len(), 25);
+}

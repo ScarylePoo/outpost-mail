@@ -148,6 +148,8 @@ pub enum Event {
 pub enum SyncState {
     /// The account is only being browsed; nothing syncs it.
     NotSyncing,
+    /// The index is being rebuilt from the mail files on this computer.
+    Indexing,
     /// A password is needed before sync can start.
     NeedsPassword,
     Connecting,

@@ -179,6 +179,8 @@ pub struct PendingRename {
 
 pub struct Index {
     path: PathBuf,
+    /// The file held an index from an older version, which was discarded.
+    discarded_old: bool,
     writer: Mutex<Connection>,
     readers: Mutex<Vec<Connection>>,
 }
@@ -191,9 +193,10 @@ impl Index {
         configure(&writer)?;
         writer.pragma_update(None, "journal_mode", "WAL")?;
         writer.pragma_update(None, "synchronous", "NORMAL")?;
-        migrate(&writer)?;
+        let discarded_old = migrate(&writer)?;
         Ok(Index {
             path,
+            discarded_old,
             writer: Mutex::new(writer),
             readers: Mutex::new(Vec::new()),
         })
@@ -201,6 +204,13 @@ impl Index {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// True if opening found an index from an older version and replaced
+    /// it with an empty one. The mail files are untouched; a rebuild
+    /// restores everything they hold.
+    pub fn discarded_old(&self) -> bool {
+        self.discarded_old
     }
 
     pub(super) fn writer(&self) -> MutexGuard<'_, Connection> {
@@ -692,7 +702,9 @@ fn configure(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-fn migrate(conn: &Connection) -> Result<()> {
+/// Brings the file to the current schema. Returns true if that meant
+/// throwing away an older index.
+fn migrate(conn: &Connection) -> Result<bool> {
     let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     match version {
         0 => {
@@ -703,9 +715,9 @@ fn migrate(conn: &Connection) -> Result<()> {
             }
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             conn.execute_batch("COMMIT")?;
-            Ok(())
+            Ok(false)
         }
-        SCHEMA_VERSION => Ok(()),
+        SCHEMA_VERSION => Ok(false),
         // An index from an older Outpost. It holds nothing that cannot be
         // rebuilt, so replace it with an empty one of the current shape.
         older if older < SCHEMA_VERSION => {
@@ -713,7 +725,8 @@ fn migrate(conn: &Connection) -> Result<()> {
                 "DROP TABLE IF EXISTS message_fts; DROP TABLE IF EXISTS message;
                  DROP TABLE IF EXISTS folder; PRAGMA user_version = 0",
             )?;
-            migrate(conn)
+            migrate(conn)?;
+            Ok(true)
         }
         newer => Err(StoreError::IndexVersion(newer)),
     }

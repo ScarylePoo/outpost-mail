@@ -70,6 +70,7 @@ export interface MessageView {
 
 export type SyncState =
   | "notSyncing"
+  | "indexing"
   | "needsPassword"
   | "connecting"
   | "syncing"

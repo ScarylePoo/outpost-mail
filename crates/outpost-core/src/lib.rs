@@ -15,6 +15,7 @@
 //! synthetic one so the interface has something to display.
 
 pub mod api;
+pub mod imap;
 pub mod store;
 pub mod synthetic;
 

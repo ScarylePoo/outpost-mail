@@ -11,3 +11,9 @@ serde.workspace = true
 serde_json.workspace = true
 rusqlite = { version = "0.43", features = ["bundled"] }
 mail-parser = "1"
+# IMAP parsing and serialising. An alpha series whose API moves between
+# releases: pinned exactly, upgraded deliberately. See docs/imap-library-evaluation.md.
+imap-codec = { version = "=2.0.0-alpha.10", features = ["ext_condstore_qresync", "ext_id", "ext_list_extended"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-platform-verifier = "0.7"

@@ -9,6 +9,21 @@ has not reviewed), **Finding** (a test result).
 
 ## 2026-11-17 · Milestone 0
 
+### Decided (provisional): the shell is Tauri
+
+The owner has no native Linux desktop for now; WSL is the only Linux
+available. On that basis Tauri is adopted: the measured test passes on Windows
+and, with `WEBKIT_DISABLE_DMABUF_RENDERER=1`, on WSLg (software-rendered). It
+is provisional because the handoff doc's test called for the owner's Linux
+machine and a by-eye check, and neither has happened. Repeat the shell test on
+the first native Linux desktop that becomes available; the Electron fallback
+stays open until then, so keep all mail logic out of `crates/shell-tauri`.
+
+To decide later: whether the Linux build should set
+`WEBKIT_DISABLE_DMABUF_RENDERER=1` itself. It helped on WSLg, but it is a
+workaround that may cost performance on machines with working graphics, so it
+is not set in code yet.
+
 ### Finding: Tauri passes the shell test on Windows
 
 100,000 rows, release build, WebView2 146, 164 Hz display: 0 slow frames out

@@ -1,0 +1,8 @@
+//! Calendars, tasks and contacts over CalDAV and CardDAV (phase two).
+//!
+//! - `http`: the HTTP client underneath.
+//! - `client`: what a DAV server is asked: where a user's calendars and
+//!   address books are, what is in each, and changes to them.
+
+pub mod client;
+pub mod http;

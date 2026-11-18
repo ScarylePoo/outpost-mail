@@ -23,6 +23,13 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 rustls-platform-verifier = "0.7"
 # Hashing the settings password. Already in the build through rustls.
 ring = "0.17"
+# Phase two: calendars, tasks and contacts.
+# Reading iCalendar and vCard files and expanding repeating events.
+calcard = { version = "0.3", default-features = false }
+# Reading WebDAV's XML answers.
+quick-xml = "0.42"
+# Reading HTTP response headers.
+httparse = "1"
 # DKIM signature re-checks. Pure-Rust cryptography (no C toolchain needed),
 # and the system's own DNS settings for looking up signing keys.
 mail-auth = { version = "0.15", default-features = false, features = ["rust-crypto", "dns-hickory"] }

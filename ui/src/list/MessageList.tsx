@@ -24,6 +24,8 @@ export interface ListHandle {
   rowCount(): number;
   /** First and last row positions currently in view. */
   visibleRange(): [number, number];
+  /** The selected message, if there is one and its data is loaded. */
+  selectedRow(): MessageRow | undefined;
   /** Selects the row at this position and scrolls it into view. */
   select(index: number): void;
   /**
@@ -410,6 +412,7 @@ export function MessageList(props: {
       scroller,
       rowCount: count,
       visibleRange: () => [visFirst, visLast],
+      selectedRow: () => (selected() >= 0 ? getRow(selected()) : undefined),
       select: (index) => select(index, true),
       refresh: () => void refresh(),
       blankVisible() {

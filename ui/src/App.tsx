@@ -502,9 +502,15 @@ export function App() {
                   value={query()}
                   onInput={(e) => {
                     setQuery(e.currentTarget.value);
-                    setMessage(undefined);
+                    // Back to the list: its selection is the message again.
+                    setMessage(e.currentTarget.value.trim() ? undefined : list?.selectedRow());
                   }}
-                  onKeyDown={(e) => e.key === "Escape" && setQuery("")}
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") {
+                      setQuery("");
+                      setMessage(list?.selectedRow());
+                    }
+                  }}
                 />
                 <button class="search-scope" title="Choose where to search" onClick={() => setEverywhere((v) => !v)}>
                   {everywhere() ? "All folders" : "This folder"}

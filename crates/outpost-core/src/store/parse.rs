@@ -29,6 +29,11 @@ pub struct Parsed {
     pub preview: String,
     /// Body text for the search index.
     pub body: String,
+    /// What the topmost Authentication-Results header adds up to (a
+    /// `verify::State` number), and which server wrote it. The verdict only
+    /// means anything if that server is the user's own: see `verify.rs`.
+    pub verdict: u8,
+    pub auth_server: String,
 }
 
 pub fn parse(raw: &[u8]) -> Parsed {
@@ -44,6 +49,8 @@ pub fn parse(raw: &[u8]) -> Parsed {
     for list in [message.to(), message.cc()].into_iter().flatten() {
         append_addresses(&mut recipients, &list);
     }
+
+    let checked = crate::verify::assess(raw, &from_addr, None);
 
     let mut body = message.body_text(0).map(|t| t.into_owned()).unwrap_or_default();
     let preview = preview_of(&body);
@@ -71,6 +78,8 @@ pub fn parse(raw: &[u8]) -> Parsed {
         has_attachment,
         preview,
         body,
+        verdict: checked.state as u8,
+        auth_server: checked.server,
     }
 }
 

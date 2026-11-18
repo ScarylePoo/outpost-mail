@@ -535,3 +535,106 @@ mod sending {
         assert_eq!(sink.messages().len(), 1);
     }
 }
+
+/// The known-result set: messages whose right answer is known, as the
+/// account's own server (`mx.home.example`) and others would mark them.
+/// (subject, From address, extra headers, the state that must be shown)
+const KNOWN_RESULTS: &[(&str, &str, &str, &str)] = &[
+    ("dmarc pass", "alice@bank.example", "Authentication-Results: mx.home.example; spf=pass smtp.mailfrom=bounce@bank.example; dkim=pass header.d=bank.example; dmarc=pass header.from=bank.example\r\n", "verified"),
+    ("signed by its own domain", "news@shop.example", "Authentication-Results: mx.home.example;\r\n\tdkim=pass (2048-bit key) header.d=shop.example header.i=@shop.example;\r\n\tspf=softfail smtp.mailfrom=bounce@mailer.example\r\n", "verified"),
+    ("signed only by a mailing service", "alice@bank.example", "Authentication-Results: mx.home.example; spf=pass smtp.mailfrom=bounce@mailer.example; dkim=pass header.d=mailer.example\r\n", "unverified"),
+    ("dmarc fail", "alice@bank.example", "Authentication-Results: mx.home.example; spf=pass smtp.mailfrom=x@evil.example; dkim=pass header.d=evil.example; dmarc=fail header.from=bank.example\r\n", "failed"),
+    ("spf fail", "alice@bank.example", "Authentication-Results: mx.home.example; spf=fail smtp.mailfrom=alice@bank.example; dkim=none\r\n", "failed"),
+    ("nothing recorded", "carol@plain.example", "", "notChecked"),
+    ("results recorded as none", "carol@plain.example", "Authentication-Results: mx.home.example; none\r\n", "notChecked"),
+    ("forged under another server's name", "alice@bank.example", "Authentication-Results: mx.evil.example; dkim=pass header.d=bank.example; dmarc=pass header.from=bank.example\r\n", "notChecked"),
+    ("forged below the real result", "alice@bank.example", "Authentication-Results: mx.home.example; spf=softfail smtp.mailfrom=alice@bank.example; dkim=none; dmarc=none header.from=bank.example\r\nAuthentication-Results: mx.home.example; dkim=pass header.d=bank.example; dmarc=pass header.from=bank.example\r\n", "unverified"),
+    ("forged below a real failure", "alice@bank.example", "Authentication-Results: mx.home.example; dmarc=fail header.from=bank.example\r\nAuthentication-Results: mx.home.example; dmarc=pass header.from=bank.example\r\n", "failed"),
+    ("passes for a lookalike", "alice@bank.example", "Authentication-Results: mx.home.example; dkim=pass header.d=bank.example.evil.example; spf=pass smtp.mailfrom=x@bank-example.example\r\n", "unverified"),
+    ("two senders named", "alice@bank.example", "Authentication-Results: mx.home.example; dmarc=pass header.from=bank.example\r\nFrom: boss@victim.example\r\n", "unverified"),
+];
+
+fn checks(core: &Core, folder: &str) -> std::collections::BTreeMap<String, String> {
+    match core.handle(Command::ListMessages { folder: folder.into(), offset: 0, limit: 100, conversations: false }).unwrap() {
+        Response::Messages { rows, .. } => rows.into_iter().map(|r| (r.subject, r.check)).collect(),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn the_known_result_set_shows_the_right_state_every_time() {
+    let Some(server) = TestServer::start() else { return };
+    let mut other = server.other_client("ann");
+    for (i, (subject, from, headers, _)) in KNOWN_RESULTS.iter().enumerate() {
+        let raw = format!(
+            "Received: from elsewhere by mx.home.example; Mon, 16 Nov 2026 10:{i:02}:00 +0000\r\n{headers}From: Somebody <{from}>\r\nReply-To: Collector <collect@elsewhere.example>\r\nTo: ann@example.com\r\nSubject: {subject}\r\nDate: Mon, 16 Nov 2026 10:{i:02}:00 +0000\r\nMessage-ID: <known-{i}@test>\r\n\r\nHello.\r\n"
+        );
+        other.append("INBOX", "", raw.as_bytes());
+    }
+    let data = TempDir::new();
+    let (core, events) = start(&data, Arc::new(MemorySecrets::default()));
+    add(&core, &server, "ann", PASSWORD, true);
+    wait_for_state(&events, SyncState::UpToDate);
+    let inbox = folders(&core).iter().find(|f| f.role.as_deref() == Some("inbox")).unwrap().id.clone();
+
+    // The server to believe was worked out from the mail, and is marked as
+    // a guess until the user confirms it.
+    let account = || match core.handle(Command::ListAccounts).unwrap() {
+        Response::Accounts { accounts } => accounts[0].clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!((account().checking_server.as_str(), account().checking_server_confirmed), ("mx.home.example", false));
+
+    let expected: std::collections::BTreeMap<String, String> =
+        KNOWN_RESULTS.iter().map(|(subject, _, _, state)| (subject.to_string(), state.to_string())).collect();
+    assert_eq!(checks(&core, &inbox), expected);
+
+    // Opening a message gives the same state as its row, every time, with
+    // each check spelled out.
+    let Response::Messages { rows, .. } =
+        core.handle(Command::ListMessages { folder: inbox.clone(), offset: 0, limit: 100, conversations: false }).unwrap()
+    else {
+        panic!()
+    };
+    for row in &rows {
+        let Response::Message { message } = core.handle(Command::OpenMessage { folder: inbox.clone(), id: row.id }).unwrap() else {
+            panic!()
+        };
+        assert_eq!(message.sender_check.state, row.check, "{}", row.subject);
+        assert_eq!(message.sender_check.state == "verified", expected[&row.subject] == "verified", "{}", row.subject);
+        assert!(message.sender_check.reply_elsewhere, "{}", row.subject);
+        assert_eq!(message.sender_check.reply_to, "collect@elsewhere.example");
+        if row.subject == "dmarc fail" {
+            let c = &message.sender_check;
+            assert_eq!(c.server, "mx.home.example");
+            let lines: Vec<(&str, &str, bool)> = c.checks.iter().map(|l| (l.name.as_str(), l.outcome.as_str(), l.aligned)).collect();
+            assert_eq!(lines, [("SPF", "pass", false), ("DKIM", "pass", false), ("DMARC", "fail", true)]);
+            assert!(c.checks[2].sentence.contains("bank.example"), "{}", c.checks[2].sentence);
+        }
+        if row.subject == "two senders named" {
+            assert!(message.sender_check.ambiguous_from);
+        }
+    }
+
+    // The user names a different server: nothing the old one said counts,
+    // and what the newly named one "said" now does.
+    core.handle(Command::SetCheckingServer { account: "acct/ann".into(), server: " MX.Evil.Example. ".into() }).unwrap();
+    assert_eq!((account().checking_server.as_str(), account().checking_server_confirmed), ("mx.evil.example", true));
+    let now = checks(&core, &inbox);
+    assert_eq!(now["dmarc pass"], "notChecked");
+    assert_eq!(now["dmarc fail"], "notChecked");
+    assert_eq!(now["forged under another server's name"], "verified");
+
+    // No server named: nothing is believed. A confirmed choice is not
+    // replaced by a guess on the next sync.
+    core.handle(Command::SetCheckingServer { account: "acct/ann".into(), server: String::new() }).unwrap();
+    assert!(checks(&core, &inbox).values().all(|state| state == "notChecked"));
+    other.append("INBOX", "", b"Authentication-Results: mx.home.example; dmarc=pass header.from=bank.example\r\nFrom: alice@bank.example\r\nSubject: later\r\n\r\nHello.\r\n");
+    wait_for(&events, "the later message", |e| match e {
+        Event::FolderChanged { folder } if *folder == inbox && checks(&core, &inbox).contains_key("later") => Some(()),
+        _ => None,
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(account().checking_server, "");
+    assert_eq!(checks(&core, &inbox)["later"], "notChecked");
+}

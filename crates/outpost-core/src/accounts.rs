@@ -35,6 +35,14 @@ pub struct AccountConfig {
     /// The outgoing server. `None` until the user has set up sending.
     #[serde(default)]
     pub smtp: Option<SmtpSettings>,
+    /// The name of the server whose sender checks are believed: the one
+    /// that receives this account's mail. Empty until it is known.
+    #[serde(default)]
+    pub checking_server: String,
+    /// The user has confirmed that name (or typed it). Until then it is a
+    /// guess from the account's newest mail.
+    #[serde(default)]
+    pub checking_server_confirmed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -201,6 +209,7 @@ mod tests {
             name: String::new(),
             address: String::new(),
             smtp: None,
+            checking_server: String::new(),            checking_server_confirmed: false,
         };
         config.save(&dir).unwrap();
         assert_eq!(AccountConfig::load(&dir), Some(config.clone()));

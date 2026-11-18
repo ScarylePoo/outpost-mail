@@ -21,7 +21,7 @@ use std::time::Duration;
 /// Header fields fetched for the message list, before any body is downloaded.
 const LIST_HEADERS: &[&str] = &[
     "From", "To", "Cc", "Subject", "Date", "Message-ID", "In-Reply-To", "References",
-    "Content-Type",
+    "Content-Type", "Authentication-Results",
 ];
 
 /// Bodies are fetched in pieces of this size, so one large attachment cannot

@@ -20,14 +20,15 @@ pub mod compose;
 pub mod imap;
 pub mod render;
 pub mod smtp;
+pub mod verify;
 pub mod store;
 pub mod sync;
 pub mod synthetic;
 
 use accounts::{AccountConfig, OsSecrets, Secrets};
 use api::{
-    AccountInfo, AttachmentInfo, Command, CoreError, ErrorCode, Event, FolderId, FolderInfo,
-    MessageRow, MessageView, Response, SyncState, SyncStatus, ThreadMessage, ThreadView, MAX_PAGE,
+    AccountInfo, AttachmentInfo, CheckLine, Command, CoreError, ErrorCode, Event, FolderId, FolderInfo,
+    MessageRow, MessageView, Response, SenderCheck, SyncState, SyncStatus, ThreadMessage, ThreadView, MAX_PAGE,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -88,6 +89,16 @@ struct Live {
 impl Account {
     fn config(&self) -> Option<AccountConfig> {
         self.config.read().unwrap().clone()
+    }
+
+    /// The server whose sender checks are believed for this account.
+    fn checking_server(&self) -> String {
+        self.config.read().unwrap().as_ref().map(|c| c.checking_server.clone()).unwrap_or_default()
+    }
+
+    /// Where the account's settings file is.
+    fn dir(&self) -> PathBuf {
+        self.store.mail_root().parent().map(Path::to_path_buf).unwrap_or_default()
     }
 }
 
@@ -331,6 +342,25 @@ impl Core {
         });
     }
 
+    /// Until the user has confirmed which server's sender checks to believe,
+    /// it is taken to be the one that wrote them on most of the newest mail.
+    fn guess_checking_server(&self, account: &Account) {
+        let Some(mut config) = account.config() else { return };
+        if config.checking_server_confirmed {
+            return;
+        }
+        let Ok(Some(likely)) = account.store.index().likely_checking_server() else { return };
+        if likely == config.checking_server {
+            return;
+        }
+        config.checking_server = likely;
+        if config.save(&account.dir()).is_ok() {
+            *account.config.write().unwrap() = Some(config);
+            // Lists show the checks, so they are read again.
+            self.inner.sink.emit(Event::FoldersChanged { account: account.id.clone() });
+        }
+    }
+
     /// Turns the sync engine's progress into status and events.
     fn report(&self, account: &Account, progress: Progress) {
         let count = |n: usize| n.to_string();
@@ -356,7 +386,10 @@ impl Core {
             Progress::FolderChanged { folder_id } => self.inner.sink.emit(Event::FolderChanged {
                 folder: format!("{}/{folder_id}", account.id),
             }),
-            Progress::Idle => self.set_status(account, status(SyncState::UpToDate, "")),
+            Progress::Idle => {
+                self.guess_checking_server(account);
+                self.set_status(account, status(SyncState::UpToDate, ""))
+            }
             Progress::Offline { error, retry_in } => self.set_status(
                 account,
                 status(
@@ -424,14 +457,14 @@ impl Core {
                             .config()
                             .map(|c| [c.identity().map(|i| i.address), Some(c.username)].into_iter().flatten().collect())
                             .unwrap_or_default();
-                        (start, total, conversation_rows(rows, start, &own))
+                        (start, total, conversation_rows(rows, start, &own, &account.checking_server()))
                     }
                     Target::Folder(account, id) => {
                         let index = account.store.index();
                         let total = index.folder_total(id).map_err(internal)?;
                         let start = offset.min(total);
                         let rows = index.page(id, start, limit).map_err(internal)?;
-                        (start, total, message_rows(rows, start))
+                        (start, total, message_rows(rows, start, &account.checking_server()))
                     }
                     Target::Account(_) => (0, 0, Vec::new()),
                 };
@@ -459,10 +492,11 @@ impl Core {
                             attachments: Vec::new(),
                             remote_content_blocked: false,
                             downloaded: true,
+                            sender_check: SenderCheck { state: "notChecked".into(), ..SenderCheck::default() },
                         }
                     }
                     Target::Folder(account, _) | Target::Account(account) => {
-                        open_message(&account.store, id)?
+                        open_message(&account.store, id, &account.checking_server())?
                     }
                 };
                 Ok(Response::Message { message: view })
@@ -496,15 +530,15 @@ impl Core {
                     // The synthetic account has no text to search.
                     Target::Synthetic(_) => Vec::new(),
                     Target::Account(account) => {
-                        account.store.index().search(&text, None, limit).map_err(internal)?
+                        let rows = account.store.index().search(&text, None, limit).map_err(internal)?;
+                        message_rows(rows, 0, &account.checking_server())
                     }
                     Target::Folder(account, id) => {
-                        account.store.index().search(&text, Some(id), limit).map_err(internal)?
+                        let rows = account.store.index().search(&text, Some(id), limit).map_err(internal)?;
+                        message_rows(rows, 0, &account.checking_server())
                     }
                 };
-                Ok(Response::SearchResults {
-                    rows: message_rows(rows, 0),
-                })
+                Ok(Response::SearchResults { rows })
             }
             Command::ChangeFlags {
                 folder,
@@ -635,6 +669,8 @@ impl Core {
                         username: a.config().map(|c| c.username).unwrap_or_default(),
                         status: a.live.lock().unwrap().status.clone(),
                         sending: a.config().and_then(|c| sending_settings(&c)),
+                        checking_server: a.checking_server(),
+                        checking_server_confirmed: a.config().is_some_and(|c| c.checking_server_confirmed),
                     })
                     .collect(),
             }),
@@ -661,6 +697,7 @@ impl Core {
                     name: String::new(),
                     address: String::new(),
                     smtp: None,
+                    checking_server: String::new(),                    checking_server_confirmed: false,
                 };
                 let config = match sending {
                     Some(sending) => with_sending(config, sending)?,
@@ -692,6 +729,18 @@ impl Core {
                 *account.config.write().unwrap() = Some(config);
                 // The running sync was started with the old settings.
                 self.start_sync(&account);
+                Ok(Response::Accepted)
+            }
+            Command::SetCheckingServer { account, server } => {
+                let account = self.syncing_account(&account)?;
+                let mut config = account.config().expect("checked above");
+                config.checking_server = server.trim().trim_end_matches('.').to_ascii_lowercase();
+                config.checking_server_confirmed = true;
+                config
+                    .save(&account.dir())
+                    .map_err(|e| CoreError::new(ErrorCode::Internal, format!("could not save the settings: {e}")))?;
+                *account.config.write().unwrap() = Some(config);
+                self.inner.sink.emit(Event::FoldersChanged { account: account.id.clone() });
                 Ok(Response::Accepted)
             }
             Command::ComposeReply { folder, id, mode } => {
@@ -1227,13 +1276,14 @@ fn open_thread(account: &Account, id: i64) -> Result<ThreadView, CoreError> {
 }
 
 /// Reads a message from its file and prepares it for the reading pane.
-fn open_message(store: &Store, id: i64) -> Result<MessageView, CoreError> {
+fn open_message(store: &Store, id: i64, checking_server: &str) -> Result<MessageView, CoreError> {
     let raw = match store.read_message(id) {
         Ok(raw) => raw,
         Err(StoreError::NotDownloaded(_)) => {
             return Ok(MessageView {
                 id,
                 downloaded: false,
+                sender_check: SenderCheck { state: "notChecked".into(), ..SenderCheck::default() },
                 ..MessageView::default()
             })
         }
@@ -1243,6 +1293,7 @@ fn open_message(store: &Store, id: i64) -> Result<MessageView, CoreError> {
         Err(e) => return Err(internal(e)),
     };
     let shown = store::parse::display(&raw);
+    let sender_check = sender_check(&raw, &shown.from_addr, checking_server);
     let images: Vec<(String, String, Vec<u8>)> = shown
         .inline_images
         .into_iter()
@@ -1273,7 +1324,55 @@ fn open_message(store: &Store, id: i64) -> Result<MessageView, CoreError> {
             })
             .collect(),
         downloaded: true,
+        sender_check,
     })
+}
+
+/// What the account's own server recorded about a message's sender.
+/// With no server to believe, nothing is: the message is "not checked".
+fn sender_check(raw: &[u8], from_addr: &str, checking_server: &str) -> SenderCheck {
+    let none = verify::Assessment {
+        state: verify::State::NotChecked,
+        server: String::new(),
+        checks: Vec::new(),
+        ambiguous_from: false,
+    };
+    let found = match checking_server.trim() {
+        "" => none,
+        server => verify::assess(raw, from_addr, Some(server)),
+    };
+    let reply_to = mail_parser::MessageParser::default()
+        .parse_headers(raw)
+        .and_then(|m| {
+            m.reply_to().and_then(|list| list.first().and_then(|a| a.address().map(|s| s.to_string())))
+        })
+        .filter(|r| !r.eq_ignore_ascii_case(from_addr))
+        .unwrap_or_default();
+    let reply_elsewhere = !reply_to.is_empty()
+        && !verify::related(&verify::domain_of(&reply_to), &verify::domain_of(from_addr));
+    SenderCheck {
+        state: found.state.word().into(),
+        server: found.server,
+        checks: found
+            .checks
+            .iter()
+            .map(|c| CheckLine {
+                name: c.name().into(),
+                outcome: match c.outcome {
+                    verify::Outcome::Pass => "pass",
+                    verify::Outcome::Fail | verify::Outcome::SoftFail => "fail",
+                    _ => "neutral",
+                }
+                .into(),
+                word: c.word.clone(),
+                sentence: c.sentence(),
+                aligned: c.aligned,
+            })
+            .collect(),
+        reply_to,
+        reply_elsewhere,
+        ambiguous_from: found.ambiguous_from,
+    }
 }
 
 /// A file name from a message, made safe to create: no directories, no
@@ -1327,7 +1426,9 @@ fn save_download(dir: &Path, name: &str, data: &[u8]) -> std::io::Result<(PathBu
     Err(std::io::Error::other("too many files with that name"))
 }
 
-fn message_rows(rows: Vec<ListRow>, first_index: u32) -> Vec<MessageRow> {
+/// `checking_server` is the server whose sender checks the account
+/// believes; a verdict recorded by any other counts for nothing.
+fn message_rows(rows: Vec<ListRow>, first_index: u32, checking_server: &str) -> Vec<MessageRow> {
     rows.into_iter()
         .enumerate()
         .map(|(i, r)| MessageRow {
@@ -1344,13 +1445,25 @@ fn message_rows(rows: Vec<ListRow>, first_index: u32) -> Vec<MessageRow> {
             thread_count: 1,
             thread_unread: u32::from(!r.flags.contains(Flags::SEEN)),
             senders: String::new(),
+            check: if !checking_server.is_empty() && r.auth_server.eq_ignore_ascii_case(checking_server.trim()) {
+                verify::State::from_number(r.verdict as i64)
+            } else {
+                verify::State::NotChecked
+            }
+            .word()
+            .into(),
         })
         .collect()
 }
 
 /// Rows for a conversation list. `own` are the user's addresses, shown as
 /// "You" among the people in a conversation.
-fn conversation_rows(rows: Vec<store::index::ConversationRow>, first_index: u32, own: &[String]) -> Vec<MessageRow> {
+fn conversation_rows(
+    rows: Vec<store::index::ConversationRow>,
+    first_index: u32,
+    own: &[String],
+    checking_server: &str,
+) -> Vec<MessageRow> {
     rows.into_iter()
         .enumerate()
         .map(|(i, c)| {
@@ -1373,7 +1486,7 @@ fn conversation_rows(rows: Vec<store::index::ConversationRow>, first_index: u32,
                 0..=4 => names.join(", "),
                 n => format!("{}, {} and {} more", names[0], names[1], n - 2),
             };
-            let mut row = message_rows(vec![c.head], first_index + i as u32).remove(0);
+            let mut row = message_rows(vec![c.head], first_index + i as u32, checking_server).remove(0);
             row.thread_count = c.count;
             row.thread_unread = c.unread;
             row.senders = senders;

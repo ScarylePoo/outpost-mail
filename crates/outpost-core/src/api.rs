@@ -115,6 +115,10 @@ pub enum Command {
     },
     /// Sets or changes how an account sends mail.
     SetSending { account: FolderId, sending: SendingSettings },
+    /// Confirms or changes which server's sender checks are believed for
+    /// an account. An empty name means none: every message then shows as
+    /// not checked.
+    SetCheckingServer { account: FolderId, server: String },
     /// The starting point for a reply to, or a forward of, a message.
     /// `mode` is `reply`, `replyAll` or `forward`.
     ComposeReply { folder: FolderId, id: i64, mode: String },
@@ -277,6 +281,10 @@ pub struct AccountInfo {
     pub status: SyncStatus,
     /// How the account sends mail, if that has been set up.
     pub sending: Option<SendingSettings>,
+    /// The server whose sender checks are believed. Empty if none is known.
+    pub checking_server: String,
+    /// False while that name is a guess the user has not confirmed.
+    pub checking_server_confirmed: bool,
 }
 
 /// Who mail is from and which server sends it.
@@ -330,6 +338,9 @@ pub struct MessageRow {
     pub thread_count: u32,
     pub thread_unread: u32,
     pub senders: String,
+    /// The sender checks: `verified`, `unverified`, `notChecked` or
+    /// `failed`. A failed message gets a warning in the list.
+    pub check: String,
 }
 
 /// What the composer holds. The same shape is used for a new message, a
@@ -389,6 +400,43 @@ pub struct MessageView {
     pub remote_content_blocked: bool,
     /// False while only the message's list data has been synced.
     pub downloaded: bool,
+    /// Who the message is really from, as far as can be told.
+    pub sender_check: SenderCheck,
+}
+
+/// What is known about whether a message is from who it says.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SenderCheck {
+    /// `verified`, `unverified`, `notChecked` or `failed`. Only `verified`
+    /// may be shown with a green check.
+    pub state: String,
+    /// The server whose results these are. Empty if there were none from
+    /// the server this account believes.
+    pub server: String,
+    /// Each check the server recorded.
+    pub checks: Vec<CheckLine>,
+    /// Where a reply would go, when that is not the sender's address.
+    pub reply_to: String,
+    /// The reply address is at a different domain than the sender's.
+    pub reply_elsewhere: bool,
+    /// The message names more than one sender, so it is never verified.
+    pub ambiguous_from: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckLine {
+    /// `SPF`, `DKIM` or `DMARC`.
+    pub name: String,
+    /// `pass`, `fail` or `neutral`.
+    pub outcome: String,
+    /// The server's own word for the result.
+    pub word: String,
+    /// One plain sentence.
+    pub sentence: String,
+    /// Whether the check was about the domain in the From line.
+    pub aligned: bool,
 }
 
 /// A conversation, oldest message first.

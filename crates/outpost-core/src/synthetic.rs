@@ -127,6 +127,7 @@ pub fn row(seed: u64, index: u32) -> MessageRow {
         thread_count: 1,
         thread_unread: u32::from(flags < 12),
         senders: String::new(),
+        check: "notChecked".into(),
         has_attachment: flags >= 90,
     }
 }

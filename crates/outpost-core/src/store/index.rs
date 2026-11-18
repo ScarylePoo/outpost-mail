@@ -16,7 +16,7 @@ use std::sync::{Mutex, MutexGuard};
 type Result<T> = std::result::Result<T, StoreError>;
 
 /// Bump when the schema changes, and add a step to `migrate`.
-const SCHEMA_VERSION: i32 = 8;
+const SCHEMA_VERSION: i32 = 9;
 
 const TABLES: &str = r#"
 CREATE TABLE folder (
@@ -85,8 +85,11 @@ CREATE TABLE message (
     is_head        INTEGER NOT NULL DEFAULT 0,
     preview        TEXT NOT NULL,
     preview_len    INTEGER NOT NULL,
-    -- Sender-check verdict (milestone 6). 0 = not checked.
-    verdict        INTEGER NOT NULL DEFAULT 0
+    -- What the topmost Authentication-Results header adds up to (a
+    -- verify::State number), and the server that wrote it. The verdict
+    -- counts only when that server is the one the account trusts.
+    verdict        INTEGER NOT NULL DEFAULT 0,
+    auth_server    TEXT NOT NULL DEFAULT ''
 );
 
 -- Which Message-IDs each message cites (its In-Reply-To and References),
@@ -205,10 +208,13 @@ pub struct ListRow {
     pub preview: String,
     pub flags: Flags,
     pub has_attachment: bool,
+    /// A `verify::State` number, as recorded by `auth_server`.
+    pub verdict: u8,
+    pub auth_server: String,
 }
 
 const LIST_COLUMNS: &str = "m.id, m.folder_id, m.from_name, m.from_addr, m.recipients, m.date, \
-                            m.subject, m.preview, m.flags, m.has_attachment";
+                            m.subject, m.preview, m.flags, m.has_attachment, m.verdict, m.auth_server";
 
 fn list_row(row: &rusqlite::Row) -> rusqlite::Result<ListRow> {
     Ok(ListRow {
@@ -222,6 +228,8 @@ fn list_row(row: &rusqlite::Row) -> rusqlite::Result<ListRow> {
         preview: row.get(7)?,
         flags: Flags(row.get(8)?),
         has_attachment: row.get(9)?,
+        verdict: row.get(10)?,
+        auth_server: row.get(11)?,
     })
 }
 
@@ -511,7 +519,7 @@ impl Index {
                      WHERE m.folder_id = ?1 AND m.is_head = 1
                      ORDER BY m.sort_key DESC LIMIT ?2 OFFSET ?3"
                 ))?
-                .query_map(params![folder_id, limit, offset], |r| Ok((list_row(r)?, r.get(10)?)))?
+                .query_map(params![folder_id, limit, offset], |r| Ok((list_row(r)?, r.get(12)?)))?
                 .collect::<rusqlite::Result<_>>()?;
             let mut counts = conn.prepare_cached(
                 // A copy of a message kept in another folder counts once.
@@ -560,6 +568,24 @@ impl Index {
             )?
             .query_row(params![folder_id, id], |r| r.get(0))
             .optional()
+        })
+    }
+
+    /// The server that wrote the sender checks on most of the newest mail:
+    /// the account's own receiving server, in all likelihood. `None` unless
+    /// one name clearly leads.
+    pub fn likely_checking_server(&self) -> Result<Option<String>> {
+        self.read(|conn| {
+            let counts: Vec<(String, u32)> = conn
+                .prepare_cached(
+                    "SELECT auth_server, count(*) FROM
+                       (SELECT auth_server FROM message ORDER BY sort_key DESC LIMIT 500)
+                     WHERE auth_server != '' GROUP BY 1 ORDER BY 2 DESC",
+                )?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let all: u32 = counts.iter().map(|c| c.1).sum();
+            Ok(counts.into_iter().next().filter(|(_, n)| *n >= 3 && *n * 5 >= all * 3).map(|(name, _)| name))
         })
     }
 
@@ -818,7 +844,7 @@ fn key_taken(conn: &Connection, table: &str, key: i64) -> rusqlite::Result<bool>
 /// The columns of `message` other than `id`, which SQLite assigns.
 const MESSAGE_COLUMNS: &str = "folder_id, base, file_flags, flags, uid, modseq, date, sort_key, \
      size, has_attachment, from_name, from_addr, recipients, subject, message_id, in_reply_to, \
-     refs, thread_id, parent_id, link_guessed, subject_key, is_head, preview, preview_len, verdict";
+     refs, thread_id, parent_id, link_guessed, subject_key, is_head, preview, preview_len, verdict, auth_server";
 
 fn staging_path(index: &Path) -> PathBuf {
     let mut name = index.file_name().unwrap_or_default().to_os_string();
@@ -839,8 +865,8 @@ fn insert_one(
     conn.prepare_cached(&format!(
         "INSERT INTO {table} (folder_id, base, file_flags, flags, uid, date, size, has_attachment,
                               from_name, from_addr, recipients, subject, message_id, in_reply_to,
-                              refs, preview, preview_len, sort_key, verdict)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, 0)"
+                              refs, preview, preview_len, sort_key, verdict, auth_server)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)"
     ))?
     .execute(params![
         folder_id,
@@ -861,6 +887,8 @@ fn insert_one(
         p.preview,
         p.preview.chars().count().min(u16::MAX as usize) as i64,
         key,
+        p.verdict,
+        p.auth_server,
     ])?;
     let id = conn.last_insert_rowid();
     conn.prepare_cached(

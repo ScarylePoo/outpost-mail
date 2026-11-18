@@ -99,6 +99,7 @@ fn a_message_row_has_exactly_the_fields_the_interface_expects() {
     assert_eq!(
         keys,
         [
+            "check",
             "date",
             "flagged",
             "hasAttachment",

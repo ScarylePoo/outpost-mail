@@ -13,6 +13,7 @@
 //! In milestone 0 the mailbox behind the interface is synthetic.
 
 pub mod api;
+pub mod store;
 pub mod synthetic;
 
 use api::{

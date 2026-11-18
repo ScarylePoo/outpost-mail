@@ -9,8 +9,8 @@ export type FolderId = string;
 export type Command =
   | { type: "ping" }
   | { type: "listFolders" }
-  | { type: "folderLayout"; folder: FolderId }
-  | { type: "listMessages"; folder: FolderId; offset: number; limit: number }
+  | { type: "folderLayout"; folder: FolderId; conversations?: boolean }
+  | { type: "listMessages"; folder: FolderId; offset: number; limit: number; conversations?: boolean }
   | { type: "openMessage"; folder: FolderId; id: number }
   | { type: "openThread"; folder: FolderId; id: number }
   | { type: "search"; scope: FolderId; text: string; limit: number }
@@ -21,7 +21,7 @@ export type Command =
   | { type: "createFolder"; parent: FolderId; name: string }
   | { type: "deleteFolder"; folder: FolderId }
   | { type: "saveAttachment"; folder: FolderId; id: number; index: number }
-  | { type: "locateMessage"; folder: FolderId; id: number }
+  | { type: "locateMessage"; folder: FolderId; id: number; conversations?: boolean }
   | { type: "listAccounts" }
   | {
       type: "addAccount";
@@ -64,6 +64,10 @@ export interface MessageRow {
   unread: boolean;
   flagged: boolean;
   hasAttachment: boolean;
+  /** In a conversation list: how many messages, how many unread, and who. */
+  threadCount: number;
+  threadUnread: number;
+  senders: string;
 }
 
 /** A message as the reading pane shows it. */

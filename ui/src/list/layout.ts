@@ -35,7 +35,12 @@ export function linesFor(previewLen: number, perLine: number): number {
   return Math.min(MAX_PREVIEW_LINES, Math.ceil(previewLen / perLine));
 }
 
-export function buildLayout(previewLens: ArrayLike<number>, listWidth: number): Layout {
+export function buildLayout(
+  previewLens: ArrayLike<number>,
+  listWidth: number,
+  /** Extra height for particular rows: an expanded conversation's tree. */
+  extra?: ReadonlyMap<number, number>,
+): Layout {
   const count = previewLens.length;
   const perLine = charsPerLine(listWidth);
   const lines = new Uint8Array(count);
@@ -45,7 +50,7 @@ export function buildLayout(previewLens: ArrayLike<number>, listWidth: number): 
     const n = linesFor(previewLens[i]!, perLine);
     lines[i] = n;
     offsets[i] = y;
-    y += ROW_FIXED + n * LINE;
+    y += ROW_FIXED + n * LINE + (extra?.get(i) ?? 0);
   }
   offsets[count] = y;
   return { lines, offsets };

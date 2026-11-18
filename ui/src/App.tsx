@@ -56,6 +56,17 @@ export function App() {
   const [accounts, setAccounts] = createSignal<AccountInfo[]>([]);
   const [folderId, setFolderId] = createSignal<string>();
   const [message, setMessage] = createSignal<MessageRow>();
+  /** Whether the list shows one row per conversation or one per message. */
+  const [conversations, setConversations] = createSignal(localStorage.getItem("outpost.layout") !== "messages");
+  function chooseLayout(grouped: boolean) {
+    setConversations(grouped);
+    setMessage(undefined);
+    try {
+      localStorage.setItem("outpost.layout", grouped ? "conversations" : "messages");
+    } catch {
+      // Not remembered, then; it still applies for this run.
+    }
+  }
   /** How many messages are selected in the list. */
   const [count, setCount] = createSignal(0);
   const [panel, setPanel] = createSignal<Panel>({ kind: "none" });
@@ -173,7 +184,18 @@ export function App() {
 
     void autoShellTest(() => list, setNotice);
 
-    // And `?select=N` opens the Nth message once the list has loaded.
+    // And `?select=N` opens the Nth message once the list has loaded, and
+    // `?open=N` opens the conversation at row N into its tree.
+    const toOpen = Number(new URLSearchParams(location.search).get("open") ?? NaN);
+    if (Number.isInteger(toOpen) && toOpen >= 0) {
+      const opener = setInterval(() => {
+        if (list && list.rowCount() > toOpen) {
+          clearInterval(opener);
+          setTimeout(() => list?.toggle(toOpen), 300);
+        }
+      }, 50);
+      onCleanup(() => clearInterval(opener));
+    }
     const wanted = Number(params.get("select") ?? NaN);
     if (Number.isInteger(wanted) && wanted >= 0) {
       const timer = setInterval(() => {
@@ -560,6 +582,13 @@ export function App() {
             <>
               <div class="list-header">
                 <strong>{f.name}</strong>
+                <button
+                  class="inline layout"
+                  title="Show one row per conversation, or one per message"
+                  onClick={() => chooseLayout(!conversations())}
+                >
+                  {conversations() ? "Conversations" : "Messages"}
+                </button>
                 <span>
                   <Show when={count() > 1 && !searching()} fallback={<>{f.total.toLocaleString()} messages</>}>
                     {count().toLocaleString()} of {f.total.toLocaleString()} selected
@@ -606,6 +635,7 @@ export function App() {
               <div class="list-holder" classList={{ hidden: searching() }}>
                 <MessageList
                   folder={id()}
+                  conversations={conversations()}
                   onSelect={(row) => !searching() && setMessage(row)}
                   onCount={setCount}
                   handle={(h) => (list = h)}

@@ -6,7 +6,8 @@
 // from the core in pages and cached.
 
 import { createEffect, createMemo, createSignal, Index, on, onCleanup, onMount, Show } from "solid-js";
-import { core, type FolderId, type MessageRow } from "../core";
+import { core, type FolderId, type MessageRow, type ThreadMessage, type ThreadView } from "../core";
+import { ThreadTree, treeHeight } from "./ThreadTree";
 import { buildLayout, LINE, ROW_FIXED, rowAt, type Layout } from "./layout";
 import { formatDate } from "./format";
 
@@ -26,6 +27,8 @@ export interface ListHandle {
   visibleRange(): [number, number];
   /** The selected message, if there is one and its data is loaded. */
   selectedRow(): MessageRow | undefined;
+  /** Opens or closes the conversation at this position. */
+  toggle(index: number): void;
   /**
    * The ids of every selected message. Rows that are selected but not
    * loaded (a long Shift-click range) are fetched first.
@@ -42,6 +45,8 @@ export interface ListHandle {
 
 export function MessageList(props: {
   folder: FolderId;
+  /** One row per conversation, each of which can be opened into its tree. */
+  conversations?: boolean;
   onSelect: (row: MessageRow | undefined) => void;
   /** Called with how many messages are selected whenever that changes. */
   onCount?: (count: number) => void;
@@ -86,6 +91,10 @@ export function MessageList(props: {
   /** Bumped when row positions change. */
   const [layoutTick, setLayoutTick] = createSignal(0);
   const [selected, setSelected] = createSignal(-1);
+  /** Conversations opened into their tree, by row position. */
+  const [opened, setOpened] = createSignal<ReadonlyMap<number, ThreadView>>(new Map());
+  /** The message picked inside an open conversation's tree, if any. */
+  const [inTree, setInTree] = createSignal<ThreadMessage>();
   /** Positions of all selected rows. The one in `selected` is the current one. */
   const [picked, setPicked] = createSignal<ReadonlySet<number>>(new Set());
   /** Where a Shift-click or Shift-arrow range starts. */
@@ -104,7 +113,7 @@ export function MessageList(props: {
     const gen = generation;
     const from = epoch;
     core
-      .send({ type: "listMessages", folder: props.folder, offset: page * PAGE, limit: PAGE })
+      .send({ type: "listMessages", folder: props.folder, offset: page * PAGE, limit: PAGE, conversations: props.conversations })
       .then((r) => {
         if (gen !== generation || from !== epoch) return;
         pending.delete(page);
@@ -218,7 +227,7 @@ export function MessageList(props: {
   function relayout() {
     const anchor = visFirst;
     const into = count() > 0 ? virtualTop - layout.offsets[anchor]! : 0;
-    layout = buildLayout(previewLens, width);
+    layout = buildLayout(previewLens, width, extraHeights());
     setTotal(count());
     resize();
     setLayoutTick((t) => t + 1);
@@ -255,14 +264,18 @@ export function MessageList(props: {
       const locate = (id: number | undefined) =>
         id === undefined
           ? Promise.resolve(null)
-          : core.send({ type: "locateMessage", folder, id }).then((r) => r.index);
+          : core.send({ type: "locateMessage", folder, id, conversations: props.conversations }).then((r) => r.index);
       const [fresh, anchorIndex, selectedIndex] = await Promise.all([
-        core.send({ type: "folderLayout", folder }),
+        core.send({ type: "folderLayout", folder, conversations: props.conversations }),
         locate(anchor?.id),
         locate(selectedId),
       ]);
       if (gen !== generation) return;
 
+      // Positions shift when a folder changes, so open conversations are
+      // closed rather than left attached to the wrong rows.
+      setOpened(new Map());
+      setInTree(undefined);
       const nextLayout = buildLayout(fresh.previewLens, width);
       const n = nextLayout.lines.length;
       let nextTop = 0;
@@ -282,7 +295,7 @@ export function MessageList(props: {
         for (let p = Math.floor(first / PAGE); p <= Math.floor(last / PAGE); p++) {
           fetches.push(
             core
-              .send({ type: "listMessages", folder, offset: p * PAGE, limit: PAGE })
+              .send({ type: "listMessages", folder, offset: p * PAGE, limit: PAGE, conversations: props.conversations })
               .then((r) => rows.set(p, r.rows)),
           );
         }
@@ -339,6 +352,57 @@ export function MessageList(props: {
     update();
   }
 
+  const extraHeights = () => {
+    const extra = new Map<number, number>();
+    for (const [index, thread] of opened()) extra.set(index, treeHeight(thread));
+    return extra;
+  };
+
+  /** Opens a conversation into its tree, or closes it again. */
+  function toggle(index: number) {
+    const row = getRow(index);
+    if (!row) return;
+    if (opened().has(index)) {
+      const next = new Map(opened());
+      next.delete(index);
+      setOpened(next);
+      setInTree(undefined);
+      relayout();
+      return;
+    }
+    const gen = generation;
+    core
+      .send({ type: "openThread", folder: props.folder, id: row.id })
+      .then((r) => {
+        if (gen !== generation) return;
+        setOpened(new Map(opened()).set(index, r.thread));
+        relayout();
+      })
+      .catch((e) => setError(String(e?.message ?? e)));
+  }
+
+  /** A message picked inside an open conversation becomes the selection. */
+  function pickInTree(index: number, message: ThreadMessage, thread: ThreadView) {
+    choose(index, "one", false);
+    setInTree(message);
+    const head = getRow(index);
+    props.onSelect({
+      id: message.id,
+      index,
+      senderName: message.senderName,
+      senderAddress: message.senderAddress,
+      date: message.date,
+      subject: thread.subject,
+      preview: message.text,
+      unread: message.unread,
+      flagged: message.flagged,
+      hasAttachment: message.attachments.length > 0,
+      threadCount: head?.threadCount ?? thread.messages.length,
+      threadUnread: head?.threadUnread ?? 0,
+      senders: head?.senders ?? "",
+    });
+  }
+
   function pick(next: ReadonlySet<number>) {
     setPicked(next);
     props.onCount?.(next.size);
@@ -364,6 +428,7 @@ export function MessageList(props: {
       pick(new Set([i]));
       rangeStart = i;
     }
+    setInTree(undefined);
     select(i, reveal);
   }
 
@@ -380,7 +445,7 @@ export function MessageList(props: {
     await Promise.all(
       [...missing].map((p) =>
         core
-          .send({ type: "listMessages", folder: props.folder, offset: p * PAGE, limit: PAGE })
+          .send({ type: "listMessages", folder: props.folder, offset: p * PAGE, limit: PAGE, conversations: props.conversations })
           .then((r) => fetched.set(p, r.rows)),
       ),
     );
@@ -420,9 +485,11 @@ export function MessageList(props: {
   // Load a folder.
   createEffect(
     on(
-      () => props.folder,
-      (folder) => {
+      () => [props.folder, props.conversations] as const,
+      ([folder]) => {
         const gen = ++generation;
+        setOpened(new Map());
+        setInTree(undefined);
         selectedId = undefined;
         pages = new Map();
         pending = new Set();
@@ -443,7 +510,7 @@ export function MessageList(props: {
         setError("");
         setStatus("loading");
         core
-          .send({ type: "folderLayout", folder })
+          .send({ type: "folderLayout", folder, conversations: props.conversations })
           .then((r) => {
             if (gen !== generation) return;
             previewLens = r.previewLens;
@@ -465,7 +532,9 @@ export function MessageList(props: {
     const i = selected();
     const row = i >= 0 ? getRow(i) : undefined;
     if (row) selectedId = row.id;
-    props.onSelect(row);
+    // A message picked inside an open conversation stays the selection
+    // while its row merely refreshes.
+    if (!inTree()) props.onSelect(row);
   });
 
   onMount(() => {
@@ -492,6 +561,7 @@ export function MessageList(props: {
       select: (index) => choose(index, "one", true),
       selectedIds,
       refresh: () => void refresh(),
+      toggle,
       blankVisible() {
         let blank = 0;
         for (let i = visFirst; i <= visLast; i++) if (!getRow(i)) blank++;
@@ -521,6 +591,8 @@ export function MessageList(props: {
             });
             const top = () => (layoutTick(), index() >= 0 ? layout.offsets[index()]! + shift() : 0);
             const lines = () => (layoutTick(), index() >= 0 ? layout.lines[index()]! : 0);
+            const tree = () => (index() >= 0 ? opened().get(index()) : undefined);
+            const many = () => props.conversations === true && (row()?.threadCount ?? 1) > 1;
             return (
               <div
                 class="row"
@@ -530,11 +602,12 @@ export function MessageList(props: {
                   idle: index() < 0,
                   selected: index() >= 0 && picked().has(index()),
                   current: index() >= 0 && index() === selected() && picked().size > 1,
-                  unread: row()?.unread === true,
+                  unread: many() ? (row()?.threadUnread ?? 0) > 0 : row()?.unread === true,
+                  open: tree() !== undefined,
                 }}
                 style={{
                   transform: `translateY(${top()}px)`,
-                  height: `${ROW_FIXED + lines() * LINE}px`,
+                  height: `${ROW_FIXED + lines() * LINE + (tree() ? treeHeight(tree()!) : 0)}px`,
                 }}
                 onMouseDown={(e) =>
                   choose(index(), e.shiftKey ? "range" : e.ctrlKey || e.metaKey ? "toggle" : "one", false)
@@ -545,7 +618,20 @@ export function MessageList(props: {
                     <>
                       <div class="row-top">
                         <span class="row-dot" />
-                        <span class="row-sender">{r().senderName}</span>
+                        <Show when={many()}>
+                          <button
+                            class="row-toggle"
+                            aria-label={tree() ? "Close conversation" : "Open conversation"}
+                            aria-expanded={tree() !== undefined}
+                            onMouseDown={(e) => {
+                              e.stopPropagation();
+                              toggle(index());
+                            }}
+                          >
+                            {tree() ? "▾" : "▸"}
+                          </button>
+                        </Show>
+                        <span class="row-sender">{many() ? r().senders : r().senderName}</span>
                         <Show when={r().flagged}>
                           <span class="row-flag" title="Flagged">
                             ⚑
@@ -558,13 +644,30 @@ export function MessageList(props: {
                         </Show>
                         <span class="row-date">{formatDate(r().date)}</span>
                       </div>
-                      <div class="row-subject">{r().subject}</div>
+                      <div class="row-subject">
+                        {r().subject}
+                        <Show when={many()}>
+                          <span class="row-count"> · {r().threadCount} messages</span>
+                          <Show when={r().threadUnread > 0}>
+                            <span class="row-unread">{r().threadUnread} unread</span>
+                          </Show>
+                        </Show>
+                      </div>
                       <div
                         class="row-preview"
                         style={{ "-webkit-line-clamp": lines(), height: `${lines() * LINE}px` }}
                       >
                         {r().preview}
                       </div>
+                      <Show when={tree()}>
+                        {(t) => (
+                          <ThreadTree
+                            thread={t()}
+                            selected={inTree()?.id}
+                            onSelect={(message) => pickInTree(index(), message, t())}
+                          />
+                        )}
+                      </Show>
                     </>
                   )}
                 </Show>

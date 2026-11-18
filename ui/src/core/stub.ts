@@ -52,6 +52,9 @@ function row(i: number): MessageRow {
     preview: preview(i),
     unread: flags < 12,
     flagged: flags >= 96,
+    threadCount: i % 5 === 0 ? 6 : 1,
+    threadUnread: i % 5 === 0 ? 2 : flags < 12 ? 1 : 0,
+    senders: i % 5 === 0 ? "Dana, You, Sam, Priya" : "",
     hasAttachment: flags >= 90,
   };
 }

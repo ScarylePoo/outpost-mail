@@ -18,7 +18,7 @@ type Mode = "branch" | "thread" | "date";
 
 const DAY = 86_400;
 
-function firstName(name: string): string {
+export function firstName(name: string): string {
   return name.trim().split(/\s+/)[0] ?? name;
 }
 
@@ -36,7 +36,7 @@ function shortNames(recipients: string): string {
 }
 
 /** Everything in tree order: each message followed by its replies. */
-function treeOrder(messages: ThreadMessage[]): ThreadMessage[] {
+export function treeOrder(messages: ThreadMessage[]): ThreadMessage[] {
   const present = new Set(messages.map((m) => m.id));
   const children = new Map<number | null, ThreadMessage[]>();
   for (const m of messages) {

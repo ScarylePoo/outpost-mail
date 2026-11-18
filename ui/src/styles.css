@@ -346,7 +346,8 @@ input[type="checkbox"] {
   border-radius: 50%;
 }
 
-.row.unread .row-dot {
+/* Direct children only: an open conversation's tree has its own marks. */
+.row.unread > .row-top .row-dot {
   background: var(--accent);
 }
 
@@ -357,8 +358,8 @@ input[type="checkbox"] {
   white-space: nowrap;
 }
 
-.row.unread .row-sender,
-.row.unread .row-subject {
+.row.unread > .row-top .row-sender,
+.row.unread > .row-subject {
   font-weight: 650;
 }
 
@@ -379,7 +380,7 @@ input[type="checkbox"] {
   font-variant-numeric: tabular-nums;
 }
 
-.row.unread .row-date {
+.row.unread > .row-top .row-date {
   color: var(--accent);
 }
 
@@ -1105,6 +1106,177 @@ button.inline:hover {
 }
 
 .gap span {
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+/* Conversations in the list */
+
+.list-header {
+  align-items: center;
+  gap: 8px;
+}
+
+.list-header strong {
+  flex: none;
+}
+
+.list-header .layout {
+  margin-right: auto;
+}
+
+.row-toggle {
+  flex: none;
+  width: 16px;
+  margin: 0 0 0 -4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: var(--line);
+}
+
+.row-toggle:hover {
+  color: var(--accent);
+}
+
+.row-count {
+  color: var(--text-2);
+  font-weight: 400;
+}
+
+.row-unread {
+  margin-left: 8px;
+  padding: 0 7px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.row.open {
+  background: var(--surface);
+}
+
+.tree {
+  margin: 8px -14px 0;
+  border-top: 1px solid var(--hairline);
+  background: var(--pane);
+}
+
+.tree-line {
+  display: flex;
+  padding: 0 14px;
+}
+
+.tree-line:hover {
+  background: var(--hover);
+}
+
+.tree-line.selected {
+  background: var(--accent-soft);
+}
+
+.tree-guide {
+  flex: none;
+  width: 16px;
+  margin-left: 4px;
+  border-left: 1px solid #7c8695;
+}
+
+/* The last guide turns toward the message it leads to. */
+.tree-guide.elbow {
+  height: 22px;
+  border-bottom: 1px solid #7c8695;
+  border-bottom-left-radius: 6px;
+}
+
+.tree-guide.guessed {
+  border-left-style: dashed;
+  border-bottom-style: dashed;
+}
+
+.tree-body {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 0 5px 6px;
+}
+
+.tree-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: var(--line);
+}
+
+.tree-top .row-dot {
+  margin: 0;
+}
+
+.tree-line.unread .row-dot {
+  background: var(--accent);
+}
+
+.tree-sender {
+  flex: none;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-line.unread .tree-sender {
+  font-weight: 650;
+}
+
+.tree-top .chip {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.tree-file {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.tree-deeper {
+  color: var(--text-3);
+}
+
+.tree-top .row-date {
+  margin-left: auto;
+}
+
+.tree-preview {
+  height: var(--line);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-2);
+}
+
+.tree-gap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.tree-gap span {
   flex: 1;
   height: 1px;
   background: var(--border);

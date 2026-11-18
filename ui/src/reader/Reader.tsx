@@ -9,7 +9,7 @@
 // that allows no network access at all. Links do not navigate: the pane
 // shows where a link really goes and lets the user copy it.
 
-import { createEffect, createSignal, For, on, onCleanup, Show } from "solid-js";
+import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { core, type FolderId, type MessageRow, type MessageView } from "../core";
 import { formatLongDate } from "../list/format";
 
@@ -58,9 +58,14 @@ export function Reader(props: {
   const [saveError, setSaveError] = createSignal("");
   let request = 0;
 
+  // Which message is shown. A memo, so that the row being refreshed (its
+  // flags changing, say) does not count as a different message: only a
+  // different id reopens, and only opening marks a message read.
+  const shown = createMemo(() => props.row?.id);
+
   createEffect(
     on(
-      () => props.row?.id,
+      shown,
       (id) => {
         const mine = ++request;
         setView(undefined);

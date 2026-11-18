@@ -66,6 +66,11 @@ pub enum Command {
         ids: Vec<i64>,
         permanently: bool,
     },
+    /// Creates a folder. `parent` is the folder to create it in, or an
+    /// account's id for the top level.
+    CreateFolder { parent: FolderId, name: String },
+    /// Deletes a folder and the mail in it. The interface asks first.
+    DeleteFolder { folder: FolderId },
     /// Writes one of a message's attachments to the downloads folder,
     /// under a name that does not replace anything there.
     SaveAttachment { folder: FolderId, id: i64, index: u32 },
@@ -177,6 +182,9 @@ pub enum Response {
     SendCancelled {
         /// False if the message had already gone.
         cancelled: bool,
+    },
+    FolderCreated {
+        folder: FolderId,
     },
     Located {
         /// `None` if the message is no longer in the folder.

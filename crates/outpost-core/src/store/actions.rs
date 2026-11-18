@@ -12,7 +12,7 @@
 //! in the index, and get its UID filled in when the server reports it.
 
 use super::index::Index;
-use super::maildir::{Flags, Maildir};
+use super::maildir::{encode_segment, Flags, Maildir};
 use super::{Result, Store, StoreError};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -44,6 +44,10 @@ pub enum Action {
     Append { folder: i64, message: i64 },
     /// Send a message waiting in the outbox.
     Send { message: i64 },
+    /// Create, on the server, a folder that was made here.
+    CreateFolder { folder: i64 },
+    /// Delete a folder from the server. It is already gone here.
+    DeleteFolder { remote_name: Vec<u8> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -250,7 +254,7 @@ impl Index {
                 Action::Flags { folder, items, .. } => (*folder, Some(items)),
                 Action::Move { from, items, .. } => (*from, Some(items)),
                 Action::Expunge { folder, items } => (*folder, Some(items)),
-                Action::Append { .. } | Action::Send { .. } => (0, None),
+                _ => (0, None),
             };
             let Some(items) = items else { continue };
             let mut changed = false;
@@ -281,7 +285,7 @@ impl Index {
                 Action::Flags { folder, items, .. } => (*folder, items),
                 Action::Move { from, items, .. } => (*from, items),
                 Action::Expunge { folder, items } => (*folder, items),
-                Action::Append { .. } | Action::Send { .. } => continue,
+                _ => continue,
             };
             if folder == folder_id {
                 pending.extend(items.iter().filter_map(|i| i.uid));
@@ -582,5 +586,98 @@ impl Store {
             enqueue(&conn, &Action::Append { folder: drafts, message })?;
         }
         Ok(outbox.into_iter().chain([drafts]).collect())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Folders
+// ---------------------------------------------------------------------------
+
+/// Why a folder could not be created or deleted, in words for the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderRefusal(pub String);
+
+impl Store {
+    /// Creates a folder here and (queued) on the server. `parent` is the
+    /// folder to put it in, or `None` for the top level of the account.
+    pub fn create_remote_folder(
+        &self,
+        parent: Option<i64>,
+        name: &str,
+    ) -> Result<std::result::Result<i64, FolderRefusal>> {
+        let refuse = |why: &str| Ok(Err(FolderRefusal(why.to_string())));
+        let name = name.trim();
+        let remote = self.index().remote_folders()?;
+        let delimiter = self.index().delimiter()?.unwrap_or('/');
+        if name.is_empty() {
+            return refuse("The folder needs a name.");
+        }
+        if name.contains(delimiter) || name.chars().any(char::is_control) {
+            return refuse(&format!("A folder name cannot contain \"{delimiter}\"."));
+        }
+        // On servers that keep every folder inside the inbox, "the top
+        // level" is inside the inbox too.
+        let inbox = remote.iter().find(|f| f.remote_name.eq_ignore_ascii_case(b"INBOX"));
+        let inside_inbox = inbox.is_some()
+            && remote.len() > 1
+            && remote.iter().all(|f| f.path.eq_ignore_ascii_case("INBOX") || f.path.to_ascii_uppercase().starts_with("INBOX/"));
+        let parent = match parent {
+            Some(id) => match remote.iter().find(|f| f.id == id) {
+                Some(found) => Some(found),
+                None => return refuse("That folder cannot hold other folders."),
+            },
+            None if inside_inbox => inbox,
+            None => None,
+        };
+        let segment = encode_segment(name);
+        let encoded = crate::imap::utf7::encode(name);
+        let (path, remote_name) = match parent {
+            Some(p) => {
+                let mut raw = p.remote_name.clone();
+                raw.extend_from_slice(delimiter.to_string().as_bytes());
+                raw.extend_from_slice(&encoded);
+                (format!("{}/{segment}", p.path), raw)
+            }
+            None => (segment, encoded),
+        };
+        if self.index().folders()?.iter().any(|f| f.path.eq_ignore_ascii_case(&path)) {
+            return refuse("There is already a folder with that name there.");
+        }
+        let id = self.add_remote_folder(&super::sync_state::RemoteFolderInfo {
+            path: &path,
+            name,
+            remote_name: &remote_name,
+            delimiter: Some(delimiter),
+            selectable: true,
+            special_use: None,
+        })?;
+        let conn = self.index().writer();
+        enqueue(&conn, &Action::CreateFolder { folder: id })?;
+        Ok(Ok(id))
+    }
+
+    /// Deletes a folder and the mail in it, here and (queued) on the
+    /// server. Only an ordinary folder with no folders inside it.
+    pub fn delete_remote_folder(&self, id: i64) -> Result<std::result::Result<(), FolderRefusal>> {
+        let refuse = |why: &str| Ok(Err(FolderRefusal(why.to_string())));
+        let folders = self.index().folders()?;
+        let Some(folder) = folders.iter().find(|f| f.id == id) else {
+            return refuse("That folder no longer exists.");
+        };
+        if super::sync_state::role_of(&folder.path, &folder.name, folder.special_use.as_deref()).is_some() {
+            return refuse("This folder is one the account needs and cannot be deleted.");
+        }
+        let inside = format!("{}/", folder.path);
+        if folders.iter().any(|f| f.path.starts_with(&inside)) {
+            return refuse("Delete the folders inside this one first.");
+        }
+        let remote = self.index().remote_folders()?;
+        let Some(remote_name) = remote.iter().find(|f| f.id == id).map(|f| f.remote_name.clone()) else {
+            return refuse("This folder exists only on this computer.");
+        };
+        self.remove_folder(id)?;
+        let conn = self.index().writer();
+        enqueue(&conn, &Action::DeleteFolder { remote_name })?;
+        Ok(Ok(()))
     }
 }

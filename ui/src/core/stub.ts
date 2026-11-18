@@ -150,6 +150,10 @@ function answer(command: Command): Response {
           replaces: null,
         },
       };
+    case "createFolder":
+      return { type: "folderCreated", folder: "stub/small" };
+    case "deleteFolder":
+      return { type: "accepted" };
     case "saveDraft":
       return { type: "draftSaved", id: 1 };
     case "sendMessage":

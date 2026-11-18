@@ -523,6 +523,36 @@ impl Core {
                 self.acted(&account, touched);
                 Ok(Response::Accepted)
             }
+            Command::CreateFolder { parent, name } => {
+                let (account, parent) = match self.target(&parent)? {
+                    Target::Account(account) => (account, None),
+                    Target::Folder(account, id) => (account, Some(id)),
+                    Target::Synthetic(_) => return Err(CoreError::new(ErrorCode::NotPossible, "not a real account")),
+                };
+                self.must_sync(&account)?;
+                let id = account
+                    .store
+                    .create_remote_folder(parent, &name)
+                    .map_err(internal)?
+                    .map_err(|refusal| CoreError::new(ErrorCode::NotPossible, refusal.0))?;
+                self.inner.sink.emit(Event::FoldersChanged { account: account.id.clone() });
+                account.signals.changes.notify_one();
+                Ok(Response::FolderCreated { folder: format!("{}/{id}", account.id) })
+            }
+            Command::DeleteFolder { folder } => {
+                let Target::Folder(account, id) = self.target(&folder)? else {
+                    return Err(CoreError::new(ErrorCode::NotPossible, "that is not a folder"));
+                };
+                self.must_sync(&account)?;
+                account
+                    .store
+                    .delete_remote_folder(id)
+                    .map_err(internal)?
+                    .map_err(|refusal| CoreError::new(ErrorCode::NotPossible, refusal.0))?;
+                self.inner.sink.emit(Event::FoldersChanged { account: account.id.clone() });
+                account.signals.changes.notify_one();
+                Ok(Response::Accepted)
+            }
             Command::SaveAttachment { folder, id, index } => {
                 let account = self.account(&folder)?;
                 let Some(downloads) = &self.inner.downloads_dir else {

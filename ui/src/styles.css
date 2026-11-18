@@ -846,3 +846,41 @@ button.inline:hover {
   color: #fff;
   font-weight: 600;
 }
+
+/* Folder management */
+
+.new-folder {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-2);
+  font-size: 16px;
+  line-height: 18px;
+}
+
+.new-folder:hover {
+  background: #e6e8ec;
+  color: var(--accent);
+}
+
+.folder-naming {
+  padding: 6px 8px;
+}
+
+.folder-naming input {
+  width: 100%;
+  padding: 4px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  font: inherit;
+  color: inherit;
+  user-select: text;
+}
+
+.delete-folder {
+  margin-left: 10px;
+}

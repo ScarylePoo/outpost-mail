@@ -141,6 +141,19 @@ impl Index {
         })
     }
 
+    /// The character the server puts between the levels of a folder name.
+    pub fn delimiter(&self) -> Result<Option<char>> {
+        self.read(|conn| {
+            conn.query_row(
+                "SELECT delimiter FROM folder WHERE delimiter IS NOT NULL AND delimiter != '' LIMIT 1",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+        })
+        .map(|d| d.and_then(|d| d.chars().next()))
+    }
+
     pub fn set_sync_state(&self, folder_id: i64, state: &SyncState) -> Result<()> {
         self.writer().execute(
             "UPDATE folder SET uidvalidity = ?1, uidnext = ?2, highestmodseq = ?3, headers_done = ?4

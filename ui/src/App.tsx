@@ -293,6 +293,37 @@ export function App() {
     }
   }
 
+  // ---- folders ------------------------------------------------------------
+
+  /** The account (or folder) a new folder is being named under, if any. */
+  const [naming, setNaming] = createSignal<string>();
+
+  function createFolder(parent: string, name: string) {
+    setNaming(undefined);
+    if (!name.trim()) return;
+    core
+      .send({ type: "createFolder", parent, name })
+      .then((r) => loadFolders((all) => all.find((f) => f.id === r.folder)))
+      .catch((e) => setNotice(String(e?.message ?? e)));
+  }
+
+  /** An ordinary folder with nothing inside it can be deleted. */
+  const deletable = createMemo(() => {
+    const f = folder();
+    if (!f || f.role !== null || !canSync()) return false;
+    const all = folders();
+    const next = all[all.findIndex((x) => x.id === f.id) + 1];
+    return !next || next.depth <= f.depth;
+  });
+
+  function deleteFolder() {
+    const f = folder();
+    if (!f) return;
+    const mail = f.total > 0 ? ` and the ${f.total.toLocaleString()} message${f.total === 1 ? "" : "s"} in it` : "";
+    if (!window.confirm(`Delete the folder "${f.name}"${mail}? This cannot be undone.`)) return;
+    send({ type: "deleteFolder", folder: f.id });
+  }
+
   // ---- writing ------------------------------------------------------------
 
   const [undo, setUndo] = createSignal<{ account: string; id: number; subject: string }>();
@@ -473,6 +504,11 @@ export function App() {
               fallback={
                 <div class="account">
                   <span class="account-name">{f.name}</span>
+                  <Show when={accounts().find((a) => a.id === f.id && a.host)}>
+                    <button class="new-folder" title="New folder" onClick={() => setNaming(f.id)}>
+                      +
+                    </button>
+                  </Show>
                   <Show when={accounts().find((a) => a.id === f.id && needsSignIn(a))}>
                     <button class="sign-in" onClick={() => setPanel({ kind: "password", account: f.id })}>
                       Sign in
@@ -495,6 +531,27 @@ export function App() {
             </Show>
           )}
         </For>
+        <Show when={naming()}>
+          {(parent) => (
+            <form
+              class="folder-naming"
+              onSubmit={(e) => {
+                e.preventDefault();
+                createFolder(parent(), new FormData(e.currentTarget).get("name")?.toString() ?? "");
+              }}
+            >
+              <input
+                name="name"
+                type="text"
+                placeholder="Name of the new folder"
+                aria-label="Name of the new folder"
+                ref={(el) => queueMicrotask(() => el.focus())}
+                onKeyDown={(e) => e.key === "Escape" && setNaming(undefined)}
+                onBlur={() => setNaming(undefined)}
+              />
+            </form>
+          )}
+        </Show>
       </nav>
 
       <main class="list-pane">
@@ -506,6 +563,11 @@ export function App() {
                 <span>
                   <Show when={count() > 1 && !searching()} fallback={<>{f.total.toLocaleString()} messages</>}>
                     {count().toLocaleString()} of {f.total.toLocaleString()} selected
+                  </Show>
+                  <Show when={deletable()}>
+                    <button class="inline delete-folder" onClick={deleteFolder}>
+                      Delete folder
+                    </button>
                   </Show>
                 </span>
               </div>

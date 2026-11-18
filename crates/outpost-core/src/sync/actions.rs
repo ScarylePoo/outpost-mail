@@ -98,6 +98,8 @@ fn describe(action: &Action) -> String {
         Action::Expunge { items, .. } => format!("Deleting {}", count(items)),
         Action::Append { .. } => "Saving a message to the server".to_string(),
         Action::Send { .. } => "Sending a message".to_string(),
+        Action::CreateFolder { .. } => "Creating a folder".to_string(),
+        Action::DeleteFolder { .. } => "Deleting a folder".to_string(),
     }
 }
 
@@ -115,6 +117,14 @@ fn undo(store: &Store, action: &Action) -> Result<Vec<i64>> {
         Action::Append { .. } => Vec::new(),
         // Back to Drafts, where the user can fix it and try again.
         Action::Send { message } => store.back_to_drafts(*message)?,
+        // A folder the server would not create must not linger here,
+        // looking as if it were safe to file mail in.
+        Action::CreateFolder { folder } => {
+            store.remove_folder(*folder)?;
+            Vec::new()
+        }
+        // The next folder list brings it back.
+        Action::DeleteFolder { .. } => Vec::new(),
     })
 }
 
@@ -140,6 +150,35 @@ async fn carry_out(
 ) -> Result<Vec<i64>> {
     let index = store.index();
     match action {
+        Action::CreateFolder { folder: id } => {
+            let Some(wanted) = folders.get(id) else {
+                return Ok(Vec::new());
+            };
+            match session.create_folder(&wanted.remote_name).await {
+                // Refused because it is already there (an earlier attempt
+                // got through) is the outcome we wanted.
+                Err(e @ ImapError::Rejected { .. }) => {
+                    let exists = session.list().await?.iter().any(|f| f.raw_name == wanted.remote_name);
+                    if !exists {
+                        return Err(SyncError::Refused(e.to_string()));
+                    }
+                }
+                other => other?,
+            }
+            Ok(Vec::new())
+        }
+        Action::DeleteFolder { remote_name } => {
+            match session.delete_folder(remote_name).await {
+                Err(e @ ImapError::Rejected { .. }) => {
+                    let exists = session.list().await?.iter().any(|f| &f.raw_name == remote_name);
+                    if exists {
+                        return Err(SyncError::Refused(e.to_string()));
+                    }
+                }
+                other => other?,
+            }
+            Ok(Vec::new())
+        }
         Action::Send { message } => {
             if index.brief(*message)?.is_none() {
                 // Deleted from the outbox before its turn came.

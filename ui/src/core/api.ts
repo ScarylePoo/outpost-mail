@@ -17,6 +17,8 @@ export type Command =
   | { type: "moveMessages"; ids: number[]; to: FolderId }
   | { type: "archiveMessages"; folder: FolderId; ids: number[] }
   | { type: "deleteMessages"; folder: FolderId; ids: number[]; permanently: boolean }
+  | { type: "createFolder"; parent: FolderId; name: string }
+  | { type: "deleteFolder"; folder: FolderId }
   | { type: "saveAttachment"; folder: FolderId; id: number; index: number }
   | { type: "locateMessage"; folder: FolderId; id: number }
   | { type: "listAccounts" }
@@ -141,6 +143,7 @@ export type Response =
   | { type: "draftSaved"; id: number }
   | { type: "sendQueued"; id: number }
   | { type: "sendCancelled"; cancelled: boolean }
+  | { type: "folderCreated"; folder: FolderId }
   | { type: "located"; index: number | null }
   | { type: "accounts"; accounts: AccountInfo[] }
   | { type: "accepted" };
@@ -170,6 +173,8 @@ type ResponseFor = {
   moveMessages: "accepted";
   archiveMessages: "accepted";
   deleteMessages: "accepted";
+  createFolder: "folderCreated";
+  deleteFolder: "accepted";
   saveAttachment: "attachmentSaved";
   locateMessage: "located";
   listAccounts: "accounts";

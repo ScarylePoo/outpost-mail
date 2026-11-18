@@ -265,3 +265,57 @@ async fn sync_does_not_undo_what_the_user_just_did() {
     assert_eq!(pending, [1, 2, 3]);
     assert!(store.index().pending_uids(folder_id(&store, "Filed")).unwrap().is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn folders_are_created_and_deleted_here_first_and_then_on_the_server() {
+    let Some(server) = TestServer::start() else { return };
+    let mut other = server.other_client("gus");
+    other.cmd("CREATE Projects");
+    other.append("INBOX", "", &message(1, "to file", "body"));
+    let tmp = TempDir::new();
+    let store = Store::open(tmp.path()).unwrap();
+    sync(&store, server.server(), "gus").await;
+    let projects = folder_id(&store, "Projects");
+
+    // Created offline, nested and with a name that needs encoding; mail is
+    // filed into it before the server has heard of it.
+    let alpha = store.create_remote_folder(Some(projects), "Alpha").unwrap().unwrap();
+    let cafe = store.create_remote_folder(None, "Café notes").unwrap().unwrap();
+    store.move_messages(&[id_of(&store, "INBOX", "to file")], alpha).unwrap();
+    assert_eq!(subjects(&store, "Projects/Alpha"), ["to file"]);
+    assert!(tmp.path().join("mail/Projects/Alpha/cur").is_dir());
+
+    for (parent, name, why) in [
+        (None, "", "needs a name"),
+        (None, "a/b", "cannot contain"),
+        (Some(projects), "alpha", "already"),
+        (Some(9999), "x", "cannot hold"),
+    ] {
+        let refusal = store.create_remote_folder(parent, name).unwrap().unwrap_err();
+        assert!(refusal.0.contains(why), "{name:?}: {}", refusal.0);
+    }
+
+    sync(&store, server.server(), "gus").await;
+    let on_server: Vec<String> = other.cmd("LIST \"\" \"*\"").into_iter().filter(|l| l.starts_with("* LIST")).collect();
+    assert!(on_server.iter().any(|l| l.ends_with("Projects/Alpha")), "{on_server:?}");
+    assert!(on_server.iter().any(|l| l.contains("Caf&AOk- notes")), "{on_server:?}");
+    assert_eq!(other.subjects_in("Projects/Alpha").len(), 1);
+    assert!(other.subjects_in("INBOX").is_empty());
+    let again = sync(&store, server.server(), "gus").await;
+    assert_eq!((again.headers_fetched, again.bodies_fetched, again.removed), (0, 0, 0), "{again:?}");
+    assert_eq!(subjects(&store, "Projects/Alpha"), ["to file"]);
+
+    // Deleting: not a folder the account needs, not one with folders inside.
+    for (id, why) in [(folder_id(&store, "INBOX"), "needs"), (folder_id(&store, "Trash"), "needs"), (projects, "inside")] {
+        let refusal = store.delete_remote_folder(id).unwrap().unwrap_err();
+        assert!(refusal.0.contains(why), "{}", refusal.0);
+    }
+    store.delete_remote_folder(cafe).unwrap().unwrap();
+    store.delete_remote_folder(alpha).unwrap().unwrap();
+    assert!(!tmp.path().join("mail/Projects/Alpha").exists());
+    sync(&store, server.server(), "gus").await;
+    let on_server: Vec<String> = other.cmd("LIST \"\" \"*\"").into_iter().filter(|l| l.starts_with("* LIST")).collect();
+    assert!(!on_server.iter().any(|l| l.contains("Alpha") || l.contains("Caf")), "{on_server:?}");
+    let paths: Vec<String> = store.index().folders().unwrap().into_iter().map(|f| f.path).collect();
+    assert!(!paths.iter().any(|p| p.contains("Alpha") || p.contains("Caf")), "{paths:?}");
+}

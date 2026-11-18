@@ -7,6 +7,53 @@ started.
 Status words: **Decided** (owner agreed), **Proposal** (default in use, owner
 has not reviewed), **Finding** (a test result).
 
+## 2026-11-18 · Milestone 3 (in progress)
+
+**Proposals** unless marked otherwise.
+
+### HTML mail is made safe twice
+
+1. The core reduces it to formatting before it leaves (`render.rs`, using the
+   `ammonia` library, MIT or Apache-2.0): no scripts, forms, frames, embedded
+   objects, style sheets or event handlers, and only a fixed list of style
+   properties that cannot fetch anything or cover the window.
+2. The interface shows the result in a sandboxed frame that cannot run
+   scripts, submit forms or open windows, under a content policy that allows
+   no network access.
+
+Either should be enough alone. Tested with fifteen kinds of hostile markup.
+
+Costs to know about: style sheets in the message head are dropped, so some
+newsletters lose their layout (inline styles survive). Remote pictures are
+never loaded; the pane says when there were some. Pictures embedded in the
+message by content ID (`cid:`) are not shown yet. The per-sender allow list
+for remote pictures is milestone 6.
+
+### Links do not navigate
+
+Clicking a link in a message shows where it really goes, with a Copy button.
+Opening it in the browser is not wired up yet (it needs a shell permission).
+This is the handoff doc's "always show a link's real destination", applied to
+every message for now rather than as a setting.
+
+### Folder tree order, and folders kept inside the inbox
+
+Inbox, Drafts, Sent, Archive, Junk, Trash, then everything else by name. A
+folder's role comes from the server's special-use marker, otherwise from its
+name (Sent Items, Deleted Items, Spam and so on). When every folder on the
+server is a child of the inbox, as on the owner's host, they are shown beside
+the inbox instead of under it. The folders on disk are not rearranged.
+
+### Still to do in milestone 3
+
+- The app starting sync itself: account setup, stored credentials, sync
+  status, and the list updating as mail arrives. Today the app shows whatever
+  `outpost-sync` last fetched.
+- A search box (the core's search is there; the interface has none).
+- The list-height limit for folders over about 350,000 messages.
+- Opening a link in the browser, attachments, and `cid:` pictures.
+- A second connection so inbox push is not held up by a long first sync.
+
 ## 2026-11-18 · Milestone 2 closed
 
 ### Finding: the owner's hosted account syncs, and nothing on the server changed

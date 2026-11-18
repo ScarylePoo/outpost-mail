@@ -44,15 +44,92 @@ name (Sent Items, Deleted Items, Spam and so on). When every folder on the
 server is a child of the inbox, as on the owner's host, they are shown beside
 the inbox instead of under it. The folders on disk are not rearranged.
 
+### Accounts are added in the app, and the app syncs them itself
+
+Adding an account signs in first and saves nothing unless that works. The
+server details go in `account.json` in the account's folder; the password
+never does. Each account then syncs for as long as the app is open, and the
+window follows along: sync status in the status bar, folder counts, and the
+open list updating in place when mail arrives (keeping the same message at
+the top of the view and the same one selected).
+
+Mail lives in the per-user application data folder (`OUTPOST_DATA` overrides
+it). An installation with no accounts shows the synthetic demo account until
+one is added.
+
+**Decided (owner agreed 18 Nov 2026):** passwords are kept in the operating
+system's credential store (Windows Credential Manager, macOS keychain, the
+Secret Service on Linux) through the `keyring` library (MIT or Apache-2.0).
+Where there is no such store, as under WSL, the app asks for the password
+each time it starts and keeps it in memory only. Passwords travel between the
+interface and the core in a type that prints as `***`, so one cannot reach a
+log through a debug message.
+
+Not built yet: removing an account, editing its details, and accepting a
+self-signed certificate from the setup screen. All belong with the settings
+window (milestone 8) unless needed sooner.
+
+### An out-of-date or empty index rebuilds itself
+
+If the app opens an index written by an older version, or an empty one beside
+mail files, it rebuilds it from the files in the background, showing progress
+in the status bar, and then starts sync. Found the hard way: without this, an
+upgrade showed an account with no folders and no explanation.
+
+### The list scrolls folders of any size
+
+Past 8 million pixels of content (about 85,000 rows) the scrollbar covers a
+stand-in height and the list keeps the true position itself. Wheel, touch and
+keys still move the content one for one; dragging the scrollbar covers the
+whole folder proportionally. This removes the limit recorded under milestone
+1, where the last rows of a 352,000-message folder could not be reached.
+Checked in the app on a 162,790-message folder: both ends reachable, 2 slow
+frames of 1,413.
+
+### Search box
+
+Above the list: results as you type, newest first, with a button that states
+and switches the scope (this folder, or all folders of the account). Results
+show the newest 200 matches. A result does not yet say which folder it is in,
+and there is no search across accounts.
+
+### Links, attachments and embedded pictures
+
+- A link's destination is shown first; **Open** then hands it to the system's
+  browser or mail program. Only `http`, `https` and `mailto` links can be
+  opened, checked in the shell, so a message cannot open a file or start a
+  program through an unusual address.
+- An attachment is saved to the Downloads folder, never opened directly. Its
+  name is cleaned (no folders, no reserved or hidden names) and it never
+  replaces an existing file. **Show in folder** reveals it in the file
+  manager. Choosing where to save, and opening in place, are not built.
+- Pictures carried inside the message (`cid:`) are shown; they need no
+  network. Remote pictures are still never loaded.
+
+### The inbox stays current during a long download
+
+Still one connection per account, but while any other folder's bodies are
+downloading, the download pauses every 30 seconds to bring the inbox up to
+date. That covers the case a second connection was meant for (new mail stuck
+behind a first sync of a big archive) with much less machinery. A second
+connection can still be added if this proves too slow in practice.
+
+### Testing the app as a whole
+
+`tools/app-selftest.py` starts a throwaway Dovecot, runs the real app against
+it, adds an account through the interface, delivers a message while the
+window is open, and reports what the window showed. It is the only test that
+covers window, core and sync together. It needs a display, so it is run by
+hand on Linux and is not part of CI.
+
 ### Still to do in milestone 3
 
-- The app starting sync itself: account setup, stored credentials, sync
-  status, and the list updating as mail arrives. Today the app shows whatever
-  `outpost-sync` last fetched.
-- A search box (the core's search is there; the interface has none).
-- The list-height limit for folders over about 350,000 messages.
-- Opening a link in the browser, attachments, and `cid:` pictures.
-- A second connection so inbox push is not held up by a long first sync.
+- The owner's judgement on the result: the milestone is done "when the owner
+  can read his real mail in Outpost and scrolling meets the target".
+- Not tried on Windows beyond building, the unit tests and the scroll test:
+  adding a real account there, and the Windows credential store.
+- The by-eye scrolling check on both systems, still open from milestone 0.
+- Keyboard shortcuts beyond list navigation, and a menu bar (milestone 8).
 
 ## 2026-11-18 · Milestone 2 closed
 

@@ -179,7 +179,7 @@ Outpost supports two sign-in methods: a password, and OAuth with a client ID the
 - Tokens refresh automatically. A failed refresh shows a clear prompt to sign in again.
 - No client ID ships with the app in version 1. The account setup screen links to short instructions for creating one with each provider.
 
-**Credential storage (Proposal):** passwords and tokens go in the operating system's credential store on each platform, never in the index, settings files or logs.
+**Credential storage (Decided 18 Nov 2026):** passwords and tokens go in the operating system's credential store on each platform, never in the index, settings files or logs. Where the system has no such store (WSL, for one), the app asks at each start and keeps the password in memory only.
 
 **Account settings:** everything about an account is on one page: servers, sign-in, identity, signature, sync choices and the cPanel add-on.
 

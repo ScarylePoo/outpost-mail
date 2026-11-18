@@ -71,6 +71,28 @@ then resumed with nothing duplicated; a folder the server renumbered; folders
 created and deleted elsewhere; push, polling and reconnecting in a running
 sync; and a rebuilt index not downloading anything again.
 
+## The app self-test (milestone 3)
+
+```sh
+python3 tools/app-selftest.py            # uses target/release/outpost
+```
+
+Linux only; needs Dovecot and a built app. It starts a throwaway Dovecot,
+runs the real app against it, adds an account through the interface, delivers
+one more message while the window is open, opens a message and runs a search,
+then prints what the window showed. Expect an account that is up to date, the
+folder tree, six messages after the late delivery, the reader's text, and six
+search results. It opens a window for about ten seconds.
+
+## Using the app with a real account (milestone 3)
+
+Start the app, press **Add account**, and enter the address, password and
+server. It signs in to check them, then syncs and stays in sync while open.
+It is still read-only: nothing it does changes mail on the server.
+
+Under WSL start it with `WEBKIT_DISABLE_DMABUF_RENDERER=1`, and expect to be
+asked for the password at each start, because WSL has no credential store.
+
 ## Syncing a real account from the command line (milestone 2)
 
 Until the app has account setup, `outpost-sync` runs the sync engine from a

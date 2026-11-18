@@ -13,6 +13,10 @@ export type Command =
   | { type: "listMessages"; folder: FolderId; offset: number; limit: number }
   | { type: "openMessage"; folder: FolderId; id: number }
   | { type: "search"; scope: FolderId; text: string; limit: number }
+  | { type: "changeFlags"; folder: FolderId; ids: number[]; seen: boolean | null; flagged: boolean | null }
+  | { type: "moveMessages"; ids: number[]; to: FolderId }
+  | { type: "archiveMessages"; folder: FolderId; ids: number[] }
+  | { type: "deleteMessages"; folder: FolderId; ids: number[]; permanently: boolean }
   | { type: "saveAttachment"; folder: FolderId; id: number; index: number }
   | { type: "locateMessage"; folder: FolderId; id: number }
   | { type: "listAccounts" }
@@ -48,6 +52,7 @@ export interface MessageRow {
   subject: string;
   preview: string;
   unread: boolean;
+  flagged: boolean;
   hasAttachment: boolean;
 }
 
@@ -108,6 +113,7 @@ export type CoreEvent =
   | { type: "accountStatus"; account: FolderId; status: SyncStatus }
   | { type: "folderChanged"; folder: FolderId }
   | { type: "foldersChanged"; account: FolderId }
+  | { type: "notice"; account: FolderId; text: string }
   | { type: "accountAdded"; account: FolderId }
   | { type: "accountSetupFailed"; error: string };
 
@@ -124,6 +130,10 @@ type ResponseFor = {
   listMessages: "messages";
   search: "searchResults";
   openMessage: "message";
+  changeFlags: "accepted";
+  moveMessages: "accepted";
+  archiveMessages: "accepted";
+  deleteMessages: "accepted";
   saveAttachment: "attachmentSaved";
   locateMessage: "located";
   listAccounts: "accounts";

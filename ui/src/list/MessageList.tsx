@@ -287,8 +287,16 @@ export function MessageList(props: {
       setLayoutTick((t) => t + 1);
       setTop(nextTop);
       lastTop = virtualTop;
-      if (selectedIndex === null) selectedId = undefined;
-      setSelected(selectedIndex ?? -1);
+      if (selectedIndex !== null || selectedId === undefined) {
+        setSelected(selectedIndex ?? -1);
+      } else {
+        // The selected message has left the folder (deleted, moved). Select
+        // whatever is now in its place, so the next Delete acts on the next
+        // message, as people expect.
+        const next = Math.min(selected(), n - 1);
+        selectedId = undefined;
+        setSelected(next);
+      }
       setDataTick((t) => t + 1);
       update();
     } catch {
@@ -455,6 +463,11 @@ export function MessageList(props: {
                       <div class="row-top">
                         <span class="row-dot" />
                         <span class="row-sender">{r().senderName}</span>
+                        <Show when={r().flagged}>
+                          <span class="row-flag" title="Flagged">
+                            ⚑
+                          </span>
+                        </Show>
                         <Show when={r().hasAttachment}>
                           <span class="row-clip" title="Has attachment">
                             📎

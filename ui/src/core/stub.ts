@@ -51,6 +51,7 @@ function row(i: number): MessageRow {
     subject: (hash(i * 3) % 3 === 0 ? "Re: " : "") + TOPICS[hash(i * 5) % TOPICS.length]!,
     preview: preview(i),
     unread: flags < 12,
+    flagged: flags >= 96,
     hasAttachment: flags >= 90,
   };
 }
@@ -131,6 +132,10 @@ function answer(command: Command): Response {
         600,
       );
       return { type: "accepted" };
+    case "changeFlags":
+    case "moveMessages":
+    case "archiveMessages":
+    case "deleteMessages":
     case "providePassword":
     case "syncNow":
       return { type: "accepted" };

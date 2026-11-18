@@ -417,6 +417,61 @@ impl Core {
                     rows: message_rows(rows, 0),
                 })
             }
+            Command::ChangeFlags {
+                folder,
+                ids,
+                seen,
+                flagged,
+            } => {
+                let account = self.syncing_account(&folder)?;
+                let mut add = Flags::default();
+                let mut remove = Flags::default();
+                for (wanted, flag) in [(seen, Flags::SEEN), (flagged, Flags::FLAGGED)] {
+                    match wanted {
+                        Some(true) => add = add.with(flag),
+                        Some(false) => remove = remove.with(flag),
+                        None => {}
+                    }
+                }
+                let touched = account.store.change_flags(&ids, add, remove).map_err(internal)?;
+                self.acted(&account, touched);
+                Ok(Response::Accepted)
+            }
+            Command::MoveMessages { ids, to } => {
+                let Target::Folder(account, destination) = self.target(&to)? else {
+                    return Err(CoreError::new(ErrorCode::NotPossible, "messages can only be moved into a folder"));
+                };
+                self.must_sync(&account)?;
+                let touched = account.store.move_messages(&ids, destination).map_err(internal)?;
+                self.acted(&account, touched);
+                Ok(Response::Accepted)
+            }
+            Command::ArchiveMessages { folder, ids } => {
+                let account = self.syncing_account(&folder)?;
+                let archive = self.folder_with_role(&account, "archive")?.ok_or_else(|| {
+                    CoreError::new(ErrorCode::NotPossible, "this account has no archive folder")
+                })?;
+                let touched = account.store.move_messages(&ids, archive).map_err(internal)?;
+                self.acted(&account, touched);
+                Ok(Response::Accepted)
+            }
+            Command::DeleteMessages {
+                folder,
+                ids,
+                permanently,
+            } => {
+                let account = self.syncing_account(&folder)?;
+                let touched = if permanently {
+                    account.store.expunge_messages(&ids).map_err(internal)?
+                } else {
+                    let trash = self.folder_with_role(&account, "trash")?.ok_or_else(|| {
+                        CoreError::new(ErrorCode::NotPossible, "this account has no trash folder")
+                    })?;
+                    account.store.move_messages(&ids, trash).map_err(internal)?
+                };
+                self.acted(&account, touched);
+                Ok(Response::Accepted)
+            }
             Command::SaveAttachment { folder, id, index } => {
                 let account = self.account(&folder)?;
                 let Some(downloads) = &self.inner.downloads_dir else {
@@ -534,6 +589,41 @@ impl Core {
                 Ok(Response::Accepted)
             }
         }
+    }
+
+    /// The account a folder belongs to, if it is one that syncs. Changes
+    /// are only accepted for those: on any other they would wait for ever.
+    fn syncing_account(&self, folder: &FolderId) -> Result<Arc<Account>, CoreError> {
+        let account = self.account(folder)?;
+        self.must_sync(&account)?;
+        Ok(account)
+    }
+
+    fn must_sync(&self, account: &Account) -> Result<(), CoreError> {
+        if account.config.is_none() {
+            return Err(CoreError::new(
+                ErrorCode::NotPossible,
+                "this mail is only stored here, with no server to change it on",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The account's folder with the given role, if it has one.
+    fn folder_with_role(&self, account: &Account, role: &str) -> Result<Option<i64>, CoreError> {
+        let folders = account.store.index().folders().map_err(internal)?;
+        Ok(folders.iter().find(|f| role_of(f) == Some(role)).map(|f| f.id))
+    }
+
+    /// After the user changed something: tell the interface which folders
+    /// look different, and tell sync there is something to send.
+    fn acted(&self, account: &Account, touched: impl IntoIterator<Item = i64>) {
+        for folder_id in touched {
+            self.inner.sink.emit(Event::FolderChanged {
+                folder: format!("{}/{folder_id}", account.id),
+            });
+        }
+        account.signals.changes.notify_one();
     }
 
     /// Checks the details by signing in, then saves the account and starts
@@ -862,6 +952,7 @@ fn message_rows(rows: Vec<ListRow>, first_index: u32) -> Vec<MessageRow> {
             subject: r.subject,
             preview: r.preview,
             unread: !r.flags.contains(Flags::SEEN),
+            flagged: r.flags.contains(Flags::FLAGGED),
             has_attachment: r.has_attachment,
         })
         .collect()

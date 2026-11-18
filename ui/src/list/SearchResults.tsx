@@ -65,6 +65,11 @@ export function SearchResults(props: {
             <div class="row-top">
               <span class="row-dot" />
               <span class="row-sender">{row.senderName}</span>
+              <Show when={row.flagged}>
+                <span class="row-flag" title="Flagged">
+                  ⚑
+                </span>
+              </Show>
               <Show when={row.hasAttachment}>
                 <span class="row-clip" title="Has attachment">
                   📎

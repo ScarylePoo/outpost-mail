@@ -219,3 +219,82 @@ fn an_out_of_date_index_is_rebuilt_from_the_mail_files_by_itself() {
     assert_eq!(inbox.total, 25);
     assert_eq!(subjects(&core, &inbox.id).len(), 25);
 }
+
+#[test]
+fn what_the_user_does_in_the_app_reaches_the_server() {
+    let Some(server) = TestServer::start() else { return };
+    let mut other = server.other_client("zoe");
+    for n in 1..=4 {
+        other.append("INBOX", "", &message(n, &format!("m{n}"), "hello"));
+    }
+    let data = TempDir::new();
+    let (core, events) = start(&data, Arc::new(MemorySecrets::default()));
+    add(&core, &server, "zoe", PASSWORD, false);
+    wait_for_state(&events, SyncState::UpToDate);
+    let tree = folders(&core);
+    let folder = |role: &str| tree.iter().find(|f| f.role.as_deref() == Some(role)).unwrap().id.clone();
+    let (inbox, trash, archive) = (folder("inbox"), folder("trash"), folder("archive"));
+    let id = |subject: &str| -> i64 {
+        match core.handle(Command::ListMessages { folder: inbox.clone(), offset: 0, limit: 100 }).unwrap() {
+            Response::Messages { rows, .. } => rows.into_iter().find(|r| r.subject == subject).unwrap().id,
+            other => panic!("{other:?}"),
+        }
+    };
+    let (m1, m2, m3, m4) = (id("m1"), id("m2"), id("m3"), id("m4"));
+
+    core.handle(Command::ChangeFlags { folder: inbox.clone(), ids: vec![m1], seen: Some(true), flagged: Some(true) }).unwrap();
+    core.handle(Command::DeleteMessages { folder: inbox.clone(), ids: vec![m2], permanently: false }).unwrap();
+    core.handle(Command::ArchiveMessages { folder: inbox.clone(), ids: vec![m3] }).unwrap();
+    core.handle(Command::DeleteMessages { folder: inbox.clone(), ids: vec![m4], permanently: true }).unwrap();
+
+    // Here, at once.
+    assert_eq!(subjects(&core, &inbox), ["m1"]);
+    assert_eq!(subjects(&core, &trash), ["m2"]);
+    assert_eq!(subjects(&core, &archive), ["m3"]);
+    let Response::Messages { rows, .. } =
+        core.handle(Command::ListMessages { folder: inbox.clone(), offset: 0, limit: 10 }).unwrap()
+    else {
+        panic!()
+    };
+    assert!(!rows[0].unread && rows[0].flagged);
+
+    // On the server, shortly, without anyone asking for a sync.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (i, t, a) = (other.subjects_in("INBOX"), other.subjects_in("Trash"), other.subjects_in("Archive"));
+        if i == [("m1".to_string(), "\\Flagged \\Seen".to_string())] && t.len() == 1 && a.len() == 1 {
+            assert_eq!((t[0].0.as_str(), a[0].0.as_str()), ("m2", "m3"));
+            break;
+        }
+        assert!(Instant::now() < deadline, "the server never caught up: {i:?} {t:?} {a:?}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // And nothing bounces back afterwards.
+    core.handle(Command::SyncNow { account: "acct/zoe".into() }).unwrap();
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(subjects(&core, &inbox), ["m1"]);
+    assert_eq!(subjects(&core, &trash), ["m2"]);
+    assert_eq!(subjects(&core, &archive), ["m3"]);
+}
+
+#[test]
+fn mail_that_is_only_browsed_cannot_be_changed() {
+    use outpost_core::store::maildir::Flags;
+    use outpost_core::store::Store;
+    let data = TempDir::new();
+    let id = {
+        let store = Store::open(data.path().join("accounts/local")).unwrap();
+        let inbox = store.create_folder(&["INBOX"]).unwrap();
+        store.add_message(inbox, &message(1, "kept", "x"), Flags::default(), None).unwrap()
+    };
+    let (core, _events) = start(&data, Arc::new(MemorySecrets::default()));
+    let inbox = folders(&core).into_iter().find(|f| f.role.as_deref() == Some("inbox")).unwrap().id;
+    for command in [
+        Command::ChangeFlags { folder: inbox.clone(), ids: vec![id], seen: Some(true), flagged: None },
+        Command::DeleteMessages { folder: inbox.clone(), ids: vec![id], permanently: true },
+        Command::MoveMessages { ids: vec![id], to: inbox.clone() },
+    ] {
+        assert_eq!(core.handle(command).unwrap_err().code, ErrorCode::NotPossible);
+    }
+    assert_eq!(subjects(&core, &inbox), ["kept"]);
+}

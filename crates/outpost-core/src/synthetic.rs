@@ -123,6 +123,7 @@ pub fn row(seed: u64, index: u32) -> MessageRow {
         subject: format!("{prefix}{topic}"),
         preview,
         unread: flags < 12,
+        flagged: false,
         has_attachment: flags >= 90,
     }
 }

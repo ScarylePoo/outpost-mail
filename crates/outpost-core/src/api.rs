@@ -45,6 +45,27 @@ pub enum Command {
         text: String,
         limit: u32,
     },
+    /// Marks messages read or unread, flagged or not. `None` leaves that
+    /// mark as it is. Shown at once; the server is told in the background.
+    /// `folder` is any folder of the messages' account.
+    ChangeFlags {
+        folder: FolderId,
+        ids: Vec<i64>,
+        seen: Option<bool>,
+        flagged: Option<bool>,
+    },
+    /// Moves messages to another folder of the same account.
+    MoveMessages { ids: Vec<i64>, to: FolderId },
+    /// Moves messages to the account's archive folder.
+    ArchiveMessages { folder: FolderId, ids: Vec<i64> },
+    /// Deletes messages. Normally that moves them to the trash folder.
+    /// With `permanently`, they are removed for good: the interface asks
+    /// the user before sending that.
+    DeleteMessages {
+        folder: FolderId,
+        ids: Vec<i64>,
+        permanently: bool,
+    },
     /// Writes one of a message's attachments to the downloads folder,
     /// under a name that does not replace anything there.
     SaveAttachment { folder: FolderId, id: i64, index: u32 },
@@ -222,6 +243,7 @@ pub struct MessageRow {
     /// The sender's own text only: no quoted history, no signature.
     pub preview: String,
     pub unread: bool,
+    pub flagged: bool,
     pub has_attachment: bool,
 }
 

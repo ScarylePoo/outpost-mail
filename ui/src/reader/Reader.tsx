@@ -44,7 +44,12 @@ function formatSize(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-export function Reader(props: { folder: FolderId; row: MessageRow | undefined }) {
+export function Reader(props: {
+  folder: FolderId;
+  row: MessageRow | undefined;
+  /** Called once a message has been opened and shown. */
+  onOpened?: (row: MessageRow) => void;
+}) {
   const [view, setView] = createSignal<MessageView>();
   const [error, setError] = createSignal("");
   const [link, setLink] = createSignal("");
@@ -66,7 +71,11 @@ export function Reader(props: { folder: FolderId; row: MessageRow | undefined })
         if (id === undefined) return;
         core
           .send({ type: "openMessage", folder: props.folder, id })
-          .then((r) => mine === request && setView(r.message))
+          .then((r) => {
+            if (mine !== request) return;
+            setView(r.message);
+            if (r.message.downloaded && props.row) props.onOpened?.(props.row);
+          })
           .catch((e) => mine === request && setError(String(e?.message ?? e)));
       },
     ),

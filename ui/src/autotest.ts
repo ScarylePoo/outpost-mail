@@ -60,6 +60,24 @@ async function probe(details: string): Promise<string> {
     );
     await sleep(700);
     lines.push(`reader: ${text(".message h1").join("")} / ${text(".message-text").join("").slice(0, 60)}`);
+    // Acting on mail through the real toolbar. The open message is the one
+    // that arrived late; opening it has marked it read.
+    const press = (label: string) =>
+      ([...document.querySelectorAll(".toolbar button")].find((b) => b.textContent?.trim() === label) as
+        | HTMLButtonElement
+        | undefined)?.click();
+    const firstRow = () => document.querySelector(".list-holder .row:not(.idle)");
+    lines.push(`opened message is now read: ${firstRow()?.classList.contains("unread") ? "NO" : "yes"}`);
+    press("Flag");
+    await sleep(900);
+    lines.push(`after Flag: ${firstRow()?.querySelector(".row-flag") ? "flag shown" : "NO FLAG"}`);
+    press("Delete");
+    await sleep(1200);
+    lines.push(`after Delete: ${text(".list-holder .row:not(.idle) .row-subject").join(" | ")}`);
+    lines.push(`selection moved to: ${text(".message h1").join("")}`);
+    // Give sync a moment to tell the server before the app closes.
+    await sleep(2500);
+
     const input = document.querySelector(".search input") as HTMLInputElement;
     input.value = "zebra";
     input.dispatchEvent(new InputEvent("input", { bubbles: true }));

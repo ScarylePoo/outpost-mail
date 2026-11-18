@@ -162,6 +162,19 @@ service stats {{
             app.kill()
             print("FAILED: the app did not finish within a minute.")
         print(open(report).read() if os.path.exists(report) else "FAILED: no report was written.")
+        # What the app did must have reached the server.
+        def on_server(folder):
+            other.select(f'"{folder}"', readonly=True)
+            _, data = other.uid("FETCH", "1:*", "(FLAGS BODY.PEEK[HEADER.FIELDS (SUBJECT)])")
+            found = []
+            for part in data or []:
+                if isinstance(part, tuple):
+                    flags = part[0].decode().split("FLAGS (")[1].split(")")[0]
+                    flags = " ".join(sorted(f for f in flags.split() if not f.startswith("$") and f != "\\Recent"))
+                    found.append((part[1].decode().replace("Subject: ", "").strip(), flags))
+            return sorted(found)
+        print("server INBOX:", on_server("INBOX"))
+        print("server Trash:", on_server("Trash"))
         saved = os.path.join(shared, "data", "accounts", "tester", "account.json")
         if os.path.exists(saved):
             text = open(saved).read()

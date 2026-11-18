@@ -95,6 +95,24 @@ input[type="checkbox"] {
   color: var(--text-3);
 }
 
+.toolbar-gap {
+  width: 12px;
+}
+
+.toolbar select.move {
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--pane);
+  font: inherit;
+  color: inherit;
+  max-width: 150px;
+}
+
+.toolbar select.move:disabled {
+  color: var(--text-3);
+}
+
 .toolbar button.quiet {
   border-color: transparent;
   background: none;
@@ -341,6 +359,12 @@ input[type="checkbox"] {
 .row-clip {
   flex: none;
   font-size: 11px;
+}
+
+.row-flag {
+  flex: none;
+  color: var(--accent);
+  font-size: 12px;
 }
 
 .row-date {

@@ -143,6 +143,9 @@ export function App() {
         case "accountAdded":
           void loadAccounts();
           break;
+        case "notice":
+          setNotice(event.text);
+          break;
         case "accountSetupFailed":
           break;
       }
@@ -207,6 +210,83 @@ export function App() {
     setTimeout(() => setCopied(false), 1500);
   }
 
+  // ---- acting on the selected message -----------------------------------
+
+  function send(command: Parameters<typeof core.send>[0]) {
+    core.send(command).catch((e) => setNotice(String(e?.message ?? e)));
+  }
+
+  /** The selected message and its folder, if the account can be changed. */
+  function target() {
+    const row = message();
+    const id = folderId();
+    if (!row || !id || !canSync()) return undefined;
+    return { row, folder: id };
+  }
+
+  function markRead(read: boolean) {
+    const t = target();
+    if (t) send({ type: "changeFlags", folder: t.folder, ids: [t.row.id], seen: read, flagged: null });
+  }
+
+  function toggleFlag() {
+    const t = target();
+    if (t) send({ type: "changeFlags", folder: t.folder, ids: [t.row.id], seen: null, flagged: !t.row.flagged });
+  }
+
+  function archive() {
+    const t = target();
+    if (t) send({ type: "archiveMessages", folder: t.folder, ids: [t.row.id] });
+  }
+
+  function moveTo(destination: string) {
+    const t = target();
+    if (t && destination) send({ type: "moveMessages", ids: [t.row.id], to: destination });
+  }
+
+  function remove() {
+    const t = target();
+    if (!t) return;
+    // From the trash, deleting is for good, which is worth a question.
+    const permanently = folder()?.role === "trash";
+    if (permanently && !window.confirm(`Permanently delete "${t.row.subject || "(no subject)"}"? This cannot be undone.`)) {
+      return;
+    }
+    send({ type: "deleteMessages", folder: t.folder, ids: [t.row.id], permanently });
+  }
+
+  /** Opening a message marks it read, as in Outlook. */
+  function opened(row: MessageRow) {
+    const id = folderId();
+    if (row.unread && id && canSync()) {
+      send({ type: "changeFlags", folder: id, ids: [row.id], seen: true, flagged: null });
+    }
+  }
+
+  // Outlook's shortcuts, when the keyboard is not in a text field.
+  function onKey(e: KeyboardEvent) {
+    const typing = (e.target as HTMLElement | null)?.closest?.("input, textarea, select, [contenteditable]");
+    if (typing || panel().kind !== "none" || !message()) return;
+    const key = e.key.toLowerCase();
+    if (e.key === "Delete") remove();
+    else if (e.key === "Backspace") archive();
+    else if (e.key === "Insert") toggleFlag();
+    else if (e.ctrlKey && key === "q") markRead(true);
+    else if (e.ctrlKey && key === "u") markRead(false);
+    else return;
+    e.preventDefault();
+  }
+  onMount(() => {
+    window.addEventListener("keydown", onKey);
+    onCleanup(() => window.removeEventListener("keydown", onKey));
+  });
+
+  /** Folders of the open account that messages can be moved into. */
+  const destinations = createMemo(() => {
+    const id = folderId();
+    return id ? folders().filter((f) => f.depth > 0 && accountOf(f.id) === accountOf(id) && f.id !== id) : [];
+  });
+
   const canSync = () => {
     const state = account()?.status.state;
     return state !== undefined && state !== "notSyncing" && state !== "needsPassword";
@@ -220,7 +300,38 @@ export function App() {
         <button onClick={syncNow} disabled={!canSync()} title="Check every folder for changes now">
           Sync now
         </button>
-        <span class="toolbar-note">Preview build: read-only. Nothing you do here changes your mail.</span>
+        <span class="toolbar-gap" />
+        <button onClick={remove} disabled={!target()} title="Delete (Del)">
+          Delete
+        </button>
+        <button onClick={archive} disabled={!target()} title="Archive (Backspace)">
+          Archive
+        </button>
+        <select
+          class="move"
+          disabled={!target()}
+          title="Move to another folder"
+          onChange={(e) => {
+            moveTo(e.currentTarget.value);
+            e.currentTarget.value = "";
+          }}
+        >
+          <option value="">Move to…</option>
+          <For each={destinations()}>
+            {(f) => <option value={f.id}>{"\u00a0\u00a0".repeat(f.depth - 1) + f.name}</option>}
+          </For>
+        </select>
+        <button
+          onClick={() => markRead(message()?.unread ?? false)}
+          disabled={!target()}
+          title="Mark read (Ctrl+Q) or unread (Ctrl+U)"
+        >
+          {message()?.unread ? "Mark read" : "Mark unread"}
+        </button>
+        <button onClick={toggleFlag} disabled={!target()} title="Flag (Insert)">
+          {message()?.flagged ? "Unflag" : "Flag"}
+        </button>
+        <span class="toolbar-note" />
         <button class="quiet" onClick={scrollTest} disabled={testing() || searching() || !folder()?.total}>
           Scroll test
         </button>
@@ -328,7 +439,7 @@ export function App() {
               <pre>{report()}</pre>
             </div>
           </Match>
-          <Match when={folderId()}>{(id) => <Reader folder={id()} row={message()} />}</Match>
+          <Match when={folderId()}>{(id) => <Reader folder={id()} row={message()} onOpened={opened} />}</Match>
         </Switch>
       </section>
 

@@ -49,6 +49,18 @@ pub struct SignatureCheck {
     pub sentence: String,
 }
 
+/// Whether Outpost's own re-check is enough to call the sender verified
+/// when the server did not: some signature is valid and was made by the
+/// From domain (or its parent or child). Never for a message the server
+/// failed, and never when the message names more than one sender.
+pub fn vouches(checks: &[SignatureCheck], from_addr: &str, server: &crate::verify::Assessment) -> bool {
+    let from = crate::verify::domain_of(from_addr);
+    server.state != crate::verify::State::Failed
+        && !server.ambiguous_from
+        && !from.is_empty()
+        && checks.iter().any(|c| c.outcome == Outcome::Valid && crate::verify::related(&c.domain, &from))
+}
+
 /// Re-checks signatures, remembering the keys it has fetched.
 #[derive(Default)]
 pub struct Rechecker {
@@ -292,6 +304,34 @@ mod tests {
             assert!(got[0].sentence.contains(expected), "{}", got[0].sentence);
             assert!(got[0].sentence.starts_with("Could not re-check"), "{}", got[0].sentence);
         }
+    }
+
+    #[test]
+    fn a_valid_signature_by_the_from_domain_vouches_for_the_sender() {
+        use crate::verify::{assess, State};
+        let (raw, name, record) = signed();
+        let good = recheck(&raw, &[(&name, Ok(&record))]);
+        let nothing = assess(raw.as_bytes(), "alice@bank.example", Some("mx.home.example"));
+        assert_eq!(nothing.state, State::NotChecked);
+        assert!(vouches(&good, "alice@bank.example", &nothing));
+        assert!(vouches(&good, "alice@mail.bank.example", &nothing), "a child of the signing domain");
+        // Not for another domain, however valid the signature.
+        assert!(!vouches(&good, "alice@other.example", &nothing));
+        assert!(!vouches(&good, "alice@notbank.example", &nothing));
+        assert!(!vouches(&good, "", &nothing));
+        // Not when the signature does not match or could not be checked.
+        let changed = recheck(&raw.replace("is ready", "is ready now"), &[(&name, Ok(&record))]);
+        assert!(!vouches(&changed, "alice@bank.example", &nothing));
+        let gone = recheck(&raw, &[(&name, Err(Error::Dns(DnsError::InvalidRecordType)))]);
+        assert!(!vouches(&gone, "alice@bank.example", &nothing));
+        // Never over the server's failure, and never with two senders named.
+        let failed = format!("Authentication-Results: mx.home.example; dmarc=fail header.from=bank.example\r\n{raw}");
+        let verdict = assess(failed.as_bytes(), "alice@bank.example", Some("mx.home.example"));
+        assert_eq!(verdict.state, State::Failed);
+        assert!(!vouches(&good, "alice@bank.example", &verdict));
+        let two = format!("From: boss@victim.example\r\n{raw}");
+        let verdict = assess(two.as_bytes(), "alice@bank.example", Some("mx.home.example"));
+        assert!(verdict.ambiguous_from && !vouches(&good, "alice@bank.example", &verdict));
     }
 
     #[test]

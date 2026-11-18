@@ -66,7 +66,7 @@ without the public-suffix list that cannot be told from `a.co.uk` and
 `b.co.uk`. This errs toward not verified. The handoff doc's table has three
 states; "not verified" is a second neutral one, added so that "your server
 looked and found nothing tying this to the sender" is not worded the same
-as "nobody looked".
+as "nobody looked". **Decided** (owner, 18 November 2026: "probably ok").
 
 ### Signatures are checked again locally, and "could not" is not "failed"
 
@@ -77,13 +77,16 @@ the message is not what was signed); could not re-check (key withdrawn or
 gone, signature expired, lookup failed), which is said to be normal for old
 mail and never shown as a failure.
 
-- The re-check is reported beside the server's results. It does not change
-  the state: the handoff doc defines the states by what the server recorded.
-  **Open question for the owner:** should a valid local signature from the
-  From domain earn the green check when the server recorded nothing? It is
-  stronger evidence than a header, but it is a change to the rule.
-- It runs when a failed message is opened and when the user opens the
-  details of any other. It asks DNS about the signing domain, which tells
+- **Decided (owner, 18 November 2026): a signature Outpost verifies itself
+  earns the green check.** When the server did not verify a message, a
+  valid signature made by the From domain (or its parent or child) shows
+  "Verified sender", and the details say it was Outpost's own check. It
+  never overrides a failure the server recorded, and never applies to a
+  message naming more than one sender. This extends the handoff doc's
+  definition of "verified". The mark appears when the message is opened; the
+  list and the conversation tree show only what the server recorded.
+- It therefore runs whenever a message the server did not verify is opened
+  (and for the details of any message). It asks DNS about the signing domain, which tells
   the DNS server roughly what following a link in the message would. It has
   its own switch.
 - Pure-Rust cryptography was chosen over the library's default (which

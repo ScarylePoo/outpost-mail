@@ -239,6 +239,9 @@ function answer(command: Command): Response {
     case "recheckSignature":
       return {
         type: "signatureRechecked",
+        // In the stub, every seventh message is vouched for by its own
+        // signature though the server recorded nothing.
+        verified: checkOf(command.id) === "notChecked" && command.id % 8 === 0,
         signatures: [
           checkOf(command.id) === "failed"
             ? {

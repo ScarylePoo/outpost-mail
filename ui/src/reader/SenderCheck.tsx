@@ -23,6 +23,10 @@ export function SenderCheckPanel(props: {
   const failed = () => check().state === "failed";
   const [open, setOpen] = createSignal(false);
   const [signatures, setSignatures] = createSignal<SignatureLine[]>();
+  /** Outpost's own check of the signature vouches for the sender. */
+  const [vouched, setVouched] = createSignal(false);
+  /** Only this may put a green check on screen. */
+  const verified = () => check().state === "verified" || (vouched() && !failed());
   const [rechecking, setRechecking] = createSignal(false);
   const [recheckError, setRecheckError] = createSignal("");
   const [note, setNote] = createSignal("");
@@ -34,7 +38,11 @@ export function SenderCheckPanel(props: {
     setRecheckError("");
     core
       .send({ type: "recheckSignature", folder: props.folder, id: props.view.id })
-      .then((r) => mine === request && setSignatures(r.signatures))
+      .then((r) => {
+        if (mine !== request) return;
+        setSignatures(r.signatures);
+        setVouched(r.verified);
+      })
       .catch((e) => mine === request && setRecheckError(String(e?.message ?? e)))
       .finally(() => mine === request && setRechecking(false));
   }
@@ -48,10 +56,13 @@ export function SenderCheckPanel(props: {
         request++;
         setOpen(false);
         setSignatures(undefined);
+        setVouched(false);
         setRechecking(false);
         setRecheckError("");
         setNote("");
-        if (failed() && protection().recheckSignatures) recheck();
+        // So has a message the server did not verify: a valid signature by
+        // the sender's own domain verifies it without the server's word.
+        if (check().state !== "verified" && props.view.downloaded && protection().recheckSignatures) recheck();
       },
     ),
   );
@@ -91,9 +102,8 @@ export function SenderCheckPanel(props: {
   }
 
   const label = () => {
+    if (verified()) return "Verified sender";
     switch (check().state) {
-      case "verified":
-        return "Verified sender";
       case "unverified":
         return "Sender not verified";
       case "failed":
@@ -105,6 +115,9 @@ export function SenderCheckPanel(props: {
 
   const explanation = () => {
     const from = domainOf(props.view.senderAddress);
+    if (vouched() && check().state !== "verified" && !failed()) {
+      return `Your mail server recorded nothing that ties this message to ${from}, but the message is signed by ${from} and Outpost checked that signature itself: it is valid.`;
+    }
     switch (check().state) {
       case "verified":
         return `Your mail server checked this message and it really comes from ${from || "the address shown"}.`;
@@ -173,12 +186,12 @@ export function SenderCheckPanel(props: {
           <>
             <button
               class="check-label"
-              classList={{ verified: check().state === "verified" }}
+              classList={{ verified: verified() }}
               aria-expanded={open()}
               onClick={showDetails}
               title="Show what was checked"
             >
-              <Show when={check().state === "verified"}>
+              <Show when={verified()}>
                 <span class="check-mark" aria-hidden="true">
                   ✓
                 </span>

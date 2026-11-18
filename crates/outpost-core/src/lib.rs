@@ -846,12 +846,18 @@ impl Core {
                 // only waits for them.
                 let (done, result) = std::sync::mpsc::channel();
                 let rechecker = self.inner.rechecker.clone();
+                let for_verdict = raw.clone();
                 self.inner.runtime.spawn(async move {
                     let _ = done.send(rechecker.check(&raw).await);
                 });
                 let checks = result.recv().unwrap_or_default();
                 let from_domain = verify::domain_of(&from);
+                let server = match account.checking_server().trim() {
+                    "" => verify::assess(b"", &from, Some("none")),
+                    name => verify::assess(&for_verdict, &from, Some(name)),
+                };
                 Ok(Response::SignatureRechecked {
+                    verified: recheck::vouches(&checks, &from, &server),
                     signatures: checks
                         .into_iter()
                         .map(|c| api::SignatureLine {

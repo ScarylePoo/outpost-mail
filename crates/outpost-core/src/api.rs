@@ -224,6 +224,10 @@ pub enum Response {
     /// One entry per signature on the message; empty if it has none.
     SignatureRechecked {
         signatures: Vec<SignatureLine>,
+        /// Outpost's own check vouches for the sender: a valid signature by
+        /// the From domain, on a message the server did not fail. Earns
+        /// the green check even where the server recorded nothing.
+        verified: bool,
     },
     AttachmentSaved {
         /// Where it was written.

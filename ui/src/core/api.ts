@@ -248,7 +248,7 @@ export type Response =
   | { type: "searchResults"; rows: MessageRow[] }
   | { type: "message"; message: MessageView }
   | { type: "thread"; thread: ThreadView }
-  | { type: "signatureRechecked"; signatures: SignatureLine[] }
+  | { type: "signatureRechecked"; signatures: SignatureLine[]; verified: boolean }
   | { type: "protection"; protection: Protection; passwordSet: boolean }
   | { type: "attachmentSaved"; path: string; name: string }
   | { type: "draft"; draft: DraftContent }

@@ -30,6 +30,9 @@ calcard = { version = "0.3", default-features = false }
 quick-xml = "0.42"
 # Reading HTTP response headers.
 httparse = "1"
+# Dates and time zones, as calcard uses them (already in the build with it).
+chrono = { version = "0.4", default-features = false }
+chrono-tz = { version = "0.10", default-features = false }
 # DKIM signature re-checks. Pure-Rust cryptography (no C toolchain needed),
 # and the system's own DNS settings for looking up signing keys.
 mail-auth = { version = "0.15", default-features = false, features = ["rust-crypto", "dns-hickory"] }

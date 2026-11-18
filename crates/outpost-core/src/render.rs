@@ -7,9 +7,14 @@
 //! list of harmless style properties. Either layer alone should be enough;
 //! both are used.
 //!
-//! Remote images are not loaded. Their addresses are removed here, so that
-//! even a mistake in the frame's policy cannot fetch them, and the caller is
-//! told that there were some.
+//! Remote images are not loaded unless the caller says this sender's may be.
+//! Otherwise their addresses are removed here, so that even a mistake in the
+//! frame's policy cannot fetch them, and the caller is told that there were
+//! some.
+//!
+//! For a message that is not to be trusted, links can be taken out
+//! altogether: the link's text stays, followed by where it pointed, written
+//! out, and nothing is left to click.
 
 use ammonia::Builder;
 use std::collections::HashSet;
@@ -21,6 +26,26 @@ pub struct SafeHtml {
     /// The message wanted to load pictures or other content from the
     /// network, and was not allowed to.
     pub remote_content_blocked: bool,
+    /// The message has pictures on the internet and they were left in, to
+    /// be loaded.
+    pub remote_images_kept: bool,
+}
+
+/// How much a message is allowed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Allow {
+    /// Leave pictures on the internet (http and https) in place.
+    pub remote_images: bool,
+    /// Leave links as links. When false, each is replaced by its text and
+    /// its destination written out.
+    pub links: bool,
+}
+
+impl Default for Allow {
+    /// Links, and no pictures from the internet.
+    fn default() -> Self {
+        Allow { remote_images: false, links: true }
+    }
 }
 
 /// Style properties that only affect how text and boxes look. Nothing here
@@ -69,8 +94,14 @@ pub(crate) fn base64(bytes: &[u8]) -> String {
 }
 
 pub fn safe_html(html: &str) -> SafeHtml {
+    safe_html_with(html, Allow::default())
+}
+
+pub fn safe_html_with(html: &str, allow: Allow) -> SafeHtml {
     let blocked = Arc::new(AtomicBool::new(false));
     let seen = blocked.clone();
+    let kept = Arc::new(AtomicBool::new(false));
+    let keeping = kept.clone();
     let mut builder = Builder::default();
     builder
         .add_generic_attributes(["style", "align", "valign", "bgcolor", "dir"])
@@ -93,6 +124,12 @@ pub fn safe_html(html: &str) -> SafeHtml {
                 ("img", "src") | ("img", "srcset") => {
                     if lower.starts_with("data:image/") {
                         Some(value.into())
+                    } else if allow.remote_images
+                        && attribute == "src"
+                        && (lower.starts_with("https://") || lower.starts_with("http://"))
+                    {
+                        keeping.store(true, Ordering::Relaxed);
+                        Some(value.into())
                     } else {
                         seen.store(true, Ordering::Relaxed);
                         None
@@ -103,11 +140,60 @@ pub fn safe_html(html: &str) -> SafeHtml {
                 _ => Some(value.into()),
             }
         });
-    let html = builder.clean(html).to_string();
+    let mut html = builder.clean(html).to_string();
+    if !allow.links {
+        html = without_links(&html);
+    }
     SafeHtml {
         html,
         remote_content_blocked: blocked.load(Ordering::Relaxed),
+        remote_images_kept: kept.load(Ordering::Relaxed),
     }
+}
+
+/// Replaces every link in cleaned HTML with its text followed by its
+/// destination in brackets. The input is the sanitiser's own output, so tags
+/// are lower case and attribute values are in double quotes.
+fn without_links(html: &str) -> String {
+    let mut out = String::with_capacity(html.len() + 64);
+    let mut rest = html;
+    // The destination of the link we are inside, if any.
+    let mut open: Option<String> = None;
+    while let Some(at) = rest.find('<') {
+        out.push_str(&rest[..at]);
+        rest = &rest[at..];
+        // The end of this tag, skipping any `>` inside a quoted value.
+        let mut quoted = false;
+        let end = rest.char_indices().find(|(_, c)| {
+            if *c == '"' {
+                quoted = !quoted;
+            }
+            *c == '>' && !quoted
+        });
+        let Some((end, _)) = end else { break };
+        let tag = &rest[..=end];
+        if tag.starts_with("<a ") || tag == "<a>" {
+            let href = tag
+                .find(" href=\"")
+                .map(|i| &tag[i + 7..])
+                .and_then(|v| v.find('"').map(|j| v[..j].to_string()))
+                .unwrap_or_default();
+            open = Some(href);
+            out.push_str("<span>");
+        } else if tag == "</a>" {
+            out.push_str("</span>");
+            if let Some(href) = open.take().filter(|h| !h.is_empty()) {
+                out.push_str(" <span style=\"color:#5b626c\">[");
+                out.push_str(&href.replace('<', "&lt;").replace('>', "&gt;"));
+                out.push_str("]</span>");
+            }
+        } else {
+            out.push_str(tag);
+        }
+        rest = &rest[end + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
@@ -116,6 +202,35 @@ mod tests {
 
     fn clean(html: &str) -> String {
         safe_html(html).html
+    }
+
+    #[test]
+    fn pictures_on_the_internet_can_be_allowed() {
+        let html = r#"<img src="https://shop.example/a.png" srcset="https://shop.example/b.png 2x"><img src="javascript:alert(1)"><img src="//shop.example/c.png">"#;
+        let out = safe_html_with(html, Allow { remote_images: true, links: true });
+        assert!(out.remote_images_kept);
+        assert!(out.html.contains(r#"src="https://shop.example/a.png""#), "{}", out.html);
+        // Only plain http and https addresses; never srcset or anything odd.
+        assert!(!out.html.contains("srcset") && !out.html.contains("javascript") && !out.html.contains("c.png"), "{}", out.html);
+        // And not unless asked.
+        let out = safe_html(html);
+        assert!(!out.remote_images_kept && out.remote_content_blocked && !out.html.contains("shop.example"), "{}", out.html);
+    }
+
+    #[test]
+    fn links_can_be_taken_out_and_written_out() {
+        let html = r#"<p>Please <a href="https://evil.example/login?a=1&amp;b=2" title="x>y">sign <b>in</b></a> or <a name="top">stay</a>. <a href="mailto:x@evil.example">Write</a></p>"#;
+        let out = safe_html_with(html, Allow { remote_images: false, links: false }).html;
+        assert!(!out.contains("<a") && !out.contains("</a>") && !out.contains("href"), "{out}");
+        assert!(out.contains("sign <b>in</b></span>"), "{out}");
+        assert!(out.contains("[https://evil.example/login?a=1&amp;b=2]"), "{out}");
+        assert!(out.contains("[mailto:x@evil.example]"), "{out}");
+        assert!(out.contains("<span>stay</span>."), "{out}");
+        // Nothing else is disturbed.
+        assert!(out.starts_with("<p>Please <span>") && out.ends_with("</p>"), "{out}");
+        // A destination cannot smuggle markup in.
+        let out = safe_html_with(r#"<a href="https://x.example/&lt;script&gt;alert(1)&lt;/script&gt;">x</a>"#, Allow { remote_images: false, links: false }).html;
+        assert!(!out.contains("<script"), "{out}");
     }
 
     #[test]

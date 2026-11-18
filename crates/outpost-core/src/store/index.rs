@@ -16,7 +16,7 @@ use std::sync::{Mutex, MutexGuard};
 type Result<T> = std::result::Result<T, StoreError>;
 
 /// Bump when the schema changes, and add a step to `migrate`.
-const SCHEMA_VERSION: i32 = 10;
+const SCHEMA_VERSION: i32 = 11;
 
 const TABLES: &str = r#"
 CREATE TABLE folder (
@@ -98,6 +98,12 @@ CREATE TABLE message (
 CREATE TABLE sender_domain (
     domain   TEXT PRIMARY KEY,
     messages INTEGER NOT NULL
+) WITHOUT ROWID;
+
+-- Messages that failed their sender checks and that the user has chosen
+-- to trust anyway, by Message-ID.
+CREATE TABLE trusted_message (
+    message_id TEXT PRIMARY KEY
 ) WITHOUT ROWID;
 
 -- Which Message-IDs each message cites (its In-Reply-To and References),
@@ -607,6 +613,54 @@ impl Index {
         })
     }
 
+    /// Whether the user has chosen to trust this message despite its
+    /// failed checks.
+    pub fn is_trusted(&self, id: i64) -> Result<bool> {
+        self.read(|conn| {
+            conn.prepare_cached(
+                "SELECT EXISTS (SELECT 1 FROM trusted_message t JOIN message m ON m.message_id = t.message_id
+                                WHERE m.id = ?1 AND m.message_id != '')",
+            )?
+            .query_row([id], |r| r.get(0))
+        })
+    }
+
+    /// Records, or withdraws, the user's trust in a message. False if the
+    /// message cannot be marked (it is gone, or has no Message-ID).
+    pub fn set_trusted(&self, id: i64, trusted: bool) -> Result<bool> {
+        let conn = self.writer();
+        let sql = if trusted {
+            "INSERT OR IGNORE INTO trusted_message (message_id) SELECT message_id FROM message WHERE id = ?1 AND message_id != ''"
+        } else {
+            "DELETE FROM trusted_message WHERE message_id = (SELECT message_id FROM message WHERE id = ?1)"
+        };
+        conn.execute(sql, [id])?;
+        let known: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM message WHERE id = ?1 AND message_id != '')",
+            [id],
+            |r| r.get(0),
+        )?;
+        Ok(known)
+    }
+
+    /// The newest messages in a folder from any of these addresses.
+    pub fn recent_from(&self, folder_id: i64, addresses: &[String], newest: u32) -> Result<Vec<i64>> {
+        if addresses.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.read(|conn| {
+            let rows: Vec<(i64, String)> = conn
+                .prepare_cached("SELECT id, from_addr FROM message WHERE folder_id = ?1 ORDER BY sort_key DESC LIMIT ?2")?
+                .query_map(params![folder_id, newest], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(rows
+                .into_iter()
+                .filter(|(_, from)| addresses.iter().any(|a| a.eq_ignore_ascii_case(from)))
+                .map(|(id, _)| id)
+                .collect())
+        })
+    }
+
     /// What earlier mail says about a message's sender. "Earlier" is by
     /// date: mail dated before this message.
     pub fn sender_history(&self, id: i64) -> Result<Option<SenderHistory>> {
@@ -1031,6 +1085,7 @@ fn migrate(conn: &Connection) -> Result<bool> {
                 "DROP TABLE IF EXISTS message_fts; DROP TABLE IF EXISTS message;
                  DROP TABLE IF EXISTS folder; DROP TABLE IF EXISTS action;
                  DROP TABLE IF EXISTS reference_to; DROP TABLE IF EXISTS sender_domain;
+                 DROP TABLE IF EXISTS trusted_message;
                  PRAGMA user_version = 0",
             )?;
             migrate(conn)?;

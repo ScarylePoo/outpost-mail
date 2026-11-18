@@ -394,6 +394,9 @@ pub struct ThreadRow {
     pub subject: String,
     pub preview: String,
     pub downloaded: bool,
+    /// A `verify::State` number, as recorded by `auth_server`.
+    pub verdict: u8,
+    pub auth_server: String,
 }
 
 impl Index {
@@ -405,7 +408,7 @@ impl Index {
             conn.prepare_cached(
                 "SELECT m.id, m.folder_id, m.parent_id, m.link_guessed, m.from_name, m.from_addr,
                         m.recipients, m.date, m.flags, m.has_attachment, m.subject, m.preview,
-                        m.base != '', m.message_id, m.sort_key
+                        m.base != '', m.message_id, m.sort_key, m.verdict, m.auth_server
                  FROM message m
                  WHERE m.id = ?1 OR m.thread_id = (SELECT thread_id FROM message WHERE id = ?1)
                  ORDER BY m.date, m.id",
@@ -426,6 +429,8 @@ impl Index {
                         subject: r.get(10)?,
                         preview: r.get(11)?,
                         downloaded: r.get(12)?,
+                        verdict: r.get(15)?,
+                        auth_server: r.get(16)?,
                     },
                     r.get::<_, String>(13)?,
                     r.get::<_, i64>(14)?,

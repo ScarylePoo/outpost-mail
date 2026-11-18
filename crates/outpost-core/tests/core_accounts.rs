@@ -705,3 +705,169 @@ fn a_new_sender_is_compared_with_what_came_before() {
     );
     assert_eq!(seen("a note to self"), (false, String::new(), String::new()), "the user's own mail is never warned about");
 }
+
+#[test]
+fn a_failed_message_is_held_at_arms_length_until_trusted() {
+    let Some(server) = TestServer::start() else { return };
+    let mut other = server.other_client("ann");
+    other.cmd("CREATE Junk");
+    let html_mail = |minute: u32, from: &str, results: &str, subject: &str| {
+        format!(
+            "Authentication-Results: mx.home.example; {results}\r\nFrom: First National <{from}>\r\nTo: ann@example.com\r\nSubject: {subject}\r\nDate: Mon, 16 Nov 2026 11:{minute:02}:00 +0000\r\nMessage-ID: <{minute}@protect>\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"b\"\r\n\r\n--b\r\nContent-Type: text/html\r\n\r\n<p>Please <a href=\"https://evil.example/login\">sign in</a>.</p><img src=\"https://track.example/p.png\">\r\n--b\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=\"invoice.pdf\"\r\n\r\nPDFDATA\r\n--b--\r\n"
+        )
+    };
+    let pass = "dmarc=pass header.from=firstnational.example";
+    let fail = "dmarc=fail header.from=firstnational.example";
+    for i in 0..3 {
+        other.append("INBOX", "", html_mail(i, "service@firstnational.example", pass, &format!("genuine {i}")).as_bytes());
+    }
+    other.append("INBOX", "", html_mail(10, "service@firstnational.example", fail, "forged").as_bytes());
+    other.append("INBOX", "", html_mail(11, "pest@spam.example", "dmarc=pass header.from=spam.example", "pest one").as_bytes());
+
+    let data = TempDir::new();
+    let downloads = TempDir::new();
+    let (tx, events) = mpsc::channel();
+    let config = Config { data_dir: Some(data.path().to_path_buf()), downloads_dir: Some(downloads.path().to_path_buf()) };
+    let core = Core::start_with_secrets(config, Arc::new(MemorySecrets::default()), move |event| {
+        let _ = tx.send(event);
+    })
+    .unwrap();
+    add(&core, &server, "ann", PASSWORD, true);
+    wait_for_state(&events, SyncState::UpToDate);
+    let inbox = folders(&core).iter().find(|f| f.role.as_deref() == Some("inbox")).unwrap().id.clone();
+    let id_of = |subject: &str| {
+        let Response::Messages { rows, .. } =
+            core.handle(Command::ListMessages { folder: inbox.clone(), offset: 0, limit: 100, conversations: false }).unwrap()
+        else {
+            panic!()
+        };
+        rows.iter().find(|r| r.subject == subject).unwrap_or_else(|| panic!("no {subject}")).id
+    };
+    let open = |subject: &str| match core.handle(Command::OpenMessage { folder: inbox.clone(), id: id_of(subject) }).unwrap() {
+        Response::Message { message } => message,
+        other => panic!("{other:?}"),
+    };
+    let save = |subject: &str| core.handle(Command::SaveAttachment { folder: inbox.clone(), id: id_of(subject), index: 0 });
+    let protection = || match core.handle(Command::GetProtection).unwrap() {
+        Response::Protection { protection, password_set } => (protection, password_set),
+        other => panic!("{other:?}"),
+    };
+
+    // A genuine message: links work, pictures are not fetched, the
+    // attachment can be saved.
+    let genuine = open("genuine 0");
+    assert_eq!((genuine.sender_check.state.as_str(), genuine.restricted), ("verified", false));
+    let html = genuine.html.unwrap();
+    assert!(html.contains("href=\"https://evil.example/login\"") && !html.contains("track.example"), "{html}");
+    assert!(genuine.remote_content_blocked && !genuine.remote_images_shown);
+    assert!(save("genuine 0").is_ok());
+
+    // The forged one: no links (the destination is written out), no
+    // pictures, no saving.
+    let forged = open("forged");
+    assert_eq!((forged.sender_check.state.as_str(), forged.restricted, forged.trusted), ("failed", true, false));
+    let html = forged.html.unwrap();
+    assert!(!html.contains("href") && html.contains("[https://evil.example/login]") && !html.contains("track.example"), "{html}");
+    let refused = save("forged").unwrap_err();
+    assert_eq!(refused.code, ErrorCode::NotPossible);
+    assert!(refused.message.contains("failed its sender checks"), "{}", refused.message);
+
+    // With a password set, neither the settings nor the warning give way
+    // without it.
+    core.handle(Command::SetProtectionPassword { current: None, new: Some(Secret("sesame".into())) }).unwrap();
+    assert!(protection().1);
+    let mut loose = protection().0;
+    loose.disable_failed = false;
+    let no = core.handle(Command::SetProtection { protection: loose.clone(), password: None }).unwrap_err();
+    assert_eq!(no.code, ErrorCode::WrongPassword);
+    let trust = |password: Option<&str>| {
+        core.handle(Command::TrustMessage {
+            folder: inbox.clone(),
+            id: id_of("forged"),
+            trusted: true,
+            password: password.map(|p| Secret(p.into())),
+        })
+    };
+    assert_eq!(trust(None).unwrap_err().code, ErrorCode::WrongPassword);
+    assert_eq!(trust(Some("guess")).unwrap_err().code, ErrorCode::WrongPassword);
+    assert!(open("forged").restricted);
+
+    // With it, the one message is trusted: still shown as failed, but its
+    // links and attachment work. Other messages are unaffected.
+    trust(Some("sesame")).unwrap();
+    let trusted = open("forged");
+    assert_eq!((trusted.sender_check.state.as_str(), trusted.restricted, trusted.trusted), ("failed", false, true));
+    assert!(trusted.html.unwrap().contains("href=\"https://evil.example/login\""));
+    assert!(save("forged").is_ok());
+    // Trust can be withdrawn without the password.
+    core.handle(Command::TrustMessage { folder: inbox.clone(), id: id_of("forged"), trusted: false, password: None }).unwrap();
+    assert!(open("forged").restricted);
+
+    // Pictures for one sender; and a sender blocked: their mail goes to
+    // Junk, now and when more arrives.
+    let mut changed = protection().0;
+    changed.allow_images_from.push("Service@FirstNational.example".into());
+    changed.blocked_senders.push("pest@spam.example".into());
+    core.handle(Command::SetProtection { protection: changed, password: Some(Secret("sesame".into())) }).unwrap();
+    let genuine = open("genuine 1");
+    assert!(genuine.remote_images_shown && genuine.html.unwrap().contains("https://track.example/p.png"));
+    let forged = open("forged");
+    assert!(!forged.remote_images_shown && !forged.html.unwrap().contains("track.example"), "never for a failed message");
+
+    let junk = folders(&core).iter().find(|f| f.role.as_deref() == Some("junk")).unwrap().id.clone();
+    assert_eq!(subjects(&core, &junk), ["pest one"]);
+    assert!(!subjects(&core, &inbox).contains(&"pest one".to_string()));
+    other.append("INBOX", "", html_mail(20, "pest@spam.example", "dmarc=pass header.from=spam.example", "pest two").as_bytes());
+    wait_for(&events, "the second message from the pest to reach Junk", |e| match e {
+        Event::FolderChanged { .. } if subjects(&core, &junk).contains(&"pest two".to_string()) => Some(()),
+        _ => None,
+    });
+    assert!(!subjects(&core, &inbox).contains(&"pest two".to_string()));
+    // ...and on the server too, once the queue has been replayed.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let on_server: Vec<String> = other.subjects_in("Junk").into_iter().map(|(subject, _)| subject).collect();
+        if on_server.contains(&"pest one".to_string()) && on_server.contains(&"pest two".to_string()) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "Junk on the server: {on_server:?}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Mail that arrives while the connection is busy carrying out what the
+/// user did must not wait for the next poll (ten minutes) to be seen.
+#[test]
+fn mail_arriving_while_the_connection_is_busy_is_not_missed() {
+    let Some(server) = TestServer::start() else { return };
+    let mut other = server.other_client("ann");
+    for i in 0..12 {
+        other.append("INBOX", "", &message(i, &format!("old {i}"), "hello"));
+    }
+    let data = TempDir::new();
+    let (core, events) = start(&data, Arc::new(MemorySecrets::default()));
+    add(&core, &server, "ann", PASSWORD, true);
+    wait_for_state(&events, SyncState::UpToDate);
+    let inbox = folders(&core).iter().find(|f| f.role.as_deref() == Some("inbox")).unwrap().id.clone();
+    let Response::Messages { rows, .. } =
+        core.handle(Command::ListMessages { folder: inbox.clone(), offset: 0, limit: 100, conversations: false }).unwrap()
+    else {
+        panic!()
+    };
+    for round in 0..5 {
+        // A burst of separate changes, and a delivery in the middle of it.
+        for (n, row) in rows.iter().enumerate() {
+            core.handle(Command::ChangeFlags { folder: inbox.clone(), ids: vec![row.id], seen: None, flagged: Some(round % 2 == 0) })
+                .unwrap();
+            if n == 3 {
+                other.append("INBOX", "", &message(100 + round, &format!("raced {round}"), "hello"));
+            }
+        }
+        let wanted = format!("raced {round}");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !subjects(&core, &inbox).contains(&wanted) {
+            assert!(Instant::now() < deadline, "{wanted} was not noticed");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}

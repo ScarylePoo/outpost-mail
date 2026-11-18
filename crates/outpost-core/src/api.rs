@@ -118,6 +118,32 @@ pub enum Command {
     },
     /// Sets or changes how an account sends mail.
     SetSending { account: FolderId, sending: SendingSettings },
+    /// The protection settings.
+    GetProtection,
+    /// Changes the protection settings. `password` is needed if one is set.
+    SetProtection {
+        protection: crate::settings::Protection,
+        #[serde(default)]
+        password: Option<Secret>,
+    },
+    /// Sets, changes or (with no `new`) removes the password that guards
+    /// the protection settings and the overriding of warnings.
+    SetProtectionPassword {
+        #[serde(default)]
+        current: Option<Secret>,
+        #[serde(default)]
+        new: Option<Secret>,
+    },
+    /// Trusts a message despite its failed sender checks (its links and
+    /// attachments work again), or withdraws that. `password` is needed if
+    /// one is set.
+    TrustMessage {
+        folder: FolderId,
+        id: i64,
+        trusted: bool,
+        #[serde(default)]
+        password: Option<Secret>,
+    },
     /// Confirms or changes which server's sender checks are believed for
     /// an account. An empty name means none: every message then shows as
     /// not checked.
@@ -189,6 +215,11 @@ pub enum Response {
     },
     Thread {
         thread: ThreadView,
+    },
+    Protection {
+        protection: crate::settings::Protection,
+        /// A password is needed to change these or to override a warning.
+        password_set: bool,
     },
     /// One entry per signature on the message; empty if it has none.
     SignatureRechecked {
@@ -409,6 +440,14 @@ pub struct MessageView {
     pub downloaded: bool,
     /// Who the message is really from, as far as can be told.
     pub sender_check: SenderCheck,
+    /// The message failed its sender checks and is held at arm's length:
+    /// its links have been taken out and its attachments cannot be saved.
+    pub restricted: bool,
+    /// The user has chosen to trust the message despite its failed checks.
+    pub trusted: bool,
+    /// Pictures on the internet were left in, to be loaded: this sender is
+    /// allowed them.
+    pub remote_images_shown: bool,
 }
 
 /// What is known about whether a message is from who it says.
@@ -491,6 +530,8 @@ pub struct ThreadMessage {
     pub sender_address: String,
     /// The user wrote this message.
     pub mine: bool,
+    /// The sender checks, as in `MessageRow::check`.
+    pub check: String,
     pub recipients: String,
     pub date: i64,
     pub unread: bool,
@@ -529,6 +570,8 @@ pub enum ErrorCode {
     UnknownMessage,
     /// The command cannot be carried out as things stand.
     NotPossible,
+    /// A password guards this and the one given is missing or wrong.
+    WrongPassword,
     Internal,
 }
 

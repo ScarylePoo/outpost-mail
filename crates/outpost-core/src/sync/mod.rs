@@ -710,6 +710,10 @@ async fn connected(
             .into_iter()
             .find(|f| f.remote_name.eq_ignore_ascii_case(b"INBOX"));
         let poll_due = tokio::time::Instant::now() + options.poll_interval;
+        // Set when the inbox was found to have moved on without us and was
+        // synced for that reason, until a real wait has happened: so that a
+        // server whose numbers never settle cannot keep us spinning.
+        let mut caught_up = false;
         loop {
             stop.check()?;
             let remaining = poll_due.saturating_duration_since(tokio::time::Instant::now());
@@ -732,7 +736,19 @@ async fn connected(
                     _ = stop.requested() => return Ok(()),
                 }
             } else {
-                session.examine(&inbox.remote_name, None).await?;
+                let opened = session.examine(&inbox.remote_name, None).await?;
+                // The server only pushes what changes while we are waiting.
+                // Mail that arrived while this connection was busy (replaying
+                // what the user did, downloading another folder) was reported
+                // in the middle of that work, or not at all. So before
+                // waiting, compare where the inbox is with where our last
+                // sync of it ended.
+                let synced = store.index().remote_folders()?.into_iter().find(|f| f.id == inbox.id).map(|f| f.state);
+                let behind = !caught_up
+                    && synced.is_some_and(|state| {
+                        opened.uid_next.is_some_and(|next| next != state.uid_next)
+                            || opened.highest_modseq.is_some_and(|modseq| modseq != state.highest_modseq)
+                    });
                 // Servers drop a connection that idles for 30 minutes.
                 let limit = remaining.min(Duration::from_secs(25 * 60));
                 let mut stopping = stop.clone();
@@ -758,7 +774,11 @@ async fn connected(
                 let pushed = if !store.index().queued_actions(1)?.is_empty() {
                     acted.store(true, std::sync::atomic::Ordering::Relaxed);
                     false
+                } else if behind {
+                    caught_up = true;
+                    true
                 } else {
+                    caught_up = false;
                     session.idle(limit, wake).await?
                 };
                 stop.check()?;

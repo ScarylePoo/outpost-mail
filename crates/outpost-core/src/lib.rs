@@ -20,6 +20,7 @@ pub mod compose;
 pub mod imap;
 pub mod recheck;
 pub mod render;
+pub mod settings;
 pub mod smtp;
 pub mod verify;
 pub mod store;
@@ -161,6 +162,7 @@ struct Inner {
     secrets: Arc<dyn Secrets>,
     /// Re-checks signatures, keeping the keys it has fetched.
     rechecker: Arc<recheck::Rechecker>,
+    settings: settings::Settings,
     /// Runs the sync engine. Commands never wait on it.
     runtime: tokio::runtime::Runtime,
 }
@@ -204,6 +206,7 @@ impl Core {
         let core = Self {
             inner: Arc::new(Inner {
                 sink: Box::new(sink),
+                settings: settings::Settings::load(config.data_dir.as_deref()),
                 data_dir: config.data_dir,
                 downloads_dir: config.downloads_dir,
                 accounts: RwLock::new(accounts),
@@ -346,6 +349,28 @@ impl Core {
         });
     }
 
+    /// Moves mail from blocked senders out of the inbox into the junk
+    /// folder. Only the newest mail is looked at, and only if the account
+    /// has both folders and can be changed.
+    fn move_blocked(&self, account: &Account) {
+        let blocked = self.inner.settings.protection().blocked_senders;
+        if blocked.is_empty() || account.config().is_none() {
+            return;
+        }
+        let (Ok(Some(inbox)), Ok(Some(junk))) =
+            (self.folder_with_role(account, "inbox"), self.folder_with_role(account, "junk"))
+        else {
+            return;
+        };
+        let Ok(ids) = account.store.index().recent_from(inbox, &blocked, 200) else { return };
+        if ids.is_empty() {
+            return;
+        }
+        if let Ok(touched) = account.store.move_messages(&ids, junk) {
+            self.acted(account, touched);
+        }
+    }
+
     /// Until the user has confirmed which server's sender checks to believe,
     /// it is taken to be the one that wrote them on most of the newest mail.
     fn guess_checking_server(&self, account: &Account) {
@@ -387,9 +412,10 @@ impl Core {
                     format!("{folder}: downloading {} of {}", count(done), count(total)),
                 ),
             ),
-            Progress::FolderChanged { folder_id } => self.inner.sink.emit(Event::FolderChanged {
-                folder: format!("{}/{folder_id}", account.id),
-            }),
+            Progress::FolderChanged { folder_id } => {
+                self.inner.sink.emit(Event::FolderChanged { folder: format!("{}/{folder_id}", account.id) });
+                self.move_blocked(account);
+            }
             Progress::Idle => {
                 self.guess_checking_server(account);
                 self.set_status(account, status(SyncState::UpToDate, ""))
@@ -497,10 +523,12 @@ impl Core {
                             remote_content_blocked: false,
                             downloaded: true,
                             sender_check: SenderCheck { state: "notChecked".into(), ..SenderCheck::default() },
+                            ..MessageView::default()
                         }
                     }
                     Target::Folder(account, _) | Target::Account(account) => {
-                        let mut view = open_message(&account.store, id, &account.checking_server())?;
+                        let protection = self.inner.settings.protection();
+                        let mut view = open_message(&account.store, id, &account.checking_server(), &protection)?;
                         let own: Vec<String> = account
                             .config()
                             .map(|c| [c.identity().map(|i| i.address), Some(c.username)].into_iter().flatten().collect())
@@ -509,13 +537,16 @@ impl Core {
                         if view.downloaded && !mine {
                             if let Some(history) = account.store.index().sender_history(id).map_err(internal)? {
                                 let check = &mut view.sender_check;
-                                check.first_time = !history.known_address;
+                                let first_time = !history.known_address;
+                                check.first_time = first_time && protection.first_time_banner;
                                 // A familiar name on an unfamiliar address.
-                                if check.first_time {
+                                if first_time {
                                     check.name_seen_from = history.name_used_by.unwrap_or_default();
                                 }
-                                check.lookalike_of =
-                                    verify::lookalike(&history.domain, &history.domains).unwrap_or_default();
+                                if protection.lookalike_warning {
+                                    check.lookalike_of =
+                                        verify::lookalike(&history.domain, &history.domains).unwrap_or_default();
+                                }
                             }
                         }
                         view
@@ -658,6 +689,16 @@ impl Core {
                     }
                     other => internal(other),
                 })?;
+                let protection = self.inner.settings.protection();
+                if protection.disable_failed && !account.store.index().is_trusted(id).map_err(internal)? {
+                    let from = store::parse::display(&raw).from_addr;
+                    if sender_check(&raw, &from, &account.checking_server()).state == "failed" {
+                        return Err(CoreError::new(
+                            ErrorCode::NotPossible,
+                            "this message failed its sender checks, so its attachments are switched off",
+                        ));
+                    }
+                }
                 let (name, data) = store::parse::attachment(&raw, index as usize)
                     .ok_or_else(|| CoreError::new(ErrorCode::UnknownMessage, "the message has no such attachment"))?;
                 let (path, name) = save_download(downloads, &name, &data)
@@ -753,7 +794,51 @@ impl Core {
                 self.start_sync(&account);
                 Ok(Response::Accepted)
             }
+            Command::GetProtection => Ok(Response::Protection {
+                protection: self.inner.settings.protection(),
+                password_set: self.inner.settings.password_set(),
+            }),
+            Command::SetProtection { protection, password } => {
+                self.inner
+                    .settings
+                    .set_protection(protection, password.as_ref().map(|p| p.0.as_str()))
+                    .map_err(denied)?;
+                // Newly blocked senders are dealt with now, not only when
+                // their next message arrives.
+                for account in self.accounts() {
+                    self.move_blocked(&account);
+                }
+                Ok(Response::Protection {
+                    protection: self.inner.settings.protection(),
+                    password_set: self.inner.settings.password_set(),
+                })
+            }
+            Command::SetProtectionPassword { current, new } => {
+                self.inner
+                    .settings
+                    .set_password(current.as_ref().map(|p| p.0.as_str()), new.as_ref().map(|p| p.0.as_str()))
+                    .map_err(denied)?;
+                Ok(Response::Protection {
+                    protection: self.inner.settings.protection(),
+                    password_set: self.inner.settings.password_set(),
+                })
+            }
+            Command::TrustMessage { folder, id, trusted, password } => {
+                let account = self.account(&folder)?;
+                // Withdrawing trust is always allowed; giving it overrides
+                // a warning.
+                if trusted && !self.inner.settings.allows(password.as_ref().map(|p| p.0.as_str())) {
+                    return Err(denied(settings::Denied::WrongPassword));
+                }
+                if !account.store.index().set_trusted(id, trusted).map_err(internal)? {
+                    return Err(CoreError::new(ErrorCode::NotPossible, "this message cannot be marked as trusted"));
+                }
+                Ok(Response::Accepted)
+            }
             Command::RecheckSignature { folder, id } => {
+                if !self.inner.settings.protection().recheck_signatures {
+                    return Err(CoreError::new(ErrorCode::NotPossible, "re-checking signatures is switched off"));
+                }
                 let account = self.account(&folder)?;
                 let raw = self.read(&account, id)?;
                 let from = store::parse::display(&raw).from_addr;
@@ -1241,6 +1326,7 @@ fn open_thread(account: &Account, id: i64) -> Result<ThreadView, CoreError> {
         .config()
         .map(|c| [c.identity().map(|i| i.address), Some(c.username)].into_iter().flatten().collect())
         .unwrap_or_default();
+    let checking_server = account.checking_server();
     let mut messages: Vec<ThreadMessage> = Vec::with_capacity(rows.len());
     for row in &rows {
         let mut message = ThreadMessage {
@@ -1252,6 +1338,7 @@ fn open_thread(account: &Account, id: i64) -> Result<ThreadView, CoreError> {
             sender_name: if row.from_name.is_empty() { row.from_addr.clone() } else { row.from_name.clone() },
             sender_address: row.from_addr.clone(),
             mine: own.iter().any(|o| o.eq_ignore_ascii_case(&row.from_addr)),
+            check: recorded_check(row.verdict, &row.auth_server, &checking_server).into(),
             recipients: row.recipients.clone(),
             date: row.date,
             unread: !row.flags.contains(Flags::SEEN),
@@ -1328,7 +1415,12 @@ fn open_thread(account: &Account, id: i64) -> Result<ThreadView, CoreError> {
 }
 
 /// Reads a message from its file and prepares it for the reading pane.
-fn open_message(store: &Store, id: i64, checking_server: &str) -> Result<MessageView, CoreError> {
+fn open_message(
+    store: &Store,
+    id: i64,
+    checking_server: &str,
+    protection: &settings::Protection,
+) -> Result<MessageView, CoreError> {
     let raw = match store.read_message(id) {
         Ok(raw) => raw,
         Err(StoreError::NotDownloaded(_)) => {
@@ -1345,7 +1437,16 @@ fn open_message(store: &Store, id: i64, checking_server: &str) -> Result<Message
         Err(e) => return Err(internal(e)),
     };
     let shown = store::parse::display(&raw);
-    let sender_check = sender_check(&raw, &shown.from_addr, checking_server);
+    let mut sender_check = sender_check(&raw, &shown.from_addr, checking_server);
+    if !protection.reply_warning {
+        sender_check.reply_elsewhere = false;
+    }
+    let trusted = store.index().is_trusted(id).map_err(internal)?;
+    let restricted = sender_check.state == "failed" && protection.disable_failed && !trusted;
+    let allow = render::Allow {
+        remote_images: !restricted && protection.images_allowed_from(&shown.from_addr),
+        links: !restricted,
+    };
     let images: Vec<(String, String, Vec<u8>)> = shown
         .inline_images
         .into_iter()
@@ -1354,7 +1455,7 @@ fn open_message(store: &Store, id: i64, checking_server: &str) -> Result<Message
     let safe = shown
         .html
         .as_deref()
-        .map(|html| render::safe_html(&render::embed_inline_images(html, &images)));
+        .map(|html| render::safe_html_with(&render::embed_inline_images(html, &images), allow));
     Ok(MessageView {
         id,
         subject: shown.subject,
@@ -1364,6 +1465,9 @@ fn open_message(store: &Store, id: i64, checking_server: &str) -> Result<Message
         cc: shown.cc,
         date: shown.date.unwrap_or(0),
         remote_content_blocked: safe.as_ref().is_some_and(|s| s.remote_content_blocked),
+        remote_images_shown: safe.as_ref().is_some_and(|s| s.remote_images_kept),
+        restricted,
+        trusted,
         html: safe.map(|s| s.html),
         text: shown.text,
         attachments: shown
@@ -1479,6 +1583,26 @@ fn save_download(dir: &Path, name: &str, data: &[u8]) -> std::io::Result<(PathBu
     Err(std::io::Error::other("too many files with that name"))
 }
 
+fn denied(why: settings::Denied) -> CoreError {
+    match why {
+        settings::Denied::WrongPassword => {
+            CoreError::new(ErrorCode::WrongPassword, "the settings password is needed, and that was not it")
+        }
+        settings::Denied::NotSaved(e) => CoreError::new(ErrorCode::Internal, format!("could not save the settings: {e}")),
+    }
+}
+
+/// The word for a verdict the index holds, which counts only if it was
+/// recorded by the server the account believes.
+fn recorded_check(verdict: u8, recorded_by: &str, checking_server: &str) -> &'static str {
+    if !checking_server.trim().is_empty() && recorded_by.eq_ignore_ascii_case(checking_server.trim()) {
+        verify::State::from_number(verdict as i64)
+    } else {
+        verify::State::NotChecked
+    }
+    .word()
+}
+
 /// `checking_server` is the server whose sender checks the account
 /// believes; a verdict recorded by any other counts for nothing.
 fn message_rows(rows: Vec<ListRow>, first_index: u32, checking_server: &str) -> Vec<MessageRow> {
@@ -1498,13 +1622,7 @@ fn message_rows(rows: Vec<ListRow>, first_index: u32, checking_server: &str) -> 
             thread_count: 1,
             thread_unread: u32::from(!r.flags.contains(Flags::SEEN)),
             senders: String::new(),
-            check: if !checking_server.is_empty() && r.auth_server.eq_ignore_ascii_case(checking_server.trim()) {
-                verify::State::from_number(r.verdict as i64)
-            } else {
-                verify::State::NotChecked
-            }
-            .word()
-            .into(),
+            check: recorded_check(r.verdict, &r.auth_server, checking_server).into(),
         })
         .collect()
 }

@@ -10,6 +10,8 @@
 
 #![allow(dead_code)]
 
+pub mod smtp;
+
 use outpost_core::imap::{Security, Server};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};

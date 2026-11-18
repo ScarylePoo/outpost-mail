@@ -118,7 +118,7 @@ pub struct Connection {
     pub(crate) greeting_was_preauth: bool,
 }
 
-fn tls_config(trusted: Option<&[u8]>) -> std::result::Result<Arc<ClientConfig>, String> {
+pub(crate) fn tls_config(trusted: Option<&[u8]>) -> std::result::Result<Arc<ClientConfig>, String> {
     use rustls_platform_verifier::BuilderVerifierExt;
     use tokio_rustls::rustls::crypto::ring::default_provider;
     use tokio_rustls::rustls::pki_types::CertificateDer;

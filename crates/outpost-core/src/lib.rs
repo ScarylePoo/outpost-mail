@@ -18,6 +18,7 @@ pub mod accounts;
 pub mod api;
 pub mod imap;
 pub mod render;
+pub mod smtp;
 pub mod store;
 pub mod sync;
 pub mod synthetic;

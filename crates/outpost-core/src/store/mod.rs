@@ -16,6 +16,7 @@ pub mod maildir;
 pub mod parse;
 pub mod rebuild;
 pub mod sync_state;
+pub mod thread;
 
 use index::{Index, NewMessage};
 use maildir::{decode_segment, encode_segment, Flags, Maildir};

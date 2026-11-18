@@ -16,7 +16,7 @@ use std::sync::{Mutex, MutexGuard};
 type Result<T> = std::result::Result<T, StoreError>;
 
 /// Bump when the schema changes, and add a step to `migrate`.
-const SCHEMA_VERSION: i32 = 5;
+const SCHEMA_VERSION: i32 = 6;
 
 const TABLES: &str = r#"
 CREATE TABLE folder (
@@ -70,12 +70,31 @@ CREATE TABLE message (
     message_id     TEXT NOT NULL,
     in_reply_to    TEXT NOT NULL,
     refs           TEXT NOT NULL,
+    -- Conversations. See store/thread.rs.
     thread_id      INTEGER,
+    -- The message this one replies to, if it is here.
+    parent_id      INTEGER,
+    -- 1 if that link was inferred from the subject rather than headers.
+    link_guessed   INTEGER NOT NULL DEFAULT 0,
+    -- The subject without reply and forward prefixes, lower-cased.
+    subject_key    TEXT NOT NULL DEFAULT '',
     preview        TEXT NOT NULL,
     preview_len    INTEGER NOT NULL,
     -- Sender-check verdict (milestone 6). 0 = not checked.
     verdict        INTEGER NOT NULL DEFAULT 0
 );
+
+-- Which Message-IDs each message cites (its In-Reply-To and References),
+-- so that a message arriving after its replies can find them.
+CREATE TABLE reference_to (
+    ref     TEXT NOT NULL,
+    message INTEGER NOT NULL
+);
+CREATE INDEX reference_ref ON reference_to(ref);
+CREATE INDEX reference_message ON reference_to(message);
+CREATE TRIGGER message_gone AFTER DELETE ON message BEGIN
+    DELETE FROM reference_to WHERE message = OLD.id;
+END;
 
 -- What the user has done that the server has not been told yet, in order.
 -- See store/actions.rs.
@@ -110,6 +129,8 @@ const INDEXES: &[(&str, &str)] = &[
     ("message_msgid", "CREATE INDEX IF NOT EXISTS message_msgid ON message(message_id) WHERE message_id != ''"),
     ("message_unread", "CREATE INDEX IF NOT EXISTS message_unread ON message(folder_id) WHERE (flags & 1) = 0"),
     ("message_rename", "CREATE INDEX IF NOT EXISTS message_rename ON message(id) WHERE flags != file_flags AND base != ''"),
+    ("message_thread", "CREATE INDEX IF NOT EXISTS message_thread ON message(thread_id)"),
+    ("message_subject", "CREATE INDEX IF NOT EXISTS message_subject ON message(subject_key, date) WHERE subject_key != ''"),
     ("message_nobody", "CREATE INDEX IF NOT EXISTS message_nobody ON message(folder_id, sort_key DESC) WHERE base = ''"),
 ];
 
@@ -316,7 +337,9 @@ impl Index {
             r.get::<_, i64>(0)
         })? as u64;
         for message in messages {
-            ids.push(insert_unique(&tx, "main.message", folder_id, message, sort_key(message.date, tie))?);
+            let id = insert_unique(&tx, "main.message", folder_id, message, sort_key(message.date, tie))?;
+            super::thread::link(&tx, id)?;
+            ids.push(id);
             tie += 1;
         }
         let unread = messages.iter().filter(|m| !m.flags.contains(Flags::SEEN)).count();
@@ -500,7 +523,7 @@ impl Index {
         conn.execute_batch(&format!(
             "PRAGMA load.journal_mode = OFF; PRAGMA load.synchronous = OFF;
              CREATE TABLE load.message AS SELECT {MESSAGE_COLUMNS} FROM main.message WHERE 0;
-             DELETE FROM main.message; DELETE FROM folder;
+             DELETE FROM main.message; DELETE FROM folder; DELETE FROM reference_to;
              INSERT INTO message_fts(message_fts) VALUES('delete-all');
              BEGIN"
         ))?;
@@ -588,6 +611,8 @@ impl Bulk<'_> {
         for (_, sql) in INDEXES {
             self.conn.execute_batch(sql)?;
         }
+        // Conversations are worked out once everything is in place.
+        super::thread::link_all(&self.conn, |_, _| {})?;
         self.conn.execute_batch(
             "UPDATE folder SET
                total  = (SELECT count(*) FROM message WHERE folder_id = folder.id),
@@ -736,6 +761,7 @@ fn migrate(conn: &Connection) -> Result<bool> {
             conn.execute_batch(
                 "DROP TABLE IF EXISTS message_fts; DROP TABLE IF EXISTS message;
                  DROP TABLE IF EXISTS folder; DROP TABLE IF EXISTS action;
+                 DROP TABLE IF EXISTS reference_to;
                  PRAGMA user_version = 0",
             )?;
             migrate(conn)?;

@@ -36,6 +36,9 @@ pub enum Command {
     /// A message, prepared for reading. `folder` is any folder of the
     /// message's account.
     OpenMessage { folder: FolderId, id: i64 },
+    /// The whole conversation a message belongs to, across folders, each
+    /// message reduced to what its sender wrote.
+    OpenThread { folder: FolderId, id: i64 },
     /// Full-text search, newest first. Every word must match; the last word
     /// matches as a prefix unless the text ends with a space.
     Search {
@@ -162,6 +165,9 @@ pub enum Response {
     },
     Message {
         message: MessageView,
+    },
+    Thread {
+        thread: ThreadView,
     },
     AttachmentSaved {
         /// Where it was written.
@@ -363,6 +369,49 @@ pub struct MessageView {
     pub remote_content_blocked: bool,
     /// False while only the message's list data has been synced.
     pub downloaded: bool,
+}
+
+/// A conversation, oldest message first.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadView {
+    pub subject: String,
+    pub messages: Vec<ThreadMessage>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadMessage {
+    pub id: i64,
+    /// The folder this copy is in, and its name for display.
+    pub folder: FolderId,
+    pub folder_name: String,
+    /// The message this one replies to, if it is in the conversation.
+    pub parent: Option<i64>,
+    /// That link was inferred from the subject: the message had no reply
+    /// headers.
+    pub guessed: bool,
+    pub sender_name: String,
+    pub sender_address: String,
+    pub recipients: String,
+    pub date: i64,
+    pub unread: bool,
+    pub flagged: bool,
+    /// False while only the message's list data has been synced; `text` is
+    /// then just the preview.
+    pub downloaded: bool,
+    /// What the sender wrote, as plain text.
+    pub text: String,
+    /// The quoted history that was set aside, and how many lines it is.
+    pub quoted: String,
+    pub quoted_lines: u32,
+    /// The signature or disclaimer that was set aside.
+    pub signature: String,
+    pub attachments: Vec<AttachmentInfo>,
+    /// People this message brought into the conversation, compared with
+    /// the message it replies to, and people it left out.
+    pub added: Vec<String>,
+    pub dropped: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

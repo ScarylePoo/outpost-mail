@@ -412,6 +412,64 @@ Content-Disposition: attachment; filename=\"../../evil.txt\"\r\n\r\npayload\r\n-
     }
 }
 
+mod conversations {
+    use super::*;
+    use outpost_core::store::maildir::Flags;
+    use outpost_core::store::Store;
+    use outpost_core::Config;
+
+    #[test]
+    fn a_conversation_is_shown_reduced_with_who_joined_and_left() {
+        let data = std::env::temp_dir().join(format!("outpost-thread-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let sign = "\r\n\r\nKind regards,\r\nDana Dubois\r\nThis email is confidential.\r\n";
+        {
+            let store = Store::open(data.join("accounts/home")).unwrap();
+            let inbox = store.create_folder(&["INBOX"]).unwrap();
+            let sent = store.create_folder(&["Sent"]).unwrap();
+            let first = format!("From: Dana Dubois <dana@example.com>\r\nTo: Ben <ben@example.com>, Sam <sam@example.com>\r\nSubject: Cutover window\r\nDate: Mon, 9 Nov 2026 09:14:00 +0000\r\nMessage-ID: <a@x>\r\n\r\nProposing Saturday night.{sign}");
+            let second = "From: Ben <ben@example.com>\r\nTo: Dana Dubois <dana@example.com>, Sam <sam@example.com>, Priya <priya@example.com>\r\nSubject: Re: Cutover window\r\nDate: Mon, 9 Nov 2026 09:40:00 +0000\r\nMessage-ID: <b@x>\r\nIn-Reply-To: <a@x>\r\nReferences: <a@x>\r\n\r\nSaturday works. Adding Priya.\r\n\r\nOn Mon, 9 Nov 2026, Dana Dubois wrote:\r\n> Proposing Saturday night.\r\n> Kind regards,\r\n";
+            let third = format!("From: Dana Dubois <dana@example.com>\r\nTo: Ben <ben@example.com>, Priya <priya@example.com>\r\nSubject: Re: Cutover window\r\nDate: Fri, 13 Nov 2026 16:47:00 +0000\r\nMessage-ID: <c@x>\r\nIn-Reply-To: <b@x>\r\nReferences: <a@x> <b@x>\r\n\r\nConfirmed.{sign}");
+            store.add_message(inbox, first.as_bytes(), Flags::SEEN, None).unwrap();
+            store.add_message(sent, second.as_bytes(), Flags::SEEN, None).unwrap();
+            store.add_message(inbox, third.as_bytes(), Flags::default(), None).unwrap();
+        }
+        let core = Core::start_with(Config { data_dir: Some(data.clone()), downloads_dir: None }, |_| {}).unwrap();
+        let Response::Folders { folders } = core.handle(Command::ListFolders).unwrap() else { panic!() };
+        let inbox = folders.iter().find(|f| f.role.as_deref() == Some("inbox")).unwrap().id.clone();
+        let Response::Messages { rows, .. } =
+            core.handle(Command::ListMessages { folder: inbox.clone(), offset: 0, limit: 10 }).unwrap()
+        else {
+            panic!()
+        };
+        let Response::Thread { thread } = core.handle(Command::OpenThread { folder: inbox, id: rows[0].id }).unwrap() else {
+            panic!()
+        };
+        assert_eq!(thread.subject, "Cutover window");
+        let m = &thread.messages;
+        assert_eq!(m.len(), 3);
+        // Each reduced to what its sender wrote.
+        assert_eq!(m[0].text, "Proposing Saturday night.");
+        assert_eq!(m[1].text, "Saturday works. Adding Priya.");
+        assert_eq!(m[2].text, "Confirmed.");
+        assert_eq!(m[1].quoted_lines, 3);
+        assert!(m[1].quoted.contains("> Proposing Saturday night."));
+        // Dana's closing lines have no separator; repetition gives them away.
+        assert_eq!(m[0].signature, "Kind regards,\nDana Dubois\nThis email is confidential.");
+        assert_eq!(m[2].signature, m[0].signature);
+        assert_eq!(m[1].signature, "");
+        // The tree, across folders.
+        assert_eq!((m[0].parent, m[1].parent, m[2].parent), (None, Some(m[0].id), Some(m[1].id)));
+        assert_eq!((m[0].folder_name.as_str(), m[1].folder_name.as_str()), ("Inbox", "Sent"));
+        assert!(m[2].unread && !m[0].unread);
+        // Who joined and who was left out.
+        assert_eq!((m[1].added.clone(), m[1].dropped.clone()), (vec!["Priya".to_string()], Vec::<String>::new()));
+        assert_eq!((m[2].added.clone(), m[2].dropped.clone()), (Vec::<String>::new(), vec!["Sam".to_string()]));
+        drop(core);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+}
+
 mod folder_tree {
     use super::*;
     use outpost_core::store::Store;

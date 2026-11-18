@@ -15,6 +15,7 @@ pub mod index;
 pub mod maildir;
 pub mod parse;
 pub mod rebuild;
+pub mod reduce;
 pub mod sync_state;
 pub mod thread;
 

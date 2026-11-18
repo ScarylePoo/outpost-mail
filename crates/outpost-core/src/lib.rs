@@ -27,7 +27,7 @@ pub mod synthetic;
 use accounts::{AccountConfig, OsSecrets, Secrets};
 use api::{
     AccountInfo, AttachmentInfo, Command, CoreError, ErrorCode, Event, FolderId, FolderInfo,
-    MessageRow, MessageView, Response, SyncState, SyncStatus, MAX_PAGE,
+    MessageRow, MessageView, Response, SyncState, SyncStatus, ThreadMessage, ThreadView, MAX_PAGE,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -451,6 +451,29 @@ impl Core {
                     }
                 };
                 Ok(Response::Message { message: view })
+            }
+            Command::OpenThread { folder, id } => {
+                let thread = match self.target(&folder)? {
+                    Target::Synthetic(f) => {
+                        let row = synthetic::row(f.seed, id.clamp(0, u32::MAX as i64) as u32);
+                        ThreadView {
+                            subject: row.subject.clone(),
+                            messages: vec![ThreadMessage {
+                                id,
+                                folder: folder.clone(),
+                                sender_name: row.sender_name,
+                                sender_address: row.sender_address,
+                                date: row.date,
+                                unread: row.unread,
+                                downloaded: true,
+                                text: row.preview,
+                                ..ThreadMessage::default()
+                            }],
+                        }
+                    }
+                    Target::Folder(account, _) | Target::Account(account) => open_thread(&account, id)?,
+                };
+                Ok(Response::Thread { thread })
             }
             Command::Search { scope, text, limit } => {
                 let limit = limit.min(MAX_PAGE);
@@ -1069,6 +1092,115 @@ fn folder_tree(account_id: &str, rows: Vec<store::index::FolderRow>) -> Vec<Fold
 
 fn internal(e: StoreError) -> CoreError {
     CoreError::new(ErrorCode::Internal, e.to_string())
+}
+
+/// The conversation a message belongs to, each message reduced to what its
+/// sender wrote, with who joined and left along the way.
+fn open_thread(account: &Account, id: i64) -> Result<ThreadView, CoreError> {
+    use std::collections::{BTreeSet, HashMap};
+    use store::reduce;
+    let index = account.store.index();
+    let rows = index.thread_of(id).map_err(internal)?;
+    if rows.is_empty() {
+        return Err(CoreError::new(ErrorCode::UnknownMessage, format!("no message {id}")));
+    }
+    let folders: HashMap<i64, String> = index
+        .folders()
+        .map_err(internal)?
+        .into_iter()
+        .map(|f| {
+            let name = match role_of(&f) {
+                Some("inbox") => "Inbox".to_string(),
+                Some("outbox") => "Outbox".to_string(),
+                _ => f.name.clone(),
+            };
+            (f.id, name)
+        })
+        .collect();
+
+    let mut messages: Vec<ThreadMessage> = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let mut message = ThreadMessage {
+            id: row.id,
+            folder: format!("{}/{}", account.id, row.folder_id),
+            folder_name: folders.get(&row.folder_id).cloned().unwrap_or_default(),
+            parent: row.parent,
+            guessed: row.guessed,
+            sender_name: if row.from_name.is_empty() { row.from_addr.clone() } else { row.from_name.clone() },
+            sender_address: row.from_addr.clone(),
+            recipients: row.recipients.clone(),
+            date: row.date,
+            unread: !row.flags.contains(Flags::SEEN),
+            flagged: row.flags.contains(Flags::FLAGGED),
+            downloaded: row.downloaded,
+            text: row.preview.clone(),
+            ..ThreadMessage::default()
+        };
+        if row.downloaded {
+            if let Ok(raw) = account.store.read_message(row.id) {
+                let shown = store::parse::display(&raw);
+                let reduced = reduce::reduce(shown.text.as_deref().unwrap_or_default());
+                message.text = reduced.text;
+                message.quoted = reduced.quoted;
+                message.quoted_lines = reduced.quoted_lines as u32;
+                message.signature = reduced.signature;
+                message.attachments = shown
+                    .attachments
+                    .into_iter()
+                    .map(|a| AttachmentInfo { name: a.name, mime_type: a.mime_type, size: a.size })
+                    .collect();
+            }
+        }
+        messages.push(message);
+    }
+
+    // Signatures that only repetition reveals: a block that ends every
+    // message a sender wrote in this conversation.
+    let mut by_sender: HashMap<String, Vec<usize>> = HashMap::new();
+    for (i, m) in messages.iter().enumerate() {
+        if m.downloaded && !m.text.is_empty() {
+            by_sender.entry(m.sender_address.to_lowercase()).or_default().push(i);
+        }
+    }
+    for indices in by_sender.values() {
+        let texts: Vec<&str> = indices.iter().map(|i| messages[*i].text.as_str()).collect();
+        let shared = reduce::shared_ending(&texts);
+        if shared == 0 {
+            continue;
+        }
+        for i in indices {
+            let (text, ending) = reduce::split_ending(&messages[*i].text, shared);
+            messages[*i].text = text;
+            messages[*i].signature = match messages[*i].signature.is_empty() {
+                true => ending,
+                false => format!("{ending}\n{}", messages[*i].signature),
+            };
+        }
+    }
+
+    // Who each message added to, and dropped from, the conversation.
+    let people = |m: &ThreadMessage| -> Vec<(String, String)> {
+        let mut all = vec![(m.sender_address.to_lowercase(), m.sender_name.clone())];
+        for r in compose::parse_recipients(&m.recipients).unwrap_or_default() {
+            let name = if r.name.is_empty() { r.address.clone() } else { r.name };
+            all.push((r.address.to_lowercase(), name));
+        }
+        all
+    };
+    let everyone: HashMap<i64, Vec<(String, String)>> = messages.iter().map(|m| (m.id, people(m))).collect();
+    for message in &mut messages {
+        let Some(before) = message.parent.and_then(|p| everyone.get(&p)) else { continue };
+        let now = &everyone[&message.id];
+        let had: BTreeSet<&str> = before.iter().map(|(a, _)| a.as_str()).collect();
+        let has: BTreeSet<&str> = now.iter().map(|(a, _)| a.as_str()).collect();
+        message.added = now.iter().filter(|(a, _)| !had.contains(a.as_str())).map(|(_, n)| n.clone()).collect();
+        message.dropped = before.iter().filter(|(a, _)| !has.contains(a.as_str())).map(|(_, n)| n.clone()).collect();
+    }
+
+    Ok(ThreadView {
+        subject: rows[0].subject.clone(),
+        messages,
+    })
 }
 
 /// Reads a message from its file and prepares it for the reading pane.

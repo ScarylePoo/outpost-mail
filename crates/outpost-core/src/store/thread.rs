@@ -52,9 +52,14 @@ pub fn subject_key(subject: &str) -> (String, bool) {
     (rest.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase(), is_reply)
 }
 
+/// The message here with this Message-ID: (its key, its conversation).
+///
+/// Conversations and parents are recorded by a message's sort key, not its
+/// row number. The key is fixed when the message is first seen, so a rebuild
+/// can work conversations out before rows get their final numbers.
 fn held(conn: &Connection, message_id: &str, not: i64) -> rusqlite::Result<Option<(i64, i64)>> {
     conn.prepare_cached(
-        "SELECT id, thread_id FROM message
+        "SELECT sort_key, thread_id FROM message
          WHERE message_id = ?1 AND id != ?2 AND thread_id IS NOT NULL ORDER BY id LIMIT 1",
     )?
     .query_row(params![message_id, not], |r| Ok((r.get(0)?, r.get(1)?)))
@@ -73,7 +78,7 @@ fn share_participant(a_from: &str, a_to: &str, b_from: &str, b_to: &str) -> bool
 pub(super) fn link(conn: &Connection, id: i64) -> rusqlite::Result<()> {
     let row = conn
         .prepare_cached(
-            "SELECT message_id, in_reply_to, refs, subject, date, from_addr, recipients FROM message WHERE id = ?1",
+            "SELECT message_id, in_reply_to, refs, subject, date, from_addr, recipients, sort_key FROM message WHERE id = ?1",
         )?
         .query_row([id], |r| {
             Ok((
@@ -84,10 +89,11 @@ pub(super) fn link(conn: &Connection, id: i64) -> rusqlite::Result<()> {
                 r.get::<_, i64>(4)?,
                 r.get::<_, String>(5)?,
                 r.get::<_, String>(6)?,
+                r.get::<_, i64>(7)?,
             ))
         })
         .optional()?;
-    let Some((message_id, in_reply_to, refs, subject, date, from, recipients)) = row else {
+    let Some((message_id, in_reply_to, refs, subject, date, from, recipients, key_of_this)) = row else {
         return Ok(());
     };
     let (key, is_reply) = subject_key(&subject);
@@ -115,7 +121,7 @@ pub(super) fn link(conn: &Connection, id: i64) -> rusqlite::Result<()> {
         for cite in cited.iter().rev() {
             thread = conn
                 .prepare_cached(
-                    "SELECT m.thread_id FROM reference_to r JOIN message m ON m.id = r.message
+                    "SELECT m.thread_id FROM reference_to r JOIN message m ON m.sort_key = r.message
                      WHERE r.ref = ?1 AND m.id != ?2 AND m.thread_id IS NOT NULL LIMIT 1",
                 )?
                 .query_row(params![cite, id], |r| r.get(0))
@@ -129,7 +135,7 @@ pub(super) fn link(conn: &Connection, id: i64) -> rusqlite::Result<()> {
     let mut guessed = false;
     if thread.is_none() && cited.is_empty() && is_reply && !key.is_empty() {
         let mut candidates = conn.prepare_cached(
-            "SELECT id, thread_id, from_addr, recipients FROM message
+            "SELECT sort_key, thread_id, from_addr, recipients FROM message
              WHERE subject_key = ?1 AND date <= ?2 AND date >= ?3 AND id != ?4 AND thread_id IS NOT NULL
              ORDER BY date DESC, id DESC LIMIT 25",
         )?;
@@ -145,16 +151,16 @@ pub(super) fn link(conn: &Connection, id: i64) -> rusqlite::Result<()> {
             guessed = true;
         }
     }
-    let thread = thread.unwrap_or(id);
+    let thread = thread.unwrap_or(key_of_this);
     conn.prepare_cached(
         "UPDATE message SET thread_id = ?1, parent_id = ?2, link_guessed = ?3, subject_key = ?4 WHERE id = ?5",
     )?
     .execute(params![thread, parent, guessed, key, id])?;
 
-    conn.prepare_cached("DELETE FROM reference_to WHERE message = ?1")?.execute([id])?;
+    conn.prepare_cached("DELETE FROM reference_to WHERE message = ?1")?.execute([key_of_this])?;
     for cite in &cited {
         conn.prepare_cached("INSERT INTO reference_to (ref, message) VALUES (?1, ?2)")?
-            .execute(params![cite, id])?;
+            .execute(params![cite, key_of_this])?;
     }
 
     // Messages already here that cite this one arrived before it. Bring
@@ -163,7 +169,7 @@ pub(super) fn link(conn: &Connection, id: i64) -> rusqlite::Result<()> {
         let citing: Vec<(i64, i64, String, Option<i64>, bool)> = conn
             .prepare_cached(
                 "SELECT m.id, m.thread_id, m.in_reply_to, m.parent_id, m.link_guessed
-                 FROM reference_to r JOIN message m ON m.id = r.message
+                 FROM reference_to r JOIN message m ON m.sort_key = r.message
                  WHERE r.ref = ?1 AND m.id != ?2 AND m.thread_id IS NOT NULL",
             )?
             .query_map(params![message_id, id], |r| {
@@ -177,7 +183,7 @@ pub(super) fn link(conn: &Connection, id: i64) -> rusqlite::Result<()> {
             }
             if child_reply_to == message_id || child_parent.is_none() || child_guessed {
                 conn.prepare_cached("UPDATE message SET parent_id = ?1, link_guessed = 0 WHERE id = ?2")?
-                    .execute(params![id, child])?;
+                    .execute(params![key_of_this, child])?;
             }
         }
     }
@@ -198,15 +204,22 @@ fn hash(text: &str) -> u128 {
 /// Places every message at once, for after a rebuild. It reaches the same
 /// result as calling [`link`] for each message, but works in memory: doing a
 /// million of them one at a time through the database takes most of an hour.
-pub(super) fn link_all(conn: &Connection, mut progress: impl FnMut(u64, u64)) -> rusqlite::Result<()> {
+///
+/// `table` is the table holding the messages: the rebuild's staging table,
+/// so that everything is settled before rows are copied into their final
+/// order and nothing has to be rewritten in place afterwards.
+pub(super) fn link_all(conn: &Connection, table: &str, mut progress: impl FnMut(u64, u64)) -> rusqlite::Result<()> {
     use std::collections::HashMap;
 
     // 1. Which Message-IDs are here, and which message holds each (the
     //    earliest, as `link` would find).
     let mut holder: HashMap<u128, u32> = HashMap::new();
+    // `ids` are the table's row numbers (to read and write rows); `keys`
+    // are the messages' sort keys (what gets recorded).
     let mut ids: Vec<i64> = Vec::new();
+    let mut key_of: Vec<i64> = Vec::new();
     {
-        let mut all = conn.prepare("SELECT id, message_id FROM message ORDER BY id")?;
+        let mut all = conn.prepare(&format!("SELECT rowid, message_id, sort_key FROM {table} ORDER BY rowid"))?;
         let mut rows = all.query([])?;
         while let Some(row) = rows.next()? {
             let message_id: String = row.get(1)?;
@@ -214,6 +227,7 @@ pub(super) fn link_all(conn: &Connection, mut progress: impl FnMut(u64, u64)) ->
                 holder.entry(hash(&message_id)).or_insert(ids.len() as u32);
             }
             ids.push(row.get(0)?);
+            key_of.push(row.get(2)?);
         }
     }
     let total = ids.len();
@@ -247,7 +261,9 @@ pub(super) fn link_all(conn: &Connection, mut progress: impl FnMut(u64, u64)) ->
     // Every message by subject, for those guesses: (date, position).
     let mut by_subject: HashMap<String, Vec<(i64, u32)>> = HashMap::new();
     {
-        let mut all = conn.prepare("SELECT id, message_id, in_reply_to, refs, subject, date FROM message ORDER BY id")?;
+        let mut all = conn.prepare(&format!(
+            "SELECT rowid, message_id, in_reply_to, refs, subject, date FROM {table} ORDER BY rowid"
+        ))?;
         let mut rows = all.query([])?;
         let mut n = 0u32;
         while let Some(row) = rows.next()? {
@@ -277,7 +293,7 @@ pub(super) fn link_all(conn: &Connection, mut progress: impl FnMut(u64, u64)) ->
                     None => {
                         // Keep it findable for a message that arrives later,
                         // and join everyone else waiting on the same one.
-                        missing.push((cite.to_string(), ids[me as usize]));
+                        missing.push((cite.to_string(), key_of[me as usize]));
                         match orphans.get(&hash(cite)) {
                             Some(&other) => join(&mut set, me, other),
                             None => {
@@ -305,7 +321,7 @@ pub(super) fn link_all(conn: &Connection, mut progress: impl FnMut(u64, u64)) ->
         list.sort_unstable();
     }
     {
-        let mut who = conn.prepare("SELECT date, from_addr, recipients FROM message WHERE id = ?1")?;
+        let mut who = conn.prepare(&format!("SELECT date, from_addr, recipients FROM {table} WHERE rowid = ?1"))?;
         let mut people = |id: i64| -> rusqlite::Result<(i64, String, String)> {
             who.query_row([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
         };
@@ -336,14 +352,14 @@ pub(super) fn link_all(conn: &Connection, mut progress: impl FnMut(u64, u64)) ->
     // 4. Write it all back.
     conn.execute_batch("DELETE FROM reference_to; BEGIN")?;
     {
-        let mut update = conn.prepare(
-            "UPDATE message SET thread_id = ?1, parent_id = ?2, link_guessed = ?3, subject_key = ?4 WHERE id = ?5",
-        )?;
+        let mut update = conn.prepare(&format!(
+            "UPDATE {table} SET thread_id = ?1, parent_id = ?2, link_guessed = ?3, subject_key = ?4 WHERE rowid = ?5"
+        ))?;
         for i in 0..total {
             let root = find(&mut set, i as u32);
             update.execute(params![
-                ids[root as usize],
-                parent[i].map(|p| ids[p as usize]),
+                key_of[root as usize],
+                parent[i].map(|p| key_of[p as usize]),
                 guessed[i],
                 keys[i],
                 ids[i]
@@ -385,11 +401,11 @@ impl Index {
     /// every folder. A message that is in two folders (a copy the user kept)
     /// appears once.
     pub fn thread_of(&self, message: i64) -> Result<Vec<ThreadRow>> {
-        let rows: Vec<(ThreadRow, String)> = self.read(|conn| {
+        let rows: Vec<(ThreadRow, String, i64)> = self.read(|conn| {
             conn.prepare_cached(
                 "SELECT m.id, m.folder_id, m.parent_id, m.link_guessed, m.from_name, m.from_addr,
                         m.recipients, m.date, m.flags, m.has_attachment, m.subject, m.preview,
-                        m.base != '', m.message_id
+                        m.base != '', m.message_id, m.sort_key
                  FROM message m
                  WHERE m.id = ?1 OR m.thread_id = (SELECT thread_id FROM message WHERE id = ?1)
                  ORDER BY m.date, m.id",
@@ -412,10 +428,20 @@ impl Index {
                         downloaded: r.get(12)?,
                     },
                     r.get::<_, String>(13)?,
+                    r.get::<_, i64>(14)?,
                 ))
             })?
             .collect()
         })?;
+        // Parents are recorded by sort key; the interface wants ids.
+        let id_of: std::collections::HashMap<i64, i64> = rows.iter().map(|(r, _, key)| (*key, r.id)).collect();
+        let rows: Vec<(ThreadRow, String)> = rows
+            .into_iter()
+            .map(|(mut row, message_id, _)| {
+                row.parent = row.parent.and_then(|key| id_of.get(&key).copied());
+                (row, message_id)
+            })
+            .collect();
         // Copies of one message: keep the one asked for, else the first, and
         // point anything that replied to a dropped copy at the kept one.
         let mut kept: Vec<ThreadRow> = Vec::new();

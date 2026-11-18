@@ -16,7 +16,7 @@ use std::sync::{Mutex, MutexGuard};
 type Result<T> = std::result::Result<T, StoreError>;
 
 /// Bump when the schema changes, and add a step to `migrate`.
-const SCHEMA_VERSION: i32 = 7;
+const SCHEMA_VERSION: i32 = 8;
 
 const TABLES: &str = r#"
 CREATE TABLE folder (
@@ -70,9 +70,10 @@ CREATE TABLE message (
     message_id     TEXT NOT NULL,
     in_reply_to    TEXT NOT NULL,
     refs           TEXT NOT NULL,
-    -- Conversations. See store/thread.rs.
+    -- Conversations. See store/thread.rs. A conversation is named by the
+    -- sort key of one of its messages.
     thread_id      INTEGER,
-    -- The message this one replies to, if it is here.
+    -- The sort key of the message this one replies to, if it is here.
     parent_id      INTEGER,
     -- 1 if that link was inferred from the subject rather than headers.
     link_guessed   INTEGER NOT NULL DEFAULT 0,
@@ -169,7 +170,7 @@ const TRIGGERS: &[(&str, &str)] = &[
     (
         "message_gone",
         "CREATE TRIGGER IF NOT EXISTS message_gone AFTER DELETE ON message BEGIN
-            DELETE FROM reference_to WHERE message = OLD.id;
+            DELETE FROM reference_to WHERE message = OLD.sort_key;
             UPDATE message SET is_head = (sort_key = (SELECT max(sort_key) FROM message
                 WHERE folder_id = OLD.folder_id AND thread_id IS OLD.thread_id))
               WHERE folder_id = OLD.folder_id AND thread_id IS OLD.thread_id;
@@ -732,28 +733,28 @@ impl Bulk<'_> {
         // any one page of the list sit next to each other in the file. A cold
         // open of a folder then reads a few adjacent pages instead of one
         // scattered page per row.
+        // Conversations first, in the staging table, so that every row is
+        // complete before it is copied and nothing is rewritten afterwards
+        // (rewriting rows in place would scatter them again).
+        self.conn.execute_batch("COMMIT")?;
+        super::thread::link_all(&self.conn, "load.message", |_, _| {})?;
+        self.conn.execute_batch(
+            "CREATE INDEX load.message_threads ON message(folder_id, thread_id, sort_key);
+             UPDATE load.message SET is_head = 0;
+             UPDATE load.message SET is_head = 1 WHERE sort_key IN
+               (SELECT max(sort_key) FROM load.message GROUP BY folder_id, thread_id)",
+        )?;
         self.conn.execute_batch(&format!(
-            "COMMIT;
-             CREATE INDEX load.message_order ON message(folder_id, sort_key);
+            "CREATE INDEX load.message_order ON message(folder_id, sort_key);
              INSERT INTO main.message ({MESSAGE_COLUMNS})
                SELECT {MESSAGE_COLUMNS} FROM load.message INDEXED BY message_order
                ORDER BY folder_id, sort_key;
              DETACH DATABASE load"
         ))?;
         let _ = std::fs::remove_file(&self.staging);
-        // Conversations are worked out once every message is in place, and
-        // before the indexes that their columns feed are built.
-        super::thread::link_all(&self.conn, |_, _| {})?;
         for (_, sql) in INDEXES {
             self.conn.execute_batch(sql)?;
         }
-        // The newest message of each conversation in each folder stands for
-        // it in that folder's list.
-        self.conn.execute_batch(
-            "UPDATE message SET is_head = 0 WHERE is_head != 0;
-             UPDATE message SET is_head = 1 WHERE sort_key IN
-               (SELECT max(sort_key) FROM message GROUP BY folder_id, thread_id)",
-        )?;
         for (_, sql) in TRIGGERS {
             self.conn.execute_batch(sql)?;
         }
@@ -766,6 +767,10 @@ impl Bulk<'_> {
             self.conn
                 .execute_batch("INSERT INTO message_fts(message_fts) VALUES('optimize')")?;
         }
+        // A rebuild frees and reuses pages all over the file, which leaves
+        // even freshly built indexes scattered and slow to read cold.
+        // Rewriting the file lays every table and index out in one piece.
+        self.conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM")?;
         self.conn.execute_batch("ANALYZE; PRAGMA wal_checkpoint(TRUNCATE)")?;
         self.finished = true;
         Ok(())
@@ -813,7 +818,7 @@ fn key_taken(conn: &Connection, table: &str, key: i64) -> rusqlite::Result<bool>
 /// The columns of `message` other than `id`, which SQLite assigns.
 const MESSAGE_COLUMNS: &str = "folder_id, base, file_flags, flags, uid, modseq, date, sort_key, \
      size, has_attachment, from_name, from_addr, recipients, subject, message_id, in_reply_to, \
-     refs, thread_id, preview, preview_len, verdict";
+     refs, thread_id, parent_id, link_guessed, subject_key, is_head, preview, preview_len, verdict";
 
 fn staging_path(index: &Path) -> PathBuf {
     let mut name = index.file_name().unwrap_or_default().to_os_string();

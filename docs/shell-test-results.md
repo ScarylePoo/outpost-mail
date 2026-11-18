@@ -62,3 +62,35 @@ rather than a locked 63. On Windows the median equals the interval exactly.
 Whether that gap is WebKitGTK or the software rendering cannot be told from
 this run. The decision still needs a native Linux desktop with working
 graphics, and the by-eye half.
+
+### Follow-up runs, same machine, same day
+
+After adding the user to the `render` and `video` groups the permission error
+went away, but hardware graphics still did not start under WSLg in any
+configuration tried (`libEGL warning: egl: failed to create dri2 screen`), so
+every run here is software-rendered.
+
+| Setting | Median frame while scrolling fast | Slow frames |
+| --- | --- | --- |
+| Default | 17 to 18 ms | 1 of 1,153 |
+| `GALLIUM_DRIVER=d3d12` | 17 ms | 1 of 1,211 |
+| `GDK_BACKEND=wayland GALLIUM_DRIVER=d3d12` | 17 ms | 2 of 1,210 |
+| `WEBKIT_DISABLE_DMABUF_RENDERER=1` | 16 ms (matches the display) | 0 of 1,265 |
+
+The best run, `WEBKIT_DISABLE_DMABUF_RENDERER=1`:
+
+```
+phase                            frames  median     p95     p99   worst   slow  blank  longest blank
+reading speed (600 px/s)            249    16.0    17.0    17.0    17.0      0      0     0.0 ms
+fast wheel (6,000 px/s)             249    16.0    17.0    17.0    17.0      0      0     0.0 ms
+scrollbar drag (120,000 px/s)       249    16.0    17.0    17.0    17.0      0      0     0.0 ms
+back and forth                      250    16.0    17.0    17.0    17.0      0      1    16.0 ms
+random jumps (5 per second)         268    16.0    17.0    17.0    18.0      0     19    17.0 ms
+Slow frames: 0 of 1265 (0.0%).  Frames with a blank row: 20.
+```
+
+Reading: with that one setting WebKitGTK keeps pace with the display even
+without a graphics card, so the earlier shortfall came from how frames were
+handed to the WSLg display, not from drawing the list. That is encouraging for
+Tauri but is still a WSL result. Still needed: a native Linux desktop, and a
+person watching.

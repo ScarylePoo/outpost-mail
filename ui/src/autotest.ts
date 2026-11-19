@@ -76,6 +76,23 @@ async function probe(details: string): Promise<string> {
     await sleep(1200);
     lines.push(`after Delete: ${text(".list-holder .row:not(.idle) .row-subject").join(" | ")}`);
     lines.push(`selection moved to: ${text(".message h1").join("")}`);
+    // Shift-click and Ctrl-click onto unread messages: the selection grows,
+    // and nothing is opened or marked read on the way.
+    const rowsNow = () => [...document.querySelectorAll(".list-holder .row:not(.idle)")] as HTMLElement[];
+    const unreadAt = rowsNow().findIndex((r, i) => i > 0 && r.classList.contains("unread"));
+    const unreadBefore = document.querySelectorAll(".list-holder .row.unread:not(.idle)").length;
+    rowsNow()[unreadAt]?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, shiftKey: true }));
+    await sleep(1500);
+    const afterShift = text(".list-header span").join("");
+    const other = rowsNow().findIndex((r, i) => i > unreadAt && r.classList.contains("unread"));
+    rowsNow()[other]?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, ctrlKey: true }));
+    await sleep(1500);
+    lines.push(
+      `shift-click to an unread message (row ${unreadAt + 1}): ${afterShift}; then ctrl-click another (row ${other + 1}): ${text(".list-header span").join("")}; ` +
+        `unread rows ${unreadBefore} -> ${document.querySelectorAll(".list-holder .row.unread:not(.idle)").length}; reading pane: ${text(".reading-empty").join("") || "A MESSAGE IS OPEN"}`,
+    );
+    rowsNow()[0]?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    await sleep(500);
     // Several at once: select everything and mark it all unread.
     document
       .querySelector(".list-holder .list")

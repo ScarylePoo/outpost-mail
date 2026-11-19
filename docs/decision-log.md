@@ -58,6 +58,14 @@ mail. Two were real faults that no test had covered.
   text stays readable on it; text on the full colour is black or white,
   whichever contrasts more with that colour (`ui/src/organizer/colors.ts`).
 
+- **Selecting several messages opened and marked each one read, and then
+  lost the selection.** Shift- or Ctrl-clicking a message made it the open
+  message; if it was unread it was marked read, the folder refreshed, and a
+  refresh always collapsed a multiple selection to one row. Now, while more
+  than one message is selected, none is opened (the reading pane says how
+  many are selected), so none is marked read; and a refresh that moved
+  nothing keeps the selection. The app self-test covers both clicks.
+
 ### Decided (owner, 18 November 2026): colour schemes, fonts and sizes
 
 The owner asked for colour schemes and for the fonts and font sizes to be

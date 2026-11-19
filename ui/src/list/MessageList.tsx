@@ -328,6 +328,7 @@ export function MessageList(props: {
         if (gen !== generation) return;
       }
 
+      const countBefore = count();
       epoch++;
       pages = rows;
       pending = new Set();
@@ -343,6 +344,9 @@ export function MessageList(props: {
       setLayoutTick((t) => t + 1);
       setTop(nextTop);
       lastTop = virtualTop;
+      // A change that moved nothing (a flag, a message marked read) leaves
+      // a multiple selection exactly where it was.
+      const unmoved = n === countBefore && selectedIndex !== null && selectedIndex === selected() && picked().size > 1;
       if (selectedIndex !== null || selectedId === undefined) {
         setSelected(selectedIndex ?? -1);
       } else {
@@ -353,9 +357,12 @@ export function MessageList(props: {
         selectedId = undefined;
         setSelected(next);
       }
-      // Positions have shifted, so a multiple selection cannot be kept.
-      rangeStart = selected();
-      pick(new Set(selected() >= 0 ? [selected()] : []));
+      // Otherwise positions have shifted, and a multiple selection cannot
+      // be kept.
+      if (!unmoved) {
+        rangeStart = selected();
+        pick(new Set(selected() >= 0 ? [selected()] : []));
+      }
       setDataTick((t) => t + 1);
       update();
     } catch {

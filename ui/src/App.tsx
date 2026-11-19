@@ -996,6 +996,11 @@ export function App() {
               <pre>{report()}</pre>
             </div>
           </Match>
+          {/* Several messages selected: none of them is opened, so none
+              is marked read just for being clicked on the way. */}
+          <Match when={count() > 1 && !searching()}>
+            <div class="reading-empty">{count().toLocaleString()} messages selected.</div>
+          </Match>
           <Match when={folderId()}>{(id) => <Reader folder={id()} row={message()} onOpened={opened} />}</Match>
         </Switch>
       </section>

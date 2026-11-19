@@ -916,6 +916,22 @@ button.inline:hover {
   color: var(--text-2);
 }
 
+.composer-from-pick select {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 4px;
+  border: 0;
+  outline: none;
+  font: inherit;
+  background: none;
+  cursor: pointer;
+}
+
+.composer-from-pick select:focus-visible {
+  outline: 2px solid var(--accent);
+  border-radius: 4px;
+}
+
 .composer-line {
   display: flex;
   align-items: center;
@@ -2257,6 +2273,31 @@ button.danger {
 .organizer-head h1 {
   margin: 0 8px 0 0;
   font-size: 18px;
+}
+
+/* The same buttons as the mail toolbar's. */
+.organizer-head button {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--pane);
+}
+
+.organizer-head button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.organizer-head button.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+
+.organizer-head button.primary:hover:not(:disabled) {
+  color: var(--on-accent);
+  filter: brightness(1.08);
 }
 
 .organizer-gap {

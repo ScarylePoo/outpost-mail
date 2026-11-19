@@ -128,18 +128,25 @@ function SendingSetup(props: { account: AccountInfo; onDone: () => void; onCance
  * the user will write, and above anything quoted. A draft being reopened is
  * left exactly as it was saved.
  */
+const signatureBlock = (signature: string) => (signature.trim() ? `-- \n${signature.trim()}` : "");
+
 function withSignature(draft: DraftContent, signature: string): string {
   if (!signature.trim() || draft.replaces !== null) return draft.body;
-  const block = `-- \n${signature.trim()}`;
+  const block = signatureBlock(signature);
   if (draft.body.includes(block)) return draft.body;
   return draft.body.trim() ? `\n\n${block}\n\n${draft.body.replace(/^\n+/, "")}` : `\n\n${block}\n`;
 }
 
+const whoFrom = (s: SendingSettings) => (s.name ? `${s.name} <${s.address}>` : s.address);
+
 export function Composer(props: {
+  /** The account the message starts out being from. */
   account: AccountInfo;
+  /** Every mail account: a new message can be sent from any that can send. */
+  accounts: AccountInfo[];
   initial: DraftContent;
-  /** The message was put in the outbox; `id` is its row there. */
-  onSent: (id: number, subject: string) => void;
+  /** The message was put in `account`'s outbox; `id` is its row there. */
+  onSent: (account: string, id: number, subject: string) => void;
   onClose: (note?: string) => void;
   onSendingSet: () => void;
 }) {
@@ -153,6 +160,26 @@ export function Composer(props: {
   const [busy, setBusy] = createSignal(false);
   const [error, setError] = createSignal("");
   let files!: HTMLInputElement;
+
+  // Who the message is from. A new message can be moved to another account;
+  // a reply, a forward or a reopened draft belongs to the account its
+  // original is in.
+  const [fromId, setFromId] = createSignal(props.account.id);
+  const from = () => props.accounts.find((a) => a.id === fromId()) ?? props.account;
+  const fresh = props.initial.replyToMessage === null && props.initial.forwardOf === null && props.initial.replaces === null;
+  const choices = () =>
+    props.accounts.filter(
+      (a) => a.id === fromId() || (a.sending && a.status.state !== "notSyncing" && a.status.state !== "needsPassword"),
+    );
+
+  function changeFrom(id: string) {
+    const before = signatureBlock(from().signature);
+    setFromId(id);
+    const after = signatureBlock(from().signature);
+    // The signature follows the account, if the old one is still as it was.
+    if (before && body().includes(before)) setBody(body().replace(before, after));
+    else if (!before && after && !body().includes(after)) setBody(`${body().replace(/\s+$/, "")}\n\n${after}\n`);
+  }
 
   const draft = (): DraftContent => ({
     ...props.initial,
@@ -184,8 +211,8 @@ export function Composer(props: {
     setBusy(true);
     setError("");
     core
-      .send({ type: "sendMessage", account: props.account.id, draft: draft(), delaySeconds: general().undoSendSeconds })
-      .then((r) => props.onSent(r.id, subject()))
+      .send({ type: "sendMessage", account: fromId(), draft: draft(), delaySeconds: general().undoSendSeconds })
+      .then((r) => props.onSent(fromId(), r.id, subject()))
       .catch((e) => {
         setBusy(false);
         setError(errorText(e));
@@ -197,7 +224,7 @@ export function Composer(props: {
     setBusy(true);
     setError("");
     core
-      .send({ type: "saveDraft", account: props.account.id, draft: draft() })
+      .send({ type: "saveDraft", account: fromId(), draft: draft() })
       .then(() => props.onClose("Saved to Drafts"))
       .catch((e) => {
         setBusy(false);
@@ -224,9 +251,23 @@ export function Composer(props: {
             if (e.ctrlKey && e.key === "Enter") send(e);
           }}
         >
-          <div class="composer-from">
-            From {sending().name ? `${sending().name} <${sending().address}>` : sending().address}
-          </div>
+          <Show
+            when={fresh && choices().length > 1}
+            fallback={<div class="composer-from">From {whoFrom(from().sending ?? sending())}</div>}
+          >
+            <label class="composer-line composer-from-pick">
+              <span>From</span>
+              <select value={fromId()} onChange={(e) => changeFrom(e.currentTarget.value)}>
+                <For each={choices()}>
+                  {(a) => (
+                    <option value={a.id} selected={a.id === fromId()}>
+                      {a.sending ? whoFrom(a.sending) : a.name}
+                    </option>
+                  )}
+                </For>
+              </select>
+            </label>
+          </Show>
           <label class="composer-line">
             <span>To</span>
             <input type="text" value={to()} onInput={(e) => setTo(e.currentTarget.value)} autofocus={!props.initial.to} />

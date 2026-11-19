@@ -249,7 +249,7 @@ service stats {{
             WEBKIT_DISABLE_DMABUF_RENDERER="1",
         )
         app = subprocess.Popen([APP], env=env, **quiet)
-        deadline = time.time() + 120
+        deadline = time.time() + 180
         delivered = False
         while app.poll() is None and time.time() < deadline:
             if not delivered and os.path.exists(report) and open(report).read() == "READY":

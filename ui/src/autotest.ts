@@ -291,6 +291,34 @@ async function probe(details: string): Promise<string> {
     } else {
       lines.push("calendar: not tested here (no calendar server was given)");
     }
+
+    // A second mail account: a new message can then be sent from either.
+    const seen = events.length;
+    await core.send({
+      type: "addAccount",
+      ...mail,
+      username: "second",
+      sending: { ...mail.sending, name: "Second Account", address: "second@example.com" },
+    });
+    const added = Date.now() + 20_000;
+    while (Date.now() < added && !events.slice(seen).some((e) => e === "status:upToDate" || e.startsWith("accountSetupFailed"))) await sleep(100);
+    await sleep(1500);
+    press("New");
+    await sleep(700);
+    const fromPick = document.querySelector(".composer-from-pick select") as HTMLSelectElement | null;
+    const offered = [...(fromPick?.options ?? [])];
+    lines.push(`new message can be from: ${offered.map((o) => o.textContent).join(" | ") || "NO CHOICE OFFERED"} (starts as: ${fromPick?.selectedOptions[0]?.textContent})`);
+    const second = offered.find((o) => o.textContent?.includes("second@"));
+    if (fromPick && second) {
+      fromPick.value = second.value;
+      fromPick.dispatchEvent(new Event("change", { bubbles: true }));
+      const fields = [...document.querySelectorAll(".composer-line input")] as HTMLInputElement[];
+      type(fields[0], "someone@example.com");
+      type(fields.at(-1), "From the other account");
+      type(document.querySelector(".composer-body"), "Written in the window.");
+      (document.querySelector(".composer button.primary") as HTMLButtonElement | null)?.click();
+      await sleep(14_000);
+    }
   } catch (e) {
     lines.push(`FAILED: ${e instanceof Error ? e.message : JSON.stringify(e)}`);
   }

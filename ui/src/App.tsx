@@ -967,8 +967,9 @@ export function App() {
             {(c) => (
               <Composer
                 account={c.account}
+                accounts={accounts()}
                 initial={c.draft}
-                onSent={(id, subject) => sent(c.account.id, id, subject)}
+                onSent={sent}
                 onClose={(note) => {
                   setPanel({ kind: "none" });
                   if (note) setNotice(note);

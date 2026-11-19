@@ -179,6 +179,9 @@ fn an_invitation_is_shown_answered_filed_and_replied_to() {
         };
         rows.iter().any(|r| r.subject.starts_with("Cancelled"))
     });
+    // The row is listed as soon as its headers are known; what the message
+    // says about the meeting is only known once its body is here too.
+    until("the cancellation to be downloaded", || message(&core, "Cancelled: Budget review").downloaded);
     let cancelled = message(&core, "Cancelled: Budget review");
     let shown = cancelled.invitation.clone().unwrap();
     assert_eq!((shown.kind.as_str(), shown.in_calendar), ("cancel", true));

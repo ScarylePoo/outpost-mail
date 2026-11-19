@@ -144,6 +144,14 @@ was also compiling the Windows build, and passed in the four runs after it.
 The failure text was not captured. If it shows up again, capture it: a test
 that fails only under load is usually a timing assumption in the test.
 
+**Explained and fixed, 19 November 2026:** `an_invitation_is_shown_answered_filed_and_replied_to`
+in `tests/invitations.rs` failed on CI (Linux, run 44486187126) with an
+`unwrap` on `None` at the cancellation step. The test waited for the
+cancellation's row to be listed and then read its invitation at once; a row
+is listed when its headers are known, which can be a moment before its body
+has been downloaded. The test now waits for the body. The app was not at
+fault: the reading pane shows "not downloaded yet" in that moment.
+
 ## Tests of calendars, tasks and contacts (phase two)
 
 These need **Radicale**, a small CalDAV and CardDAV server, the way the mail

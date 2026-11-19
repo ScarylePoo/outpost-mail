@@ -46,9 +46,10 @@ def rust_packages():
     for target in TARGETS:
         raw = subprocess.run(
             ["cargo", "metadata", "--format-version", "1", "--locked", "--filter-platform", target],
-            check=True, capture_output=True, text=True,
+            check=True, capture_output=True,
         ).stdout
-        meta = json.loads(raw)
+        # Bytes, decoded here: the system's own encoding is not UTF-8 on Windows.
+        meta = json.loads(raw.decode("utf-8"))
         by_id = {p["id"]: p for p in meta["packages"]}
         # Only what is linked into the app: not build scripts' or tests' own needs.
         nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}

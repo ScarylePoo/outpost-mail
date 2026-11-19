@@ -29,8 +29,27 @@ of mail.
 
 "Sender history" has the least room: 70 ms cold against 100 ms.
 
-Windows: see below if a Windows section follows this one; otherwise it was
-not re-measured.
+**Windows**, the same mailbox on NTFS, measured straight after the rebuild
+(so the file cache was warm: "first" here is not a cold read, and the tool
+cannot empty the cache on Windows). **All targets met.**
+
+| Operation | First | Typical | Target |
+| --- | --- | --- | --- |
+| Open the account and list folders | 13 ms | 0 ms | - |
+| Open Inbox / Archive | 21 / 43 ms | 17 / 34 ms | 100 ms |
+| Open Inbox / Archive as conversations | 25 / 33 ms | 18 / 22 ms | 100 ms |
+| Load a page at the middle / end of Archive | 6 / 10 ms | 5 / 10 ms | 16 ms |
+| Read one message file | 8 ms | 7 ms | 100 ms |
+| Sender history for one message | 3 ms | 1 ms | 100 ms |
+| Search, slowest kind (three letters, as typed) | 7 ms | 4 ms | 300 ms |
+
+Rebuild on Windows: 639 s (reading and indexing 516 s at 1,939 messages a
+second), two and a half times Linux, as milestone 1 found for anything that
+touches many small files. Loading a page at the end of Archive, 10 ms
+against 16 ms, has the least room.
+
+Not measured in this run: scrolling frame rate in the app at this size
+(last measured in milestone 3), and memory use.
 
 ## Milestone 6 · 18 November 2026 · sender verification, one million messages
 

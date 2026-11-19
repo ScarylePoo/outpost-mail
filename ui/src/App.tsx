@@ -16,7 +16,7 @@ import { SearchResults } from "./list/SearchResults";
 import { Reader } from "./reader/Reader";
 import { AddAccount, PasswordPrompt } from "./accounts/AccountPanels";
 import { autoShellTest } from "./autotest";
-import { asking, general, loadProtection, messageActions } from "./core/protection";
+import { asking, general, loadProtection, messageActions, subjectsChanged } from "./core/protection";
 import { loadAppearance } from "./core/appearance";
 import { parseMailto } from "./mailto";
 import { checkForUpdate, update, updateEvent } from "./core/updates";
@@ -419,6 +419,46 @@ export function App() {
     }
   }
 
+  // ---- the user's own subject for a message -------------------------------
+
+  const [renaming, setRenaming] = createSignal<{ folder: string; ids: number[]; original: string; renamed: boolean }>();
+  const [renameText, setRenameText] = createSignal("");
+
+  /** Opens the "change subject" box for the message, or the conversation. */
+  async function startRenaming() {
+    const t = target();
+    if (!t) return;
+    try {
+      const [opened, thread] = await Promise.all([
+        core.send({ type: "openMessage", folder: t.folder, id: t.row.id }),
+        core.send({ type: "openThread", folder: t.folder, id: t.row.id }),
+      ]);
+      const whole = conversations() && !searching() && thread.thread.messages.length > 1;
+      setRenameText(t.row.subject);
+      setRenaming({
+        folder: t.folder,
+        ids: whole ? thread.thread.messages.map((m) => m.id) : [t.row.id],
+        original: opened.message.originalSubject ?? opened.message.subject ?? t.row.subject,
+        renamed: opened.message.originalSubject !== null,
+      });
+    } catch (e) {
+      setNotice(String((e as Error)?.message ?? e));
+    }
+  }
+
+  async function rename(r: { folder: string; ids: number[]; original: string }, subject: string | null) {
+    setRenaming(undefined);
+    const wanted = subject?.trim() ?? "";
+    try {
+      // Typing the sender's own subject back is the same as restoring it.
+      await core.send({ type: "renameSubject", folder: r.folder, ids: r.ids, subject: wanted && wanted !== r.original ? wanted : null });
+      subjectsChanged();
+      list?.refresh();
+    } catch (e) {
+      setNotice(String((e as Error)?.message ?? e));
+    }
+  }
+
   // ---- folders ------------------------------------------------------------
 
   /** The account (or folder) a new folder is being named under, if any. */
@@ -547,6 +587,7 @@ export function App() {
     delete: { run: () => void remove(), can: () => target() !== undefined },
     archive: { run: () => void archive(), can: () => target() !== undefined },
     flag: { run: () => void toggleFlag(), can: () => target() !== undefined },
+    rename: { run: () => void startRenaming(), can: () => target() !== undefined && count() <= 1 },
     read: { run: () => void markRead(true), can: () => target() !== undefined },
     unread: { run: () => void markRead(false), can: () => target() !== undefined },
     mail: { run: () => setView("mail"), can: () => true },
@@ -634,6 +675,7 @@ export function App() {
         entry("read", "Mark as read"),
         entry("unread", "Mark as unread"),
         entry("flag", message()?.flagged ? "Unflag" : "Flag"),
+        entry("rename", "Change subject…"),
         null,
         entry("archive", "Archive"),
         {
@@ -1005,6 +1047,52 @@ export function App() {
           <Match when={folderId()}>{(id) => <Reader folder={id()} row={message()} onOpened={opened} />}</Match>
         </Switch>
       </section>
+
+      <Show when={renaming()}>
+        {(r) => (
+          <div class="ask-back">
+            <form
+              class="ask wide"
+              role="dialog"
+              aria-label="Change subject"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void rename(r(), renameText());
+              }}
+              onKeyDown={(e) => e.key === "Escape" && setRenaming(undefined)}
+            >
+              <h2>Change subject</h2>
+              <input
+                type="text"
+                maxLength={300}
+                ref={(el) => setTimeout(() => (el.focus(), el.select()))}
+                value={renameText()}
+                onInput={(e) => setRenameText(e.currentTarget.value)}
+              />
+              <p class="ask-note">
+                The sender's subject: {r().original || "(no subject)"}
+                <br />
+                {r().ids.length > 1 ? `Changes all ${r().ids.length} messages of this conversation. ` : ""}
+                Only what Outpost shows is changed. The message itself, and replies to it, keep the sender's subject, and
+                search finds it by either.
+              </p>
+              <div class="panel-actions">
+                <button type="submit" class="primary">
+                  Change
+                </button>
+                <Show when={r().renamed}>
+                  <button type="button" onClick={() => void rename(r(), null)}>
+                    Use the sender's again
+                  </button>
+                </Show>
+                <button type="button" onClick={() => setRenaming(undefined)}>
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+      </Show>
 
       <Show when={asking()}>{(a) => <PasswordAsk why={a().why} error={a().error} answer={a().answer} />}</Show>
 

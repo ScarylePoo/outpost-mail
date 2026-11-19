@@ -361,7 +361,7 @@ impl Index {
             "INSERT INTO message_fts (rowid, subject, participants, body) VALUES (?1, ?2, ?3, ?4)",
             params![
                 sort_key,
-                p.subject,
+                super::index::searchable_subject(&tx, &p.message_id, &p.subject)?,
                 format!("{} {} {}", p.from_name, p.from_addr, p.recipients),
                 p.body
             ],

@@ -217,6 +217,7 @@ function answer(command: Command): Response {
           remoteContentBlocked: kind === "html" && command.id % 2 === 0,
           downloaded: kind !== "pending",
           senderCheck: senderCheckOf(command.id, r.senderAddress),
+          originalSubject: null,
           restricted: checkOf(command.id) === "failed" && protection.disableFailed && !trusted.has(command.id),
           trusted: trusted.has(command.id),
           remoteImagesShown: false,
@@ -386,6 +387,7 @@ function answer(command: Command): Response {
       return { type: "sendCancelled", cancelled: true };
     case "setSending":
     case "changeFlags":
+    case "renameSubject":
     case "moveMessages":
     case "archiveMessages":
     case "deleteMessages":

@@ -51,6 +51,8 @@ export type Command =
   | { type: "setCheckingServer"; account: FolderId; server: string; password?: string | null }
   | { type: "search"; scope: FolderId; text: string; limit: number }
   | { type: "changeFlags"; folder: FolderId; ids: number[]; seen: boolean | null; flagged: boolean | null }
+  /** The user's own subject for messages; null restores the sender's. */
+  | { type: "renameSubject"; folder: FolderId; ids: number[]; subject: string | null }
   | { type: "moveMessages"; ids: number[]; to: FolderId }
   | { type: "archiveMessages"; folder: FolderId; ids: number[] }
   | { type: "deleteMessages"; folder: FolderId; ids: number[]; permanently: boolean }
@@ -315,6 +317,8 @@ export interface MessageView {
   senderCheck: SenderCheck;
   /** Failed its checks: links taken out, attachments off. */
   restricted: boolean;
+  /** The subject the sender gave, when `subject` is the user's own. */
+  originalSubject: string | null;
   /** The user chose to trust it despite its failed checks. */
   trusted: boolean;
   /** Pictures on the internet were left in for this sender. */
@@ -508,6 +512,7 @@ type ResponseFor = {
   trustMessage: "accepted";
   setCheckingServer: "accepted";
   changeFlags: "accepted";
+  renameSubject: "accepted";
   moveMessages: "accepted";
   archiveMessages: "accepted";
   deleteMessages: "accepted";

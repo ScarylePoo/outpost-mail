@@ -1041,6 +1041,25 @@ impl Core {
                     password_set: self.inner.settings.password_set(),
                 })
             }
+            Command::RenameSubject { folder, ids, subject } => {
+                let account = self.account(&folder)?;
+                // One line, no control characters, not endless.
+                let subject: Option<String> = subject
+                    .map(|s| s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>())
+                    .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(300).collect::<String>())
+                    .filter(|s| !s.is_empty());
+                let mut touched = std::collections::BTreeSet::new();
+                for id in ids {
+                    touched.extend(account.store.rename_subject(id, subject.as_deref()).map_err(internal)?);
+                }
+                if touched.is_empty() {
+                    return Err(CoreError::new(ErrorCode::NotPossible, "this message cannot be renamed: it has no Message-ID to remember the name by"));
+                }
+                for folder_id in touched {
+                    self.inner.sink.emit(Event::FolderChanged { folder: format!("{}/{folder_id}", account.id) });
+                }
+                Ok(Response::Accepted)
+            }
             Command::TrustMessage { folder, id, trusted, password } => {
                 let account = self.account(&folder)?;
                 // Withdrawing trust is always allowed; giving it overrides
@@ -1821,9 +1840,11 @@ fn open_message(
         .html
         .as_deref()
         .map(|html| render::safe_html_with(&render::embed_inline_images(html, &images), allow));
+    let renamed = store.index().renamed_subject(id).map_err(internal)?;
     Ok(MessageView {
         id,
-        subject: shown.subject,
+        original_subject: renamed.as_ref().map(|_| shown.subject.clone()),
+        subject: renamed.unwrap_or(shown.subject),
         sender_name: shown.from_name,
         sender_address: shown.from_addr,
         to: shown.to,

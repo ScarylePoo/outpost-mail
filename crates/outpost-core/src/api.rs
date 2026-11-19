@@ -68,6 +68,15 @@ pub enum Command {
         seen: Option<bool>,
         flagged: Option<bool>,
     },
+    /// Gives messages a subject of the user's own, shown in place of the
+    /// sender's; `None` (or an empty one) restores the sender's. The
+    /// messages themselves are not changed, here or on the server.
+    /// `folder` is any folder of the messages' account.
+    RenameSubject {
+        folder: FolderId,
+        ids: Vec<i64>,
+        subject: Option<String>,
+    },
     /// Moves messages to another folder of the same account.
     MoveMessages { ids: Vec<i64>, to: FolderId },
     /// Moves messages to the account's archive folder.
@@ -642,6 +651,8 @@ pub struct MessageView {
     /// The message failed its sender checks and is held at arm's length:
     /// its links have been taken out and its attachments cannot be saved.
     pub restricted: bool,
+    /// The subject the sender gave, when `subject` is the user's own.
+    pub original_subject: Option<String>,
     /// The user has chosen to trust the message despite its failed checks.
     pub trusted: bool,
     /// Pictures on the internet were left in, to be loaded: this sender is

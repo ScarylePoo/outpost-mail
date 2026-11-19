@@ -173,6 +173,21 @@ async function probe(details: string): Promise<string> {
     await open("Selftest message 3");
     lines.push(`genuine message: ${text(".message .check-label").join("")} (banner: ${document.querySelectorAll(".failed").length})`);
 
+    // The user's own subject for a message: shown in the list and the
+    // reader, found by search, and the sender's subject is still on show.
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "F2", bubbles: true }));
+    await sleep(700);
+    const box = document.querySelector(".ask.wide input") as HTMLInputElement | null;
+    lines.push(`change subject starts with: ${box?.value ?? "NO BOX OPENED"}`);
+    type(box, "Platypus paperwork");
+    (document.querySelector(".ask.wide") as HTMLFormElement | null)?.requestSubmit();
+    await sleep(1500);
+    lines.push(`after changing the subject, the list has: ${text(".list-holder .row:not(.idle) .row-subject").filter((s) => s.includes("Platypus")).join(" | ") || "NO SUCH ROW"}`);
+    lines.push(`reader: ${text(".message h1").join("")} / ${text(".message-renamed").join("") || "SENDER'S SUBJECT NOT SHOWN"}`);
+    const byName = await core.send({ type: "search", scope: account!.id, text: "platypus", limit: 10 });
+    const byOld = await core.send({ type: "search", scope: account!.id, text: "selftest message 3", limit: 10 });
+    lines.push(`search finds it by the new subject: ${byName.rows.length}, by the sender's: ${byOld.rows.filter((r) => r.subject.includes("Platypus")).length}`);
+
     // Pictures and links. Message 6 is formatted, with a picture on the
     // test's own web server; message 7 is plain text with addresses in it.
     await open("Selftest message 6");

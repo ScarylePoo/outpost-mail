@@ -240,8 +240,50 @@ pub struct ListRow {
     pub auth_server: String,
 }
 
+// The subject shown is the user's own name for the message, if they gave
+// it one (`renamed_subject`), and otherwise the sender's.
 const LIST_COLUMNS: &str = "m.id, m.folder_id, m.from_name, m.from_addr, m.recipients, m.date, \
-                            m.subject, m.preview, m.flags, m.has_attachment, m.verdict, m.auth_server";
+                            COALESCE((SELECT r.subject FROM renamed_subject r WHERE r.message_id = m.message_id), m.subject), \
+                            m.preview, m.flags, m.has_attachment, m.verdict, m.auth_server";
+
+/// Subjects the user has changed, by Message-ID. Not part of the versioned
+/// schema: it is not rebuildable from the mail, so it must outlive a
+/// rebuild. The file beside the index is the lasting copy; this table is
+/// filled from it whenever the index is opened.
+const RENAMED: &str = "CREATE TABLE IF NOT EXISTS renamed_subject (
+    message_id TEXT PRIMARY KEY,
+    subject    TEXT NOT NULL
+) WITHOUT ROWID";
+const RENAMED_FILE: &str = "renamed-subjects.json";
+
+/// What search should find a message's subject by: the sender's subject,
+/// and the user's own name for the message if it has one.
+pub(super) fn searchable_subject(conn: &Connection, message_id: &str, subject: &str) -> rusqlite::Result<String> {
+    if message_id.is_empty() {
+        return Ok(subject.to_string());
+    }
+    let own: Option<String> = conn
+        .prepare_cached("SELECT subject FROM renamed_subject WHERE message_id = ?1")?
+        .query_row([message_id], |r| r.get(0))
+        .optional()?;
+    Ok(match own {
+        Some(own) => format!("{own} {subject}"),
+        None => subject.to_string(),
+    })
+}
+
+fn load_renamed(conn: &Connection, index: &Path) -> Result<()> {
+    conn.execute_batch(RENAMED)?;
+    let Ok(bytes) = std::fs::read(index.with_file_name(RENAMED_FILE)) else { return Ok(()) };
+    // A file that cannot be read as what it should be changes nothing.
+    let Ok(names) = serde_json::from_slice::<std::collections::BTreeMap<String, String>>(&bytes) else { return Ok(()) };
+    conn.execute_batch("BEGIN; DELETE FROM renamed_subject")?;
+    for (message_id, subject) in &names {
+        conn.execute("INSERT OR REPLACE INTO renamed_subject (message_id, subject) VALUES (?1, ?2)", params![message_id, subject])?;
+    }
+    conn.execute_batch("COMMIT")?;
+    Ok(())
+}
 
 fn list_row(row: &rusqlite::Row) -> rusqlite::Result<ListRow> {
     Ok(ListRow {
@@ -350,6 +392,7 @@ impl Index {
         writer.pragma_update(None, "journal_mode", "WAL")?;
         writer.pragma_update(None, "synchronous", "NORMAL")?;
         let discarded_old = migrate(&writer)?;
+        load_renamed(&writer, &path)?;
         Ok(Index {
             path,
             discarded_old,
@@ -650,6 +693,73 @@ impl Index {
             )?
             .query_row([id], |r| r.get(0))
         })
+    }
+
+    /// The user's own subject for a message, if they have given it one.
+    pub fn renamed_subject(&self, id: i64) -> Result<Option<String>> {
+        self.read(|conn| {
+            conn.prepare_cached(
+                "SELECT r.subject FROM renamed_subject r JOIN message m ON m.message_id = r.message_id WHERE m.id = ?1",
+            )?
+            .query_row([id], |r| r.get(0))
+            .optional()
+        })
+    }
+
+    /// Gives a message the user's own subject, or with `None` takes it
+    /// away again. The message itself is not changed: the name is kept by
+    /// Message-ID, here and in a file beside the index, so it follows the
+    /// message between folders and survives a rebuild. `body` is the
+    /// message's text for the search index, if the message is downloaded;
+    /// with it, search finds the message by both subjects. Returns the
+    /// folders that hold the message: none if it cannot be named (it is
+    /// gone, or has no Message-ID).
+    pub fn rename_subject(&self, id: i64, subject: Option<&str>, body: Option<&str>) -> Result<Vec<i64>> {
+        let mut conn = self.writer();
+        let found: Option<(String, String)> = conn
+            .query_row("SELECT message_id, subject FROM message WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?;
+        let Some((message_id, original)) = found.filter(|(message_id, _)| !message_id.is_empty()) else {
+            return Ok(Vec::new());
+        };
+        let tx = conn.transaction()?;
+        match subject {
+            Some(subject) => tx.execute(
+                "INSERT OR REPLACE INTO renamed_subject (message_id, subject) VALUES (?1, ?2)",
+                params![message_id, subject],
+            )?,
+            None => tx.execute("DELETE FROM renamed_subject WHERE message_id = ?1", [&message_id])?,
+        };
+        if let Some(body) = body {
+            let words = searchable_subject(&tx, &message_id, &original)?;
+            // Every copy of the message, whichever folders they are in.
+            let copies: Vec<(i64, String)> = tx
+                .prepare("SELECT sort_key, from_name || ' ' || from_addr || ' ' || recipients FROM message WHERE message_id = ?1 AND base != ''")?
+                .query_map([&message_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            for (sort_key, participants) in copies {
+                tx.execute("DELETE FROM message_fts WHERE rowid = ?1", [sort_key])?;
+                tx.execute(
+                    "INSERT INTO message_fts (rowid, subject, participants, body) VALUES (?1, ?2, ?3, ?4)",
+                    params![sort_key, words, participants, body],
+                )?;
+            }
+        }
+        let names: std::collections::BTreeMap<String, String> = tx
+            .prepare("SELECT message_id, subject FROM renamed_subject")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        // The file first: if it cannot be written, nothing is changed.
+        let file = self.path.with_file_name(RENAMED_FILE);
+        let fresh = self.path.with_file_name(format!("{RENAMED_FILE}.new"));
+        std::fs::write(&fresh, serde_json::to_vec_pretty(&names).unwrap_or_default())?;
+        std::fs::rename(&fresh, &file)?;
+        let folders: Vec<i64> = tx
+            .prepare("SELECT DISTINCT folder_id FROM message WHERE message_id = ?1")?
+            .query_map([&message_id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        tx.commit()?;
+        Ok(folders)
     }
 
     /// Records, or withdraws, the user's trust in a message. False if the
@@ -1093,7 +1203,7 @@ fn insert_one(
     )?
     .execute(params![
         key,
-        p.subject,
+        searchable_subject(conn, &p.message_id, &p.subject)?,
         format!("{} {} {}", p.from_name, p.from_addr, p.recipients),
         p.body,
     ])?;

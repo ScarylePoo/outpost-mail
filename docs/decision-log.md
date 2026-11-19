@@ -66,6 +66,41 @@ mail. Two were real faults that no test had covered.
   many are selected), so none is marked read; and a refresh that moved
   nothing keeps the selection. The app self-test covers both clicks.
 
+- **Decided (owner): a new message's sender can be chosen.** It starts as
+  the open folder's account, as before; the From line is a list of every
+  account that can send, and the signature follows the choice. A reply, a
+  forward and a reopened draft stay with the account their original is in.
+- **The calendar's and contacts' header buttons** now use the mail
+  toolbar's button style.
+
+### Changing a message's subject (asked for by the owner, 19 November 2026)
+
+The owner asked for Outlook's ability to change the subject of a message
+they received, for organising. **Decided:** the feature. **Proposal** (the
+owner has not seen these choices yet): how it works.
+
+- **The message is never changed.** The new subject is Outpost's own note
+  about the message, kept by Message-ID. The file on disk and the copy on
+  the server keep the sender's subject, so the sender's signature still
+  verifies and other mail programs are unaffected. The cost: the new subject
+  shows only in Outpost on this computer. Rewriting the message on the
+  server (which is what would make it show everywhere) means uploading an
+  altered copy and deleting the original, which this project does not do to
+  a real mailbox without being asked.
+- **Where it shows:** the message list, the reading pane (with the sender's
+  subject on a line beneath) and conversations. Search finds the message by
+  either subject. A reply or forward still starts from the sender's subject,
+  so the other person's thread is not broken.
+- **A conversation is renamed as a whole** when the list is showing
+  conversations; a single message otherwise.
+- **How:** Message menu, "Change subject…", or F2. "Use the sender's
+  again" undoes it.
+- **Where it is kept:** `renamed-subjects.json` in the account's folder,
+  beside the index. The index can be thrown away and rebuilt; this file is
+  what survives, and the index is refilled from it on opening. A message
+  with no Message-ID cannot be renamed (there is nothing to remember it
+  by); the app says so.
+
 ### Decided (owner, 18 November 2026): colour schemes, fonts and sizes
 
 The owner asked for colour schemes and for the fonts and font sizes to be

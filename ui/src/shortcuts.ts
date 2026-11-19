@@ -22,6 +22,7 @@ export const SHORTCUTS: Shortcut[] = [
   { id: "delete", keys: "Delete", label: "Delete" },
   { id: "archive", keys: "Backspace", label: "Archive" },
   { id: "flag", keys: "Insert", label: "Flag or unflag" },
+  { id: "rename", keys: "F2", label: "Change the subject shown for a message" },
   { id: "read", keys: "Ctrl+Q", label: "Mark as read" },
   { id: "unread", keys: "Ctrl+U", label: "Mark as unread" },
   { id: "selectAll", keys: "Ctrl+A", label: "Select every message in the folder", elsewhere: true },

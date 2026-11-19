@@ -579,8 +579,15 @@ input[type="radio"] {
 
 .message-from span,
 .message-to,
-.message-date {
+.message-date,
+.message-renamed {
   color: var(--text-2);
+}
+
+.message-renamed {
+  margin: -4px 0 6px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 .message-to,
@@ -1692,6 +1699,21 @@ button.inline:hover {
   border-radius: 10px;
   background: var(--pane);
   box-shadow: 0 12px 40px rgb(0 0 0 / 0.25);
+}
+
+.ask.wide {
+  width: min(520px, 92vw);
+}
+
+.ask h2 {
+  margin: 0 0 10px;
+  font-size: 15px;
+}
+
+.ask .ask-note {
+  color: var(--text-2);
+  font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 .ask p {

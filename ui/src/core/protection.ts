@@ -35,7 +35,11 @@ const [passwordSet, setPasswordSet] = createSignal(false);
 /** Counts changes that affect how an open message is shown. */
 const [protectionVersion, setProtectionVersion] = createSignal(0);
 
-export { general, protection, passwordSet, protectionVersion };
+/** Counts subjects the user has changed, so that what is open is read again. */
+const [subjectsVersion, setSubjectsVersion] = createSignal(0);
+export const subjectsChanged = () => setSubjectsVersion((v) => v + 1);
+
+export { general, protection, passwordSet, protectionVersion, subjectsVersion };
 
 export function loadProtection(): Promise<void> {
   void core

@@ -241,6 +241,13 @@ the link at its place on the screen shows its destination, and that the
 addresses in the plain text became links. It also reports a row's height
 before and after changing the spacing setting.
 
+It also shift-clicks and Ctrl-clicks onto unread messages (the selection
+must grow and nothing may be marked read), changes a message's subject with
+F2 (the list, the reader and search must follow, and the server's copy must
+keep the sender's subject), and adds a second account and sends a new
+message from it. A unit test in `store/mod.rs` covers the changed subject
+surviving an index rebuild.
+
 Nothing tests the update check against a live newer release, because there
 is no release. Nothing runs an installer. See `docs/release.md`.
 

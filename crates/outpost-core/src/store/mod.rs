@@ -6,6 +6,7 @@
 //!     Inbox/{cur,new,tmp}
 //!     Projects/Alpha/{cur,new,tmp}
 //!   index.sqlite          rebuildable from mail/ at any time
+//!   renamed-subjects.json  subjects the user has changed, by Message-ID; not rebuildable
 //! ```
 //!
 //! Backing up or moving an account is copying its directory.
@@ -146,6 +147,19 @@ impl Store {
     pub fn read_message(&self, id: i64) -> Result<Vec<u8>> {
         let at = self.index.locate(id)?;
         Ok(self.maildir(&at.folder_path).read(&at.base, at.file_flags)?)
+    }
+
+    /// Gives a message the user's own subject (`None` restores the
+    /// sender's). Nothing but the index and its file of names changes: not
+    /// the message file, and nothing on the server. Returns the folders
+    /// that hold the message: none if it cannot be named.
+    pub fn rename_subject(&self, id: i64, subject: Option<&str>) -> Result<Vec<i64>> {
+        let body = match self.read_message(id) {
+            Ok(raw) => Some(parse::parse(&raw).body),
+            Err(StoreError::NotDownloaded(_)) => None,
+            Err(e) => return Err(e),
+        };
+        self.index.rename_subject(id, subject, body.as_deref())
     }
 
     /// Changes a message's flags. Takes effect at once in the index; the
@@ -309,6 +323,44 @@ mod tests {
         store.set_flags(id, Flags::FLAGGED).unwrap();
         assert_eq!(store.index().folders().unwrap()[0].unread, 1);
         assert!(matches!(store.set_flags(9999, Flags::SEEN), Err(StoreError::NoSuchMessage(9999))));
+    }
+
+    #[test]
+    fn a_message_can_be_given_the_users_own_subject() {
+        let (tmp, store, inbox) = sample();
+        let raw = mail("Bob <b@example.com>", "hi", "Mon, 2 Nov 2026 09:00:00 +0000", "The boiler quote is attached.");
+        let id = store.add_message(inbox, &raw, Flags::SEEN, None).unwrap();
+        let subject = |store: &Store| {
+            let inbox = store.index().folders().unwrap()[0].id;
+            store.index().page(inbox, 0, 1).unwrap()[0].subject.clone()
+        };
+        let found = |store: &Store, text: &str| store.index().search(text, None, 50).unwrap().len();
+
+        assert_eq!(store.rename_subject(id, Some("Boiler: quote from Bob")).unwrap(), [inbox]);
+        assert_eq!(subject(&store), "Boiler: quote from Bob");
+        assert_eq!(store.index().renamed_subject(id).unwrap().as_deref(), Some("Boiler: quote from Bob"));
+        assert_eq!(found(&store, "boiler quote from"), 1, "found by the new subject");
+        assert_eq!(found(&store, "hi"), 1, "and still by the sender's");
+        assert_eq!(store.read_message(id).unwrap(), raw, "the message itself is untouched");
+
+        // The name outlives the index: it is thrown away and built again.
+        drop(store);
+        for name in ["index.sqlite", "index.sqlite-wal", "index.sqlite-shm"] {
+            let _ = std::fs::remove_file(tmp.path().join(name));
+        }
+        let store = Store::open(tmp.path()).unwrap();
+        store.rebuild(false, |_| {}).unwrap();
+        assert_eq!(subject(&store), "Boiler: quote from Bob");
+        assert_eq!(found(&store, "boiler quote from"), 1);
+
+        // And it can be taken away again.
+        let inbox = store.index().folders().unwrap()[0].id;
+        let id = store.index().page(inbox, 0, 1).unwrap()[0].id;
+        store.rename_subject(id, None).unwrap();
+        assert_eq!(subject(&store), "hi");
+        assert_eq!(found(&store, "boiler quote from"), 0);
+        assert_eq!(found(&store, "hi"), 1);
+        assert_eq!(store.index().renamed_subject(id).unwrap(), None);
     }
 
     #[test]

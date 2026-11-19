@@ -407,7 +407,8 @@ impl Index {
         let rows: Vec<(ThreadRow, String, i64)> = self.read(|conn| {
             conn.prepare_cached(
                 "SELECT m.id, m.folder_id, m.parent_id, m.link_guessed, m.from_name, m.from_addr,
-                        m.recipients, m.date, m.flags, m.has_attachment, m.subject, m.preview,
+                        m.recipients, m.date, m.flags, m.has_attachment,
+                        COALESCE((SELECT r.subject FROM renamed_subject r WHERE r.message_id = m.message_id), m.subject), m.preview,
                         m.base != '', m.message_id, m.sort_key, m.verdict, m.auth_server
                  FROM message m
                  WHERE m.id = ?1 OR m.thread_id = (SELECT thread_id FROM message WHERE id = ?1)

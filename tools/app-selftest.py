@@ -278,6 +278,9 @@ service stats {{
             subject = next((l for l in data.splitlines() if l.startswith("Subject:")), "")
             said = "Written in the window." in data
             print(f"handed to the outgoing server: from {sender} to {recipients}; {subject}; body arrived: {said}")
+        other.select("INBOX", readonly=True)
+        _, kept = other.search(None, 'SUBJECT "Selftest message 3"')
+        print("on the server the renamed message still has the sender's subject:", "yes" if kept[0].split() else "NO")
         print("picture server was asked:", PICTURES or "NOTHING")
         if not SENT:
             print("handed to the outgoing server: NOTHING")

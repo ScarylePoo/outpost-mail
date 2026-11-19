@@ -10,6 +10,7 @@ import { core, type FolderId, type MessageRow, type MessageView, type ThreadView
 import { formatLongDate } from "../list/format";
 import { Conversation } from "./Conversation";
 import { MessageBody } from "./MessageBody";
+import { subjectsVersion } from "../core/protection";
 
 export function Reader(props: {
   folder: FolderId;
@@ -28,7 +29,7 @@ export function Reader(props: {
   const shown = createMemo(() => props.row?.id);
 
   createEffect(
-    on(shown, (id) => {
+    on([shown, subjectsVersion], ([id]) => {
       const mine = ++request;
       setThread(undefined);
       setView(undefined);
@@ -47,6 +48,12 @@ export function Reader(props: {
     }),
   );
 
+  /** The subject as the sender wrote it, once the message has been read. */
+  const sendersSubject = () => {
+    const v = view();
+    return v?.downloaded ? (v.originalSubject ?? v.subject) : undefined;
+  };
+
   const conversation = createMemo(() => {
     const t = thread();
     return t && t.messages.length > 1 ? t : undefined;
@@ -60,7 +67,10 @@ export function Reader(props: {
           fallback={
             <article class="message">
               <header class="message-head">
-                <h1>{view()?.subject || row().subject || "(no subject)"}</h1>
+                <h1>{row().subject || view()?.subject || "(no subject)"}</h1>
+                <Show when={sendersSubject() !== undefined && sendersSubject() !== row().subject}>
+                  <div class="message-renamed">The sender's subject: {sendersSubject() || "(no subject)"}</div>
+                </Show>
                 <div class="message-from">
                   <strong>{row().senderName}</strong>
                   <Show when={row().senderAddress && row().senderAddress !== row().senderName}>

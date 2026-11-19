@@ -156,6 +156,36 @@ async function probe(details: string): Promise<string> {
     await open("Selftest message 3");
     lines.push(`genuine message: ${text(".message .check-label").join("")} (banner: ${document.querySelectorAll(".failed").length})`);
 
+    // Pictures and links. Message 6 is formatted, with a picture on the
+    // test's own web server; message 7 is plain text with addresses in it.
+    await open("Selftest message 6");
+    const frame = () => (document.querySelector(".message-frame") as HTMLIFrameElement | null)?.contentDocument;
+    lines.push(`picture message at first: ${text(".message > .message-note").join(" ")} (pictures in it: ${frame()?.querySelectorAll("img[src]").length})`);
+    const clickLink = async () => {
+      // A real click lands on whatever is on top at that point of the link.
+      const box = frame()?.querySelector("a b")?.getBoundingClientRect();
+      const outer = document.querySelector(".message-frame")?.getBoundingClientRect();
+      if (box && outer) (document.elementFromPoint(outer.left + box.left + box.width / 2, outer.top + box.top + box.height / 2) as HTMLElement | null)?.click();
+      await sleep(300);
+      const shown = text(".link-target").join("") || "NOTHING SHOWN";
+      ([...document.querySelectorAll(".link-bar button")].find((b) => b.textContent === "Dismiss") as HTMLElement | undefined)?.click();
+      await sleep(100);
+      return shown;
+    };
+    lines.push(`link in a formatted message goes to: ${await clickLink()}`);
+    (document.querySelector(".message > .message-note button") as HTMLElement | null)?.click();
+    await sleep(2500);
+    const picture = frame()?.querySelector("img") as HTMLImageElement | null | undefined;
+    lines.push(`after "Always load pictures": ${picture?.naturalWidth ? "picture loaded" : "PICTURE NOT LOADED"}`);
+    lines.push(`the same link once the pictures are in: ${await clickLink()} (links in it: ${frame()?.querySelectorAll("a[href]").length}, frame ${(document.querySelector(".message-frame") as HTMLElement | null)?.style.height} tall)`);
+    await open("Selftest message 7");
+    lines.push(`addresses made into links in plain text: ${text(".message .text-link, .turn .text-link").join(" | ") || "NONE"}`);
+    (document.querySelectorAll(".message .text-link, .turn .text-link")[1] as HTMLElement | undefined)?.click();
+    await sleep(300);
+    lines.push(`the second one goes to: ${text(".link-target").join("") || "NOTHING SHOWN"}`);
+    const p0 = await core.send({ type: "getProtection" });
+    lines.push(`senders allowed pictures: ${p0.protection.allowImagesFrom.join(", ")}`);
+
     // The settings window: every section on one page, narrowed by search.
     press("Settings");
     await sleep(500);
@@ -183,6 +213,12 @@ async function probe(details: string): Promise<string> {
     await sleep(200);
     lines.push(`fonts found on this computer: ${document.querySelectorAll(".settings-body select option").length > 12 ? "yes" : "few"}`);
     await core.send({ type: "setAppearance", appearance: { ...kept.appearance, scheme: "system" } });
+    const rowHeight = () => (document.querySelector(".list-holder .row:not(.idle)") as HTMLElement | null)?.style.height ?? "?";
+    const snug = rowHeight();
+    await (await import("./core/appearance")).saveAppearance({ ...kept.appearance, scheme: "system", rowSpacing: 16 });
+    await sleep(400);
+    lines.push(`a row at "Airy" spacing: ${snug} -> ${rowHeight()} tall`);
+    await (await import("./core/appearance")).saveAppearance({ ...kept.appearance, scheme: "system" });
     const search = document.querySelector(".settings-search") as HTMLInputElement | null;
     if (search) {
       search.value = "signature";

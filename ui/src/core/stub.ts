@@ -122,6 +122,7 @@ let appearance: Appearance = {
   readingFont: "",
   readingSize: 14,
   writingFont: "",
+  rowSpacing: 10,
 };
 let password: string | null = null;
 const trusted = new Set<number>();

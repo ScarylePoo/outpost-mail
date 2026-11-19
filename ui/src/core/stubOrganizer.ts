@@ -23,8 +23,8 @@ const account: DavAccountInfo = {
   username: "you",
   status: { state: "upToDate", detail: "" },
   collections: [
-    { id: 1, name: "Work", events: true, tasks: false, contacts: false, color: "#1f5fbf", enabled: true },
-    { id: 2, name: "Home", events: true, tasks: true, contacts: false, color: "#1a7f37", enabled: true },
+    { id: 1, name: "Work", events: true, tasks: false, contacts: false, color: "#ff66ff", enabled: true },
+    { id: 2, name: "Home", events: true, tasks: true, contacts: false, color: "#33ff00", enabled: true },
     { id: 3, name: "People", events: false, tasks: false, contacts: true, color: null, enabled: true },
   ],
 };

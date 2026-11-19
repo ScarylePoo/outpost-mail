@@ -11,8 +11,10 @@
 
 /** Height of one line of text, px. Must match --line in styles.css. */
 export const LINE = 18;
-/** Vertical padding (8 + 8), sender line, subject line, bottom border. */
-export const ROW_FIXED = 16 + LINE + LINE + 1;
+/** Room above and below a row's text unless the user chose otherwise, px. */
+export const ROW_SPACING = 10;
+/** Vertical padding, sender line, subject line, bottom border. */
+export const rowFixed = (spacing = ROW_SPACING) => 2 * spacing + LINE + LINE + 1;
 export const MAX_PREVIEW_LINES = 3;
 /** Horizontal padding inside a row (14 + 14). Must match .row in styles.css. */
 const ROW_PAD_X = 28;
@@ -44,17 +46,20 @@ export function buildLayout(
   mostLines = MAX_PREVIEW_LINES,
   /** Average character width of the interface font, px: the user's font. */
   avgChar = AVG_CHAR,
+  /** Room above and below each row's text, px: the user's setting. */
+  spacing = ROW_SPACING,
 ): Layout {
   const count = previewLens.length;
   const perLine = charsPerLine(listWidth, avgChar);
   const lines = new Uint8Array(count);
   const offsets = new Float64Array(count + 1);
+  const fixed = rowFixed(spacing);
   let y = 0;
   for (let i = 0; i < count; i++) {
     const n = linesFor(previewLens[i]!, perLine, mostLines);
     lines[i] = n;
     offsets[i] = y;
-    y += ROW_FIXED + n * LINE + (extra?.get(i) ?? 0);
+    y += fixed + n * LINE + (extra?.get(i) ?? 0);
   }
   offsets[count] = y;
   return { lines, offsets };

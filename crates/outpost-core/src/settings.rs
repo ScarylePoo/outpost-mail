@@ -88,6 +88,9 @@ pub struct Appearance {
     pub reading_size: u8,
     /// The font messages are written in. Empty is the reading font.
     pub writing_font: String,
+    /// Room above and below each message in the list, in pixels at 100%:
+    /// 4 to 20.
+    pub row_spacing: u8,
 }
 
 impl Default for Appearance {
@@ -100,6 +103,7 @@ impl Default for Appearance {
             reading_font: String::new(),
             reading_size: 14,
             writing_font: String::new(),
+            row_spacing: 10,
         }
     }
 }
@@ -117,6 +121,7 @@ impl Appearance {
         self.writing_font = font_name(&self.writing_font);
         self.text_size = self.text_size.clamp(80, 200);
         self.reading_size = self.reading_size.clamp(11, 28);
+        self.row_spacing = self.row_spacing.clamp(4, 20);
         self
     }
 }
@@ -429,6 +434,7 @@ mod tests {
             reading_font: "Georgia".into(),
             reading_size: 2,
             writing_font: String::new(),
+            row_spacing: 10,
         };
         settings.set_appearance(wanted).unwrap();
         let again = Settings::load(Some(&dir)).appearance();

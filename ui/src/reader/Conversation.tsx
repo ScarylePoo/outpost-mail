@@ -13,6 +13,8 @@ import { createEffect, createMemo, createSignal, For, on, Show } from "solid-js"
 import type { FolderId, ThreadMessage, ThreadView } from "../core";
 import { formatDate, formatLongDate } from "../list/format";
 import { Attachments, MessageBody } from "./MessageBody";
+import { createLinks, LinkBar, LinkedText } from "./links";
+import { protection } from "../core/protection";
 
 type Mode = "branch" | "thread" | "date";
 
@@ -100,6 +102,10 @@ function Message(props: {
     return `replying to ${p.mine ? "you" : firstName(p.senderName)}`;
   });
   let element!: HTMLElement;
+  const links = createLinks();
+  /** Addresses in the text work as links, except in a message that failed
+   *  its sender checks while those are held at arm's length. */
+  const live = () => !(m().check === "failed" && protection().disableFailed);
 
   // Bring the selected message into view when the conversation opens.
   createEffect(
@@ -160,20 +166,36 @@ function Message(props: {
         fallback={<MessageBody folder={m().folder} id={m().id} bare />}
       >
         <Show when={m().text} fallback={<p class="turn-empty">{m().downloaded ? "(nothing new written)" : ""}</p>}>
-          <div class="turn-text">{m().text}</div>
+          <div class="turn-text">
+            <Show when={live()} fallback={m().text}>
+              <LinkedText text={m().text} links={links} />
+            </Show>
+          </div>
         </Show>
         <Show when={!m().downloaded}>
           <div class="message-note">Only the start of this message has been downloaded so far.</div>
         </Show>
         <Show when={quoted()}>
-          <pre class="turn-hidden">{m().quoted}</pre>
+          <pre class="turn-hidden">
+            <Show when={live()} fallback={m().quoted}>
+              <LinkedText text={m().quoted} links={links} />
+            </Show>
+          </pre>
         </Show>
         <Show when={signature()}>
-          <pre class="turn-hidden">{m().signature}</pre>
+          <pre class="turn-hidden">
+            <Show when={live()} fallback={m().signature}>
+              <LinkedText text={m().signature} links={links} />
+            </Show>
+          </pre>
         </Show>
       </Show>
 
       <Attachments folder={m().folder} id={m().id} attachments={m().attachments} />
+
+      <Show when={!original()}>
+        <LinkBar links={links} />
+      </Show>
 
       <Show when={m().downloaded}>
         <div class="turn-links">

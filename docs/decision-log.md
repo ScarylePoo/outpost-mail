@@ -14,6 +14,50 @@ Started on the owner's instruction, on Fable 5.2 as the handoff doc asks.
 bar includes a week of daily use by the owner and the owner accepting the
 written-down gaps, and no release has been published.
 
+### Found in the owner's first day of use (19 November 2026)
+
+The owner reported five things after using the 0.1.0 build on their own
+mail. Two were real faults that no test had covered.
+
+- **Links in formatted messages never worked in the app.** The message is
+  shown in a frame that may run no scripts, and browsers extend that to
+  click handlers attached from outside the frame: they are silently never
+  called. The handler that was meant to show a link's destination therefore
+  never ran, and the app's own content policy stopped the frame from
+  navigating, so a click did nothing at all. *Decided, to keep the frame
+  locked:* the reading pane reads each link's position out of the frame and
+  lays an invisible link of the same size over it, outside the frame. That
+  one answers the click and shows the destination as before. The frame still
+  runs nothing.
+- **Addresses in plain text were not links.** Plain-text messages, and the
+  reduced text of a conversation, showed `https://…` as plain text. They are
+  now found (web addresses, `www.` names, email addresses) and behave like
+  any other link: destination first, then Open. Not in a message that failed
+  its sender checks while "disable failed messages" is on.
+- **"Always load pictures from…" did not load them.** The frame's own
+  content policy allowed the pictures, but a frame also inherits the policy
+  of the window it sits in, and the window's allowed pictures only from the
+  app itself. *Decided:* the window's policy now allows pictures over http
+  and https. The window never shows mail outside the frame, and the frame's
+  own policy and the core's sanitiser still decide per message, so nothing
+  loads for a sender who has not been allowed. A picture address written
+  without a scheme (`//host/picture.png`) is now fetched over https rather
+  than dropped.
+- **Decided (owner): read messages keep a firm sender line.** Unread: sender
+  and subject bold. Read: sender semibold, subject regular. Before, a read
+  row had no emphasis at all.
+- **Decided (owner): the space between messages in the list is a setting**
+  (Appearance, "Space between messages", six steps), and the normal value
+  is a little roomier than before (10 px above and below, was 8).
+- **Calendar entries were unreadable in the dark schemes.** An entry's
+  background was its calendar's colour mixed with white, under the scheme's
+  light text. *Rule from now on, asked for by the owner:* a colour that
+  comes from outside the scheme (a calendar's colour) is never used with a
+  fixed assumption about what is behind or on top of it. A tinted
+  background is mixed with the scheme's own page colour, so the scheme's
+  text stays readable on it; text on the full colour is black or white,
+  whichever contrasts more with that colour (`ui/src/organizer/colors.ts`).
+
 ### Decided (owner, 18 November 2026): colour schemes, fonts and sizes
 
 The owner asked for colour schemes and for the fonts and font sizes to be

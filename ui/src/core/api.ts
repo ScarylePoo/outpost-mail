@@ -251,6 +251,8 @@ export interface Appearance {
   readingSize: number;
   /** Font messages are written in; empty is the reading font. */
   writingFont: string;
+  /** Room above and below each message in the list, px: 4 to 20. */
+  rowSpacing: number;
 }
 
 /** The protection settings: each its own switch. */

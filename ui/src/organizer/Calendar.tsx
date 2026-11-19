@@ -25,6 +25,7 @@ import {
   type Day,
 } from "./dates";
 import { davVersion, findPlace, placeKey, places } from "./store";
+import { inkOn } from "./colors";
 
 const FALLBACK_COLOR = "#5b626c";
 
@@ -239,7 +240,10 @@ export function Calendar() {
                       <button
                         class="month-event"
                         classList={{ "all-day": event.allDay }}
-                        style={{ "--event": event.color ?? FALLBACK_COLOR }}
+                        style={{
+                          "--event": event.color ?? FALLBACK_COLOR,
+                          "--event-ink": inkOn(event.color ?? FALLBACK_COLOR),
+                        }}
                         onClick={(e) => {
                           e.stopPropagation();
                           setPicked(day);

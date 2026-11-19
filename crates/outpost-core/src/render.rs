@@ -129,7 +129,12 @@ pub fn safe_html_with(html: &str, allow: Allow) -> SafeHtml {
                         && (lower.starts_with("https://") || lower.starts_with("http://"))
                     {
                         keeping.store(true, Ordering::Relaxed);
-                        Some(value.into())
+                        Some(value.trim_start().into())
+                    } else if allow.remote_images && attribute == "src" && lower.starts_with("//") {
+                        // "//host/picture": the same scheme as the page,
+                        // which for mail can only sensibly mean https.
+                        keeping.store(true, Ordering::Relaxed);
+                        Some(format!("https:{}", value.trim_start()).into())
                     } else {
                         seen.store(true, Ordering::Relaxed);
                         None
@@ -211,7 +216,9 @@ mod tests {
         assert!(out.remote_images_kept);
         assert!(out.html.contains(r#"src="https://shop.example/a.png""#), "{}", out.html);
         // Only plain http and https addresses; never srcset or anything odd.
-        assert!(!out.html.contains("srcset") && !out.html.contains("javascript") && !out.html.contains("c.png"), "{}", out.html);
+        assert!(!out.html.contains("srcset") && !out.html.contains("javascript"), "{}", out.html);
+        // An address without a scheme is fetched over https.
+        assert!(out.html.contains(r#"src="https://shop.example/c.png""#), "{}", out.html);
         // And not unless asked.
         let out = safe_html(html);
         assert!(!out.remote_images_kept && out.remote_content_blocked && !out.html.contains("shop.example"), "{}", out.html);

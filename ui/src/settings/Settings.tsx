@@ -15,6 +15,7 @@ import {
   READING_SIZES,
   saveAppearance,
   SCHEMES,
+  ROW_SPACINGS,
   TEXT_SIZES,
 } from "../core/appearance";
 import { checkForUpdate, update, updateChecked } from "../core/updates";
@@ -800,6 +801,14 @@ export function Settings(props: {
               () => String(appearance().textSize),
               TEXT_SIZES.map((n): [string, string] => [String(n), n === 100 ? "100% (normal)" : `${n}%`]),
               (v) => look({ textSize: Number(v) }),
+            ),
+            select(
+              "spacing space gap room between messages rows cards list density compact comfortable padding",
+              "Space between messages",
+              "How much room each message gets in the message list.",
+              () => String(appearance().rowSpacing),
+              ROW_SPACINGS.map((r): [string, string] => [String(r.value), r.name]),
+              (v) => look({ rowSpacing: Number(v) }),
             ),
           ],
         },

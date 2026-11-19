@@ -231,6 +231,16 @@ reports that the window zoomed, and reports whether fonts were found on the
 computer. While it runs, the app makes its daily update check: one request
 to `api.github.com`, the only thing in the test that leaves the machine.
 
+Since 19 November it also covers pictures and links, which had been broken
+in the app without any test noticing. The test starts a small web server
+with one picture on it and delivers a formatted message that uses it, with
+a link, and a plain-text message with addresses written out. It reports
+that the picture is absent at first, that it loads after "Always load
+pictures from…" (and the web server confirms it was asked), that clicking
+the link at its place on the screen shows its destination, and that the
+addresses in the plain text became links. It also reports a row's height
+before and after changing the spacing setting.
+
 Nothing tests the update check against a live newer release, because there
 is no release. Nothing runs an installer. See `docs/release.md`.
 

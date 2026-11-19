@@ -3,8 +3,9 @@
 // HTML mail is hostile input. The core has already reduced it to formatting
 // (render.rs). Here it is additionally shown inside a sandboxed frame that
 // cannot run scripts, submit forms or open windows, under a content policy
-// that allows no network access at all. Links do not navigate: the pane
-// shows where a link really goes first.
+// that allows no network access at all (pictures excepted, for senders the
+// user has allowed). Links do not navigate: the pane shows where a link
+// really goes first.
 
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { core, type FolderId, type MessageView } from "../core";
@@ -12,6 +13,7 @@ import { protection, protectionVersion, saveProtection } from "../core/protectio
 import { appearance, readingFamily } from "../core/appearance";
 import { SenderCheckPanel } from "./SenderCheck";
 import { InvitationCard } from "./InvitationCard";
+import { createLinks, LinkBar, LinkedText } from "./links";
 
 /** Nothing from the network, unless this sender's pictures are allowed. */
 const framePolicy = (pictures: boolean) =>
@@ -116,8 +118,7 @@ export function MessageBody(props: {
 }) {
   const [view, setView] = createSignal<MessageView>();
   const [error, setError] = createSignal("");
-  const [link, setLink] = createSignal("");
-  const [copied, setCopied] = createSignal(false);
+  const links = createLinks();
   const shown = createMemo(() => props.id);
   /** Bumped to read the same message again (after trusting it, say). */
   const [again, setAgain] = createSignal(0);
@@ -132,7 +133,8 @@ export function MessageBody(props: {
       if (id !== last) setView(undefined);
       last = id;
       setError("");
-      setLink("");
+      setSpots([]);
+      links.dismiss();
       core
         .send({ type: "openMessage", folder: props.folder, id })
         .then((r) => {
@@ -144,33 +146,41 @@ export function MessageBody(props: {
     }),
   );
 
+  /** Where each link of the formatted message lies, in the frame's own pixels. */
+  const [spots, setSpots] = createSignal<{ href: string; x: number; y: number; w: number; h: number }[]>([]);
+
+  // The frame cannot run anything, and that includes a click handler put on
+  // it from out here: the browser refuses to call it. So links are caught
+  // outside the frame instead. Every link's position is read from the frame
+  // and an invisible link of the same size is laid over it; that one is
+  // ours, and shows where the link goes. The frame is as tall as its
+  // content and never scrolls, so positions inside it are positions on it.
   function watchFrame(frame: HTMLIFrameElement) {
     const doc = frame.contentDocument;
     if (!doc) return;
     const fit = () => {
       frame.style.height = `${doc.documentElement.scrollHeight}px`;
+      const found: ReturnType<typeof spots> = [];
+      for (const link of doc.querySelectorAll("a[href]")) {
+        const href = link.getAttribute("href") ?? "";
+        // A link around a picture or a table has no box of its own.
+        for (const part of [link, ...link.querySelectorAll("*")]) {
+          for (const r of part.getClientRects()) {
+            if (r.width > 0 && r.height > 0 && found.length < 4000) found.push({ href, x: r.left, y: r.top, w: r.width, h: r.height });
+          }
+        }
+      }
+      setSpots(found);
     };
     fit();
     const observer = new ResizeObserver(fit);
     observer.observe(doc.documentElement);
-    onCleanup(() => observer.disconnect());
-
-    const linkAt = (target: EventTarget | null) =>
-      (target as Element | null)?.closest?.("a[href]")?.getAttribute("href") ?? "";
-    // A click on a link never navigates. It shows the real destination.
-    doc.addEventListener("click", (e) => {
-      const href = linkAt(e.target);
-      if (href) {
-        e.preventDefault();
-        if (!protection().showLinkDestination && /^(https?:|mailto:)/i.test(href.trim())) {
-          core.openLink(href).catch((err) => setError(`Could not open the link: ${err?.message ?? err}`));
-          return;
-        }
-        setCopied(false);
-        setLink(href);
-      }
+    // A picture arriving can move links without changing the page's height.
+    const later = [300, 1500, 5000].map((ms) => setTimeout(fit, ms));
+    onCleanup(() => {
+      observer.disconnect();
+      later.forEach(clearTimeout);
     });
-    doc.addEventListener("auxclick", (e) => linkAt(e.target) && e.preventDefault());
   }
 
   async function allowPictures(address: string) {
@@ -184,11 +194,6 @@ export function MessageBody(props: {
     } catch (e) {
       setError(String((e as Error)?.message ?? e));
     }
-  }
-
-  async function copyLink() {
-    await navigator.clipboard.writeText(link());
-    setCopied(true);
   }
 
   return (
@@ -236,36 +241,42 @@ export function MessageBody(props: {
               when={v().html !== null}
               fallback={
                 <pre class="message-text" classList={{ dimmed: v().restricted }}>
-                  {v().text ?? ""}
+                  <Show when={!v().restricted} fallback={v().text ?? ""}>
+                    <LinkedText text={v().text ?? ""} links={links} />
+                  </Show>
                 </pre>
               }
             >
-              <iframe
-                class="message-frame"
-                title="Message"
-                sandbox="allow-same-origin"
-                srcdoc={frameDocument(v().html!, v().remoteImagesShown, v().restricted)}
-                onLoad={(e) => watchFrame(e.currentTarget)}
-              />
+              <div class="message-frame-holder">
+                <iframe
+                  class="message-frame"
+                  title="Message"
+                  sandbox="allow-same-origin"
+                  srcdoc={frameDocument(v().html!, v().remoteImagesShown, v().restricted)}
+                  onLoad={(e) => watchFrame(e.currentTarget)}
+                />
+                <For each={spots()}>
+                  {(spot) => (
+                    <a
+                      class="frame-link"
+                      href={spot.href}
+                      title={spot.href}
+                      draggable={false}
+                      style={{ left: `${spot.x}px`, top: `${spot.y}px`, width: `${spot.w}px`, height: `${spot.h}px` }}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        links.follow(spot.href);
+                      }}
+                      onAuxClick={(e) => e.preventDefault()}
+                    />
+                  )}
+                </For>
+              </div>
             </Show>
           </Show>
         )}
       </Show>
-      <Show when={link()}>
-        <div class="link-bar" role="status">
-          <span class="link-label">This link goes to</span>
-          <span class="link-target">{link()}</span>
-          <Show when={/^(https?:|mailto:)/i.test(link().trim())}>
-            <button
-              onClick={() => core.openLink(link()).catch((e) => setError(`Could not open the link: ${e?.message ?? e}`))}
-            >
-              Open
-            </button>
-          </Show>
-          <button onClick={copyLink}>{copied() ? "Copied" : "Copy"}</button>
-          <button onClick={() => setLink("")}>Dismiss</button>
-        </div>
-      </Show>
+      <LinkBar links={links} />
     </>
   );
 }

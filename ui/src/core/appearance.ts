@@ -33,6 +33,14 @@ export const ACCENTS: { id: string; name: string; color: string }[] = [
 ];
 
 export const TEXT_SIZES = [80, 90, 100, 110, 125, 150, 175, 200];
+export const ROW_SPACINGS: { value: number; name: string }[] = [
+  { value: 5, name: "Tight" },
+  { value: 8, name: "Snug" },
+  { value: 10, name: "Normal" },
+  { value: 13, name: "Roomy" },
+  { value: 16, name: "Airy" },
+  { value: 20, name: "Widest" },
+];
 export const READING_SIZES = [11, 12, 13, 14, 15, 16, 18, 20, 22, 24, 28];
 
 export const DEFAULT_APPEARANCE: Appearance = {
@@ -43,6 +51,7 @@ export const DEFAULT_APPEARANCE: Appearance = {
   readingFont: "",
   readingSize: 14,
   writingFont: "",
+  rowSpacing: 10,
 };
 
 const KEPT = "outpost.appearance";
@@ -108,6 +117,7 @@ function apply(a: Appearance) {
   root.style.setProperty("--font", family(a.font, BUILT_IN));
   root.style.setProperty("--read-font", family(a.readingFont, SYSTEM));
   root.style.setProperty("--read-size", `${a.readingSize}px`);
+  root.style.setProperty("--row-pad", `${Math.min(20, Math.max(4, a.rowSpacing))}px`);
   root.style.setProperty("--write-font", family(a.writingFont || a.readingFont, SYSTEM));
   const factor = Math.min(2, Math.max(0.8, a.textSize / 100));
   if (factor !== zoomed) {

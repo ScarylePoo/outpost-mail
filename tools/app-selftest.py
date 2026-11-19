@@ -84,7 +84,29 @@ class Threaded(socketserver.ThreadingMixIn, socketserver.TCPServer):
     daemon_threads = True
 
 
-def message(n, subject, body):
+# A one-pixel PNG, served to find out whether a message's pictures load.
+PIXEL = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+)
+PICTURES = []
+
+
+class Pictures(socketserver.StreamRequestHandler):
+    """A web server with one picture on it. Counts how often it is asked."""
+
+    def handle(self):
+        line = self.rfile.readline().decode(errors="replace").strip()
+        while self.rfile.readline().strip():
+            pass
+        PICTURES.append(line)
+        self.wfile.write(
+            b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nConnection: close\r\n"
+            + f"Content-Length: {len(PIXEL)}\r\n\r\n".encode() + PIXEL
+        )
+
+
+def message(n, subject, body, html=False):
+    kind = "Content-Type: text/html; charset=utf-8\r\n" if html else ""
     return (
         # Sender checks as the receiving server would record them. Message 2
         # is a forgery: it fails.
@@ -92,7 +114,7 @@ def message(n, subject, body):
         f"dmarc={'fail' if n == 2 else 'pass'} header.from=example.com\r\n"
         f"From: Sender {n} <sender{n}@example.com>\r\nTo: tester@example.com\r\n"
         f"Subject: {subject}\r\nDate: Mon, 2 Nov 2026 09:{n:02}:00 +0000\r\n"
-        f"Message-ID: <{n}@selftest>\r\n\r\n{body}\r\n"
+        f"Message-ID: <{n}@selftest>\r\n{kind}\r\n{body}\r\n"
     ).encode()
 
 
@@ -186,10 +208,24 @@ service stats {{
         other.create("Projects")
         for n in range(1, 6):
             other.append("INBOX", "(\\Seen)" if n % 2 else "", None, message(n, f"Selftest message {n}", f"Body {n} with a zebra in it."))
+        # A formatted message with a picture on the internet and a link, and
+        # a plain one with addresses written out in it.
+        host = subprocess.check_output(["hostname", "-I"], text=True).split()[0] if windows else "127.0.0.1"
+        pictures = Threaded(("0.0.0.0" if windows else "127.0.0.1", 0), Pictures)
+        threading.Thread(target=pictures.serve_forever, daemon=True).start()
+        other.append("INBOX", "(\\Seen)", None, message(
+            6, "Selftest message 6",
+            f'<p>A picture: <img src="http://{host}:{pictures.server_address[1]}/pixel.png" width="40" height="40"></p>'
+            '<p>And <a href="https://example.com/offer?id=6"><b>a link</b></a>.</p>',
+            html=True,
+        ))
+        other.append("INBOX", "(\\Seen)", None, message(
+            7, "Selftest message 7",
+            "See https://example.com/page?x=1, or www.example.org (the old site).\r\nWrite to help@example.com.",
+        ))
         other.append("Projects", "", None, message(9, "Project note", "No striped animals here."))
 
         # From Windows, the server inside WSL is reached at WSL's own address.
-        host = subprocess.check_output(["hostname", "-I"], text=True).split()[0] if windows else "127.0.0.1"
         smtp = Threaded(("0.0.0.0" if windows else "127.0.0.1", 0), FakeSmtp)
         threading.Thread(target=smtp.serve_forever, daemon=True).start()
         # A throwaway calendar and contacts server too, if Radicale is here.
@@ -242,6 +278,7 @@ service stats {{
             subject = next((l for l in data.splitlines() if l.startswith("Subject:")), "")
             said = "Written in the window." in data
             print(f"handed to the outgoing server: from {sender} to {recipients}; {subject}; body arrived: {said}")
+        print("picture server was asked:", PICTURES or "NOTHING")
         if not SENT:
             print("handed to the outgoing server: NOTHING")
         if dav:

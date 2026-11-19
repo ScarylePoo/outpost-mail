@@ -8,11 +8,13 @@
 import { createEffect, createMemo, createSignal, Index, on, onCleanup, onMount, Show } from "solid-js";
 import { core, type FolderId, type MessageRow, type ThreadMessage, type ThreadView } from "../core";
 import { ThreadTree, treeHeight } from "./ThreadTree";
-import { charWidth } from "../core/appearance";
-import { buildLayout, LINE, ROW_FIXED, rowAt, type Layout } from "./layout";
+import { appearance, charWidth } from "../core/appearance";
+import { buildLayout, LINE, rowFixed, rowAt, type Layout } from "./layout";
 import { formatDate } from "./format";
 
 const PAGE = 200;
+/** Room above and below each row's text, px. */
+const spacing = () => appearance().rowSpacing;
 /** Rows kept rendered above and below the visible ones. */
 const OVERSCAN = 12;
 const MAX_CACHED_PAGES = 80;
@@ -215,7 +217,7 @@ export function MessageList(props: {
     const end = Math.min(n - 1, visLast + OVERSCAN);
 
     // Pool size depends only on the viewport, so it is stable while scrolling.
-    const pool = Math.ceil((Math.ceil(viewHeight / ROW_FIXED) + 2 * OVERSCAN + 2) / 16) * 16;
+    const pool = Math.ceil((Math.ceil(viewHeight / rowFixed(4)) + 2 * OVERSCAN + 2) / 16) * 16;
     const next = new Array<number>(pool).fill(-1);
     for (let i = start; i <= end; i++) next[i % pool] = i;
     setSlots(next);
@@ -232,7 +234,7 @@ export function MessageList(props: {
   function relayout() {
     const anchor = visFirst;
     const into = count() > 0 ? virtualTop - layout.offsets[anchor]! : 0;
-    layout = buildLayout(previewLens, width, extraHeights(), props.previewLines, charWidth());
+    layout = buildLayout(previewLens, width, extraHeights(), props.previewLines, charWidth(), spacing());
     setTotal(count());
     resize();
     setLayoutTick((t) => t + 1);
@@ -299,7 +301,7 @@ export function MessageList(props: {
       if (gen !== generation) return;
       const extra = new Map<number, number>();
       for (const [index, thread] of reopened) extra.set(index, treeHeight(thread));
-      const nextLayout = buildLayout(fresh.previewLens, width, extra, props.previewLines, charWidth());
+      const nextLayout = buildLayout(fresh.previewLens, width, extra, props.previewLines, charWidth(), spacing());
       const n = nextLayout.lines.length;
       let nextTop = 0;
       if (anchor && anchorIndex !== null && anchorIndex < n) {
@@ -561,7 +563,7 @@ export function MessageList(props: {
   // The setting for preview lines changed: every row's height changes.
   createEffect(
     on(
-      () => [props.previewLines, charWidth()],
+      () => [props.previewLines, charWidth(), spacing()],
       () => status() === "ready" && relayout(),
       { defer: true },
     ),
@@ -647,7 +649,7 @@ export function MessageList(props: {
                 }}
                 style={{
                   transform: `translateY(${top()}px)`,
-                  height: `${ROW_FIXED + lines() * LINE + (tree() ? treeHeight(tree()!) : 0)}px`,
+                  height: `${rowFixed(spacing()) + lines() * LINE + (tree() ? treeHeight(tree()!) : 0)}px`,
                 }}
                 onMouseDown={(e) =>
                   choose(index(), e.shiftKey ? "range" : e.ctrlKey || e.metaKey ? "toggle" : "one", false)

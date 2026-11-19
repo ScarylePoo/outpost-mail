@@ -5,3 +5,4 @@ dist/
 *.log
 .env
 .env.*
+crates/shell-tauri/installer/THIRD-PARTY-NOTICES.txt

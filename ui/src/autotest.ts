@@ -159,7 +159,30 @@ async function probe(details: string): Promise<string> {
     // The settings window: every section on one page, narrowed by search.
     press("Settings");
     await sleep(500);
-    lines.push(`settings sections: ${text(".settings-body h2").join(" | ")}`);
+    lines.push(`settings sections: ${text(".settings-nav button").join(" | ")}`);
+    lines.push(`settings shown first: ${text(".settings-body h2").join(" | ")} (${text(".settings-body h3").join(", ")})`);
+    // Appearance: a colour scheme and a size are applied to the window.
+    ([...document.querySelectorAll(".settings-nav button")].find((b) => b.textContent?.trim() === "Appearance") as
+      | HTMLElement
+      | undefined)?.click();
+    await sleep(300);
+    const scheme = [...document.querySelectorAll(".scheme")].find((b) => b.textContent?.includes("Slate")) as HTMLElement | undefined;
+    scheme?.click();
+    await sleep(300);
+    const root = document.documentElement;
+    lines.push(`scheme after choosing Slate: ${root.dataset.scheme} (dark: ${root.dataset.dark}, pane ${getComputedStyle(root).getPropertyValue("--pane").trim()})`);
+    const kept = await core.send({ type: "getAppearance" });
+    lines.push(`scheme kept by the core: ${kept.appearance.scheme}`);
+    // The size setting zooms the whole window: the same window is then
+    // fewer CSS pixels wide.
+    const wide = window.innerWidth;
+    await core.setZoom(1.25);
+    await sleep(400);
+    lines.push(`window at 125%: ${wide} -> ${window.innerWidth} px wide (${wide / window.innerWidth > 1.2 ? "zoomed" : "NOT ZOOMED"})`);
+    await core.setZoom(1);
+    await sleep(200);
+    lines.push(`fonts found on this computer: ${document.querySelectorAll(".settings-body select option").length > 12 ? "yes" : "few"}`);
+    await core.send({ type: "setAppearance", appearance: { ...kept.appearance, scheme: "system" } });
     const search = document.querySelector(".settings-search") as HTMLInputElement | null;
     if (search) {
       search.value = "signature";

@@ -14,8 +14,13 @@ const CORE_EVENT: &str = "core-event";
 // `async` here means "run off the main thread", so a command can never stall
 // the window.
 #[tauri::command(async)]
-fn core_command(core: State<'_, Core>, command: Command) -> Result<Response, CoreError> {
-    core.handle(command)
+fn core_command(app: tauri::AppHandle, command: Command) -> Result<Response, CoreError> {
+    // The core is missing only if it could not start, in which case a
+    // message saying why is on screen and the app is about to close.
+    match app.try_state::<Core>() {
+        Some(core) => core.handle(command),
+        None => Err(CoreError::new(outpost_core::api::ErrorCode::Internal, "Outpost could not start")),
+    }
 }
 
 /// Shell test support (docs/testing.md). When OUTPOST_SHELL_TEST names a file,
@@ -160,8 +165,92 @@ fn notify(app: tauri::AppHandle, title: String, body: String) -> Result<(), Stri
         .map_err(|e| e.to_string())
 }
 
+/// Where this copy keeps its mail, settings and log.
+struct DataDir(std::path::PathBuf);
+
+/// Shows the log file in the file manager.
+#[tauri::command]
+fn reveal_log(data: State<'_, DataDir>) -> Result<(), String> {
+    let path = outpost_core::log::path_in(&data.0);
+    if !path.is_file() {
+        return Err("Nothing has been logged yet.".into());
+    }
+    tauri_plugin_opener::reveal_item_in_dir(path).map_err(|e| e.to_string())
+}
+
+/// A `mailto:` address the app was started with: someone clicked an email
+/// link somewhere and Outpost is the mail program. Taken once by the
+/// interface, which opens a new message to it.
+struct Launch(std::sync::Mutex<Option<String>>);
+
+const MAILTO_EVENT: &str = "mailto";
+
+fn mailto_in(args: impl IntoIterator<Item = String>) -> Option<String> {
+    args.into_iter()
+        .skip(1)
+        .find(|a| a.len() > 7 && a[..7].eq_ignore_ascii_case("mailto:") && a.len() < 16 * 1024)
+}
+
+#[tauri::command]
+fn launch_mailto(launch: State<'_, Launch>) -> Option<String> {
+    launch.0.lock().ok()?.take()
+}
+
+/// Starts the system's way of choosing the default mail program, and says
+/// what happened. Outpost cannot simply make itself the default on Windows:
+/// only the user can, in Settings. It can on a Linux desktop.
+#[tauri::command(async)]
+fn choose_default_mail_app() -> Result<String, String> {
+    #[cfg(windows)]
+    {
+        // Opens Settings at Outpost's own page where Windows supports
+        // that, and at the list of default apps otherwise.
+        tauri_plugin_opener::open_url("ms-settings:defaultapps?registeredAppUser=Outpost%20Mail", None::<&str>)
+            .map_err(|e| e.to_string())?;
+        Ok("Windows Settings has opened. Find Outpost Mail there and choose it for MAILTO. \
+            It is listed only if Outpost was installed with its installer."
+            .into())
+    }
+    #[cfg(not(windows))]
+    {
+        // The name of the desktop entry the .deb and .rpm packages install.
+        let done = std::process::Command::new("xdg-settings")
+            .args(["set", "default-url-scheme-handler", "mailto", "Outpost Mail.desktop"])
+            .status();
+        match done {
+            Ok(status) if status.success() => Ok("Outpost is now the program that opens email links.".into()),
+            Ok(_) => Err("The desktop did not accept the change. This works when Outpost was installed from its \
+                          .deb or .rpm package; otherwise choose it in your desktop's default applications."
+                .into()),
+            Err(_) => Err("This desktop has no xdg-settings command. Choose Outpost in its default applications settings.".into()),
+        }
+    }
+}
+
+/// Scales everything in the window: the "text size" setting. Zooming the
+/// whole view keeps every measurement in the interface in step.
+#[tauri::command]
+fn set_zoom(window: tauri::WebviewWindow, factor: f64) -> Result<(), String> {
+    let factor = if factor.is_finite() { factor.clamp(0.8, 2.0) } else { 1.0 };
+    window.set_zoom(factor).map_err(|e| e.to_string())
+}
+
 fn main() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    // One copy of the app at a time: starting it again brings the running
+    // window forward (and hands over an email link, if it was started by
+    // one). A copy pointed at its own data folder with OUTPOST_DATA is
+    // deliberately separate; the core still refuses two on the same folder.
+    if std::env::var_os("OUTPOST_DATA").is_none() {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            show_window(app);
+            if let Some(link) = mailto_in(args) {
+                let _ = app.emit(MAILTO_EVENT, link);
+            }
+        }));
+    }
+    builder
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .on_window_event(|window, event| {
             // With "keep running in the tray" on, closing the window hides
@@ -185,13 +274,36 @@ fn main() {
             };
             let downloads_dir = app.path().download_dir().ok();
             app.manage(Downloads(downloads_dir.clone()));
+            app.manage(DataDir(data_dir.clone()));
+            app.manage(Launch(std::sync::Mutex::new(mailto_in(std::env::args()))));
+            // A crash leaves a line in the log saying where.
+            let log_dir = data_dir.clone();
+            let previous = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                outpost_core::log::Log::open(Some(&log_dir)).line(&format!("PANIC: {info}"));
+                previous(info);
+            }));
             let config = Config {
                 data_dir: Some(data_dir),
                 downloads_dir,
             };
-            let core = Core::start_with(config, move |event: Event| {
+            let core = match Core::start_with(config, move |event: Event| {
                 let _ = handle.emit(CORE_EVENT, event);
-            })?;
+            }) {
+                Ok(core) => core,
+                Err(e) => {
+                    // Say why, then close. Without this the app would
+                    // simply not appear.
+                    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+                    let handle = app.handle().clone();
+                    app.dialog()
+                        .message(format!("Outpost could not start.\n\n{}", e.message))
+                        .title("Outpost")
+                        .kind(MessageDialogKind::Error)
+                        .show(move |_| handle.exit(1));
+                    return Ok(());
+                }
+            };
             app.manage(core);
             // A desktop without a tray is not an error; the app then simply
             // never hides.
@@ -219,7 +331,11 @@ fn main() {
             open_link,
             reveal_download,
             set_unread,
-            notify
+            notify,
+            set_zoom,
+            reveal_log,
+            choose_default_mail_app,
+            launch_mailto
         ])
         .run(tauri::generate_context!())
         .expect("failed to start Outpost");

@@ -26,8 +26,8 @@ export interface Layout {
   offsets: Float64Array;
 }
 
-export function charsPerLine(listWidth: number): number {
-  return Math.max(16, Math.floor((listWidth - ROW_PAD_X) / AVG_CHAR));
+export function charsPerLine(listWidth: number, avgChar = AVG_CHAR): number {
+  return Math.max(16, Math.floor((listWidth - ROW_PAD_X) / avgChar));
 }
 
 export function linesFor(previewLen: number, perLine: number, most = MAX_PREVIEW_LINES): number {
@@ -42,9 +42,11 @@ export function buildLayout(
   extra?: ReadonlyMap<number, number>,
   /** The most preview lines a row may have: the user's setting. */
   mostLines = MAX_PREVIEW_LINES,
+  /** Average character width of the interface font, px: the user's font. */
+  avgChar = AVG_CHAR,
 ): Layout {
   const count = previewLens.length;
-  const perLine = charsPerLine(listWidth);
+  const perLine = charsPerLine(listWidth, avgChar);
   const lines = new Uint8Array(count);
   const offsets = new Float64Array(count + 1);
   let y = 0;

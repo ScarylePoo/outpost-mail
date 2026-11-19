@@ -2,6 +2,36 @@
 
 How to run these: `docs/testing.md`. Targets come from the handoff doc.
 
+## Milestone 9 · 18 November 2026 · the release candidate, one million messages
+
+Linux, 0.1.0 as it stands, the index rebuilt from the mail files and the
+file cache emptied before measuring. The index's shape has not changed
+since milestone 6 (schema 11), so this is a check that nothing drifted.
+**All targets met.**
+
+| Operation | First | Typical | Target |
+| --- | --- | --- | --- |
+| Open the account and list folders | 3 ms | 0 ms | - |
+| Open Inbox (163 thousand) / Archive (352 thousand) | 49 / 34 ms | 9 / 18 ms | 100 ms |
+| Open Inbox / Archive as conversations | 61 / 42 ms | 9 / 15 ms | 100 ms |
+| Load a page at the middle / end of Archive | 11 / 9 ms | 4 / 8 ms | 16 ms |
+| Read one message file | 0.1 ms | 0.0 ms | 100 ms |
+| Sender history for one message | 70 ms | 26 ms | 100 ms |
+| Search: word in nearly every message | 4 ms | 0.1 ms | 300 ms |
+| Search: rare word | 19 ms | 0.1 ms | 300 ms |
+| Search: common and rare word together | 21 ms | 0.5 ms | 300 ms |
+| Search: three letters, as typed | 8 ms | 4 ms | 300 ms |
+| Search: no matches | 0.5 ms | 0.0 ms | 300 ms |
+
+Rebuild from the mail files: 259 s (reading and indexing 192 s at 5,219
+messages a second, finishing 67 s). Index file 2.57 GB, 37% of the 6.88 GB
+of mail.
+
+"Sender history" has the least room: 70 ms cold against 100 ms.
+
+Windows: see below if a Windows section follows this one; otherwise it was
+not re-measured.
+
 ## Milestone 6 · 18 November 2026 · sender verification, one million messages
 
 Linux, file cache emptied first. The index gained a column and a table for

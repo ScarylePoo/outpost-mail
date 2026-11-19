@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Outpost Mail",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "identifier": "io.github.scarylepoo.outpostmail",
   "build": {
     "frontendDist": "../../ui/dist",
@@ -25,7 +25,43 @@
     }
   },
   "bundle": {
-    "active": false,
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"]
+    "active": true,
+    "targets": [
+      "nsis",
+      "deb",
+      "rpm",
+      "appimage"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "publisher": "Outpost Mail contributors",
+    "copyright": "Released into the public domain (Unlicense).",
+    "category": "Productivity",
+    "shortDescription": "A desktop mail program",
+    "longDescription": "Outpost Mail is a desktop mail program in the classic three-pane layout. It keeps your mail on your computer in standard Maildir files, works with any IMAP mailbox, and sends nothing about you to anyone.",
+    "licenseFile": "../../LICENSE",
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "installer/hooks.nsh"
+      },
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    },
+    "linux": {
+      "deb": {
+        "section": "mail",
+        "desktopTemplate": "installer/outpost.desktop"
+      },
+      "rpm": {
+        "desktopTemplate": "installer/outpost.desktop"
+      }
+    }
   }
 }

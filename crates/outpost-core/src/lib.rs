@@ -19,6 +19,7 @@ pub mod api;
 pub mod compose;
 pub mod dav;
 pub mod imap;
+pub mod log;
 pub mod recheck;
 pub mod render;
 pub mod settings;
@@ -27,6 +28,7 @@ pub mod verify;
 pub mod store;
 pub mod sync;
 pub mod synthetic;
+pub mod updates;
 
 use accounts::{AccountConfig, OsSecrets, Secrets};
 use api::{
@@ -156,6 +158,35 @@ enum Target<'a> {
 #[derive(Clone)]
 pub struct Core {
     inner: Arc<Inner>,
+    /// Present in the handle the app holds (and its clones), absent in the
+    /// copies background work keeps. When the last handle with it goes,
+    /// the core stops: see [`Owner`].
+    _owner: Option<Arc<Owner>>,
+}
+
+/// What the app's handle on the core owns. Dropping it stops every sync
+/// and gives up the data folder, even though background work may still
+/// hold the core for a moment longer.
+struct Owner {
+    inner: Arc<Inner>,
+    /// Held for as long as the core runs, so that a second copy of the app
+    /// cannot open the same mail. Released by the system if the app dies.
+    _instance: Option<std::fs::File>,
+}
+
+impl Drop for Owner {
+    fn drop(&mut self) {
+        self.inner.stop_everything();
+        // Background work lets go once it notices; give it a moment, so
+        // the data folder is not handed on while something is mid-write.
+        for _ in 0..60 {
+            if Arc::strong_count(&self.inner) <= 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        self.inner.log.line("Outpost stopped");
+    }
 }
 
 struct Inner {
@@ -170,8 +201,37 @@ struct Inner {
     /// Re-checks signatures, keeping the keys it has fetched.
     rechecker: Arc<recheck::Rechecker>,
     settings: settings::Settings,
+    log: Arc<log::Log>,
+    /// What the last check for a new version found.
+    update: Mutex<updates::Checked>,
     /// Runs the sync engine. Commands never wait on it.
     runtime: tokio::runtime::Runtime,
+}
+
+/// The name of the file that marks a data folder as in use.
+const LOCK_FILE: &str = "outpost.lock";
+
+/// Claims the data folder for this copy of the app. Two copies syncing the
+/// same mail would each undo the other's work.
+fn claim(data_dir: &Path) -> Result<std::fs::File, CoreError> {
+    let cannot = |e: std::io::Error| CoreError::new(ErrorCode::Internal, format!("cannot use the data folder: {e}"));
+    std::fs::create_dir_all(data_dir).map_err(cannot)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(data_dir.join(LOCK_FILE))
+        .map_err(cannot)?;
+    // A copy that has just closed may still be letting go.
+    for attempt in 0..20 {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) if attempt < 19 => std::thread::sleep(std::time::Duration::from_millis(100)),
+            Err(std::fs::TryLockError::WouldBlock) => break,
+            Err(std::fs::TryLockError::Error(e)) => return Err(cannot(e)),
+        }
+    }
+    Err(CoreError::new(ErrorCode::AlreadyRunning, "Outpost is already running with this mail"))
 }
 
 fn status(state: SyncState, detail: impl Into<String>) -> SyncStatus {
@@ -206,8 +266,17 @@ impl Core {
             .enable_all()
             .build()
             .map_err(|e| CoreError::new(ErrorCode::Internal, e.to_string()))?;
+        let instance = match &config.data_dir {
+            Some(dir) => Some(claim(dir)?),
+            None => None,
+        };
+        let log = Arc::new(log::Log::open(config.data_dir.as_deref()));
+        log.line(&format!("Outpost {} started", env!("CARGO_PKG_VERSION")));
         let accounts = match &config.data_dir {
-            Some(dir) => open_accounts(dir).map_err(internal)?,
+            Some(dir) => open_accounts(dir).map_err(|e| {
+                log.line(&format!("could not open the accounts: {e}"));
+                internal(e)
+            })?,
             None => Vec::new(),
         };
         let core = Self {
@@ -217,13 +286,17 @@ impl Core {
                 downloads_dir: config.downloads_dir,
                 accounts: RwLock::new(accounts),
                 dav: RwLock::new(config.data_dir.as_deref().map(dav::service::open_accounts).unwrap_or_default()),
-                data_dir: config.data_dir,
+                data_dir: config.data_dir.clone(),
                 synthetic: synthetic_folders(),
                 secrets,
                 rechecker: Arc::new(recheck::Rechecker::new()),
+                update: Mutex::new(updates::Checked::load(config.data_dir.as_deref())),
+                log,
                 runtime,
             }),
+            _owner: None,
         };
+        let core = Self { _owner: Some(Arc::new(Owner { inner: core.inner.clone(), _instance: instance })), ..core };
         for account in core.accounts() {
             if let Some(config) = account.config() {
                 let stored = core.inner.secrets.get(&config.secret_key(&account.name));
@@ -269,6 +342,12 @@ impl Core {
             }
             live.status = new.clone();
         }
+        // The log gets the states worth knowing afterwards, not every
+        // flicker between "syncing" and "up to date".
+        match new.state {
+            SyncState::Connecting | SyncState::Syncing => {}
+            _ => self.inner.log.change(&format!("account {}", account.id), &format!("{:?} {}", new.state, new.detail)),
+        }
         self.inner.sink.emit(Event::AccountStatus {
             account: account.id.clone(),
             status: new,
@@ -291,7 +370,7 @@ impl Core {
     /// reporting progress, and then starts its sync.
     fn reindex_then_sync(&self, account: &Arc<Account>) {
         self.set_status(account, status(SyncState::Indexing, "Reading the mail on this computer…"));
-        let (core, account) = (self.clone(), account.clone());
+        let (core, account) = (self.background(), account.clone());
         self.inner.runtime.spawn_blocking(move || {
             let result = account.store.rebuild(true, |progress| {
                 if let store::rebuild::Progress::Loading { done, total } = progress {
@@ -327,7 +406,7 @@ impl Core {
             }
             password
         };
-        let core = self.clone();
+        let core = self.background();
         let account = account.clone();
         self.inner.runtime.spawn(async move {
             let server_account = sync::Account {
@@ -816,7 +895,7 @@ impl Core {
                         "the server, the user name and the password are all needed",
                     ));
                 }
-                let core = self.clone();
+                let core = self.background();
                 self.inner.runtime.spawn(async move {
                     let outcome = core.add_account(data_dir, config, password.0, remember).await;
                     core.inner.sink.emit(match outcome {
@@ -861,6 +940,12 @@ impl Core {
                     .set_general(general, password.as_ref().map(|p| p.0.as_str()))
                     .map_err(denied)?;
                 Ok(Response::General { general: self.inner.settings.general() })
+            }
+            Command::CheckForUpdate { force } => Ok(self.check_for_update(force)),
+            Command::GetAppearance => Ok(Response::Appearance { appearance: self.inner.settings.appearance() }),
+            Command::SetAppearance { appearance } => {
+                self.inner.settings.set_appearance(appearance).map_err(denied)?;
+                Ok(Response::Appearance { appearance: self.inner.settings.appearance() })
             }
             Command::UpdateAccount { account, host, port, encrypted, signature, password } => {
                 let account = self.syncing_account(&account)?;
@@ -1340,7 +1425,7 @@ impl Core {
             .map_err(|e| e.to_string())?;
         session.logout().await;
 
-        let core = self.clone();
+        let core = self.background();
         tokio::task::spawn_blocking(move || {
             let root = data_dir.join("accounts");
             let name = accounts::directory_name(&config.username, |n| root.join(n).exists());
@@ -1433,17 +1518,68 @@ impl Core {
     }
 }
 
-impl Drop for Inner {
-    fn drop(&mut self) {
-        // Ask every sync to stop; the runtime then winds down without
-        // waiting on a server.
+impl Core {
+    /// What is known about a newer version. If the last answer is more
+    /// than a day old (or `force`), GitHub is asked in the background and
+    /// [`Event::UpdateChecked`] follows.
+    fn check_for_update(&self, force: bool) -> Response {
+        let current = env!("CARGO_PKG_VERSION");
+        let now = chrono::Utc::now().timestamp();
+        let known = self.inner.update.lock().unwrap().clone();
+        let wanted = force || self.inner.settings.general().check_for_updates;
+        let checking = wanted && (force || !known.fresh(now));
+        if checking {
+            let core = self.background();
+            self.inner.runtime.spawn(async move {
+                let event = match updates::ask(now).await {
+                    Ok(found) => {
+                        found.save(core.inner.data_dir.as_deref());
+                        let newer = found.newer_than(current);
+                        *core.inner.update.lock().unwrap() = found;
+                        core.inner.log.line(match &newer {
+                            Some(_) => "update check: a newer version is out",
+                            None => "update check: nothing newer",
+                        });
+                        Event::UpdateChecked { newer, error: None }
+                    }
+                    Err(error) => {
+                        core.inner.log.line(&format!("update check failed: {error}"));
+                        Event::UpdateChecked { newer: None, error: Some(error) }
+                    }
+                };
+                core.inner.sink.emit(event);
+            });
+        }
+        Response::Update { newer: known.newer_than(current), checked: known.at > 0, checking }
+    }
+}
+
+impl Inner {
+    /// Asks every sync to stop; the runtime then winds down without
+    /// waiting on a server.
+    fn stop_everything(&self) {
         for account in self.accounts.read().unwrap().iter() {
             if let Some(running) = account.live.lock().unwrap().running.take() {
                 running.stop();
             }
-        }        for account in self.dav.read().unwrap().iter() {
+        }
+        for account in self.dav.read().unwrap().iter() {
             account.stop();
         }
+    }
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        self.stop_everything();
+    }
+}
+
+impl Core {
+    /// A handle for background work: it keeps the core's data alive but
+    /// does not keep the core running.
+    pub(crate) fn background(&self) -> Core {
+        Core { inner: self.inner.clone(), _owner: None }
     }
 }
 

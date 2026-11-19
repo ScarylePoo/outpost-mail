@@ -5,6 +5,7 @@
 // produce the same rows.
 
 import type {
+  Appearance,
   CheckState,
   Command,
   CoreEvent,
@@ -109,6 +110,18 @@ let general: General = {
   undoSendSeconds: 10,
   conversations: true,
   previewLines: 3,
+  checkForUpdates: true,
+};
+// Development aid: `?scheme=dark&accent=teal` starts in those colours.
+const look = new URLSearchParams(location.search);
+let appearance: Appearance = {
+  scheme: look.get("scheme") ?? "system",
+  accent: look.get("accent") ?? "blue",
+  font: "",
+  textSize: 100,
+  readingFont: "",
+  readingSize: 14,
+  writingFont: "",
 };
 let password: string | null = null;
 const trusted = new Set<number>();
@@ -300,6 +313,13 @@ function answer(command: Command): Response {
       if (password !== null && command.password !== password) throw wrongPassword();
       general = command.general;
       return { type: "general", general };
+    case "checkForUpdate":
+      return { type: "update", newer: null, checked: true, checking: false };
+    case "getAppearance":
+      return { type: "appearance", appearance };
+    case "setAppearance":
+      appearance = command.appearance;
+      return { type: "appearance", appearance };
     case "updateAccount":
     case "removeAccount":
       return { type: "accepted" };
@@ -398,6 +418,21 @@ export const stubTransport: Transport = {
   async revealDownload() {},
   async notify() {},
   async setUnread() {},
+  onMailto(listener) {
+    // In a browser: `?mailto=...` stands in for being started by a link.
+    const link = new URLSearchParams(location.search).get("mailto");
+    if (link) setTimeout(() => listener(link), 300);
+    return () => {};
+  },
+  async chooseDefaultMailApp() {
+    return "In the app, this opens the system's default apps settings.";
+  },
+  async revealLog() {},
+  async setZoom(factor) {
+    // A plain browser has no window zoom to set; this is close enough to
+    // look at.
+    document.documentElement.style.setProperty("zoom", String(factor));
+  },
   onEvent(listener) {
     listeners.add(listener);
     return () => listeners.delete(listener);

@@ -5,7 +5,7 @@ members = ["crates/outpost-core", "crates/outpost-bench", "crates/outpost-cli", 
 default-members = ["crates/outpost-core", "crates/outpost-bench", "crates/outpost-cli"]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 license = "Unlicense"
 repository = "https://github.com/ScarylePoo/outpost-mail"

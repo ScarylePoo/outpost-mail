@@ -8,6 +8,7 @@
 import { createEffect, createMemo, createSignal, Index, on, onCleanup, onMount, Show } from "solid-js";
 import { core, type FolderId, type MessageRow, type ThreadMessage, type ThreadView } from "../core";
 import { ThreadTree, treeHeight } from "./ThreadTree";
+import { charWidth } from "../core/appearance";
 import { buildLayout, LINE, ROW_FIXED, rowAt, type Layout } from "./layout";
 import { formatDate } from "./format";
 
@@ -231,7 +232,7 @@ export function MessageList(props: {
   function relayout() {
     const anchor = visFirst;
     const into = count() > 0 ? virtualTop - layout.offsets[anchor]! : 0;
-    layout = buildLayout(previewLens, width, extraHeights(), props.previewLines);
+    layout = buildLayout(previewLens, width, extraHeights(), props.previewLines, charWidth());
     setTotal(count());
     resize();
     setLayoutTick((t) => t + 1);
@@ -298,7 +299,7 @@ export function MessageList(props: {
       if (gen !== generation) return;
       const extra = new Map<number, number>();
       for (const [index, thread] of reopened) extra.set(index, treeHeight(thread));
-      const nextLayout = buildLayout(fresh.previewLens, width, extra, props.previewLines);
+      const nextLayout = buildLayout(fresh.previewLens, width, extra, props.previewLines, charWidth());
       const n = nextLayout.lines.length;
       let nextTop = 0;
       if (anchor && anchorIndex !== null && anchorIndex < n) {
@@ -560,7 +561,7 @@ export function MessageList(props: {
   // The setting for preview lines changed: every row's height changes.
   createEffect(
     on(
-      () => props.previewLines,
+      () => [props.previewLines, charWidth()],
       () => status() === "ready" && relayout(),
       { defer: true },
     ),

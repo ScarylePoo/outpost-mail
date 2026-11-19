@@ -21,6 +21,30 @@ export const tauriTransport: Transport = {
   setUnread(count) {
     return invoke("set_unread", { count });
   },
+  onMailto(listener) {
+    let stop: (() => void) | undefined;
+    let stopped = false;
+    void invoke<string | null>("launch_mailto").then((link) => {
+      if (link && !stopped) listener(link);
+    });
+    void listen<string>("mailto", (e) => listener(e.payload)).then((unlisten) => {
+      if (stopped) unlisten();
+      else stop = unlisten;
+    });
+    return () => {
+      stopped = true;
+      stop?.();
+    };
+  },
+  chooseDefaultMailApp() {
+    return invoke("choose_default_mail_app");
+  },
+  revealLog() {
+    return invoke("reveal_log");
+  },
+  setZoom(factor) {
+    return invoke("set_zoom", { factor });
+  },
   onEvent(listener) {
     let stop: (() => void) | undefined;
     let stopped = false;

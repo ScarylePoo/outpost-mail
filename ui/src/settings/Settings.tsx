@@ -1,9 +1,23 @@
-// The settings window: every setting on one page, one level deep, with a
-// search box that narrows the page as you type. It takes the place of the
-// reading pane while open; nothing here is modal.
+// The settings window. A list of sections on the left, the chosen section on
+// the right in groups, and a search box that looks through every section at
+// once and shows whatever matches. One level deep: no section opens another.
+// It takes the place of the list and reading pane while open; nothing here
+// is modal.
 
 import { createMemo, createSignal, For, type JSX, onCleanup, onMount, Show } from "solid-js";
-import { core, type AccountInfo, type DavAccountInfo, type General, type Protection } from "../core";
+import { core, type AccountInfo, type Appearance, type DavAccountInfo, type General, type Protection } from "../core";
+import {
+  ACCENTS,
+  appearance,
+  DEFAULT_APPEARANCE,
+  fontInstalled,
+  installedFonts,
+  READING_SIZES,
+  saveAppearance,
+  SCHEMES,
+  TEXT_SIZES,
+} from "../core/appearance";
+import { checkForUpdate, update, updateChecked } from "../core/updates";
 import { davAccounts } from "../organizer/store";
 import { general, passwordSet, protection, saveGeneral, savePassword, saveProtection, withPassword } from "../core/protection";
 import { SHORTCUTS } from "../shortcuts";
@@ -18,12 +32,24 @@ interface Item {
   view: () => JSX.Element;
 }
 
-interface Section {
-  title: string;
+/** Settings that belong together, drawn as one card. */
+interface Group {
+  title?: string;
+  /** Rows close together: a table of short lines. */
+  tight?: boolean;
   items: Item[];
 }
 
-type GeneralSwitch = "notifyNewMail" | "startMinimised" | "closeToTray" | "conversations";
+/** One entry in the list on the left. */
+interface Page {
+  id: string;
+  title: string;
+  /** The heading it is listed under: accounts are. */
+  under?: string;
+  groups: Group[];
+}
+
+type GeneralSwitch = "notifyNewMail" | "startMinimised" | "closeToTray" | "conversations" | "checkForUpdates";
 type ProtectionSwitch = Exclude<keyof Protection, "allowImagesFrom" | "blockedSenders">;
 
 const PROTECTION: { key: ProtectionSwitch; label: string; hint: string }[] = [
@@ -503,6 +529,8 @@ export function Settings(props: {
   coreVersion: string;
   /** What the search box starts with: a way to open the page at one topic. */
   find?: string;
+  /** The section to open at, by id. */
+  page?: string;
   onAccountsChanged: () => void;
   onAddAccount: () => void;
   onPassword: (account: string) => void;
@@ -564,200 +592,512 @@ export function Settings(props: {
     ),
   });
 
-  const sections = createMemo<Section[]>(() => [
+  const select = (
+    words: string,
+    label: string,
+    aside: string,
+    value: () => string,
+    options: [string, string][],
+    change: (value: string) => void,
+  ): Item => ({
+    words: `${words} ${label} ${aside}`,
+    view: () => (
+      <label class="setting-line">
+        <span>
+          {label}
+          <Show when={aside}>
+            <span class="setting-aside">{aside}</span>
+          </Show>
+        </span>
+        <select value={value()} onChange={(e) => change(e.currentTarget.value)}>
+          <For each={options}>{([v, text]) => <option value={v}>{text}</option>}</For>
+        </select>
+      </label>
+    ),
+  });
+
+  const look = (next: Partial<Appearance>) => void saveAppearance({ ...appearance(), ...next }).catch((e) => setNote(errorText(e)));
+
+  const pages = createMemo<Page[]>(() => [
     {
+      id: "general",
       title: "General",
-      items: [
-        generalSwitch("notifyNewMail", "Show a notification when new mail arrives", "For mail arriving in an inbox while Outpost is running."),
-        generalSwitch(
-          "closeToTray",
-          "Keep running in the tray when the window is closed",
-          "Mail keeps arriving. Click the tray icon to open the window again; its menu has Quit.",
-        ),
-        generalSwitch("startMinimised", "Start minimised to the tray", "Has no effect on a desktop without a tray."),
-      ],
-    },
-    {
-      title: "Message list",
-      items: [
-        generalSwitch(
-          "conversations",
-          "Show mail as conversations",
-          "One row per conversation, which opens into a tree. The button at the top of the list switches for the time being without changing this.",
-        ),
+      groups: [
         {
-          words: "preview lines message list text rows",
-          view: () => (
-            <label class="setting-line">
-              <span>Lines of each message's text shown in the list</span>
-              <select
-                value={String(general().previewLines)}
-                onChange={(e) => changeGeneral({ ...general(), previewLines: Number(e.currentTarget.value) })}
-              >
-                <option value="0">None</option>
-                <option value="1">1</option>
-                <option value="2">2</option>
-                <option value="3">Up to 3</option>
-              </select>
-            </label>
-          ),
-        },
-      ],
-    },
-    {
-      title: "Sending",
-      items: [
-        {
-          words: "undo send delay seconds wait before sending",
-          view: () => (
-            <label class="setting-line">
-              <span>
-                Wait before sending, so it can be undone
-                <span class="setting-aside">An Undo button shows for this long after you press Send.</span>
-              </span>
-              <select
-                value={String(general().undoSendSeconds)}
-                onChange={(e) => changeGeneral({ ...general(), undoSendSeconds: Number(e.currentTarget.value) })}
-              >
-                <option value="0">Send at once</option>
-                <option value="5">5 seconds</option>
-                <option value="10">10 seconds</option>
-                <option value="20">20 seconds</option>
-                <option value="30">30 seconds</option>
-                <option value="60">1 minute</option>
-              </select>
-            </label>
-          ),
-        },
-      ],
-    },
-    {
-      title: "Protection",
-      items: [
-        ...PROTECTION.map(
-          (s): Item => ({
-            words: `${s.label} ${s.hint} protection`,
-            view: () => (
-              <Switch
-                on={protection()[s.key]}
-                label={s.label}
-                hint={s.hint}
-                change={(on) => changeProtection({ ...protection(), [s.key]: on })}
-              />
+          title: "Notifications and the tray",
+          items: [
+            generalSwitch("notifyNewMail", "Show a notification when new mail arrives", "For mail arriving in an inbox while Outpost is running."),
+            generalSwitch(
+              "closeToTray",
+              "Keep running in the tray when the window is closed",
+              "Mail keeps arriving. Click the tray icon to open the window again; its menu has Quit.",
             ),
-          }),
-        ),
-        list("allowImagesFrom", "Senders whose pictures are loaded", "None. Add one from a message that has pictures.", "Remove"),
-        list("blockedSenders", "Blocked senders", "None. A blocked sender's mail goes to the junk folder.", "Unblock"),
+            generalSwitch("startMinimised", "Start minimised to the tray", "Has no effect on a desktop without a tray."),
+          ],
+        },
         {
-          words: "settings password require protect lock",
-          view: () => (
-            <form onSubmit={setPassword}>
-              <div class="setting-title">Settings password</div>
-              <p class="panel-hint flush">
-                With a password set, no setting on this page can be changed, no account removed and no warning
-                overridden without it. It stops someone at the keyboard being talked into switching protection off.
-                It is not a defence against someone who can change files on this computer.
-              </p>
-              <Show when={passwordSet()}>
-                <label>
-                  Current password
-                  <input type="password" autocomplete="off" value={current()} onInput={(e) => setCurrent(e.currentTarget.value)} />
-                </label>
-              </Show>
-              <div class="panel-row">
-                <label class="grow">
-                  {passwordSet() ? "New password (empty removes it)" : "Password"}
-                  <input type="password" autocomplete="new-password" value={next()} onInput={(e) => setNext(e.currentTarget.value)} />
-                </label>
-                <label class="grow">
-                  The same again
-                  <input type="password" autocomplete="new-password" value={repeat()} onInput={(e) => setRepeat(e.currentTarget.value)} />
-                </label>
-              </div>
-              <Show when={passwordNote()}>
-                <p class="panel-note" role="status">
-                  {passwordNote()}
+          title: "Email links",
+          items: [
+            {
+              words: "default mail app program email links mailto register handler",
+              view: () => (
+                <div class="setting-line">
+                  <span>
+                    Open email links with Outpost
+                    <span class="setting-aside">
+                      Clicking an email address on a web page or in another program then starts a new message here.
+                    </span>
+                  </span>
+                  <button onClick={() => void core.chooseDefaultMailApp().then(setNote, (e) => setNote(errorText(e)))}>
+                    Make Outpost the default
+                  </button>
+                </div>
+              ),
+            },
+          ],
+        },
+        {
+          title: "Message list",
+          items: [
+            generalSwitch(
+              "conversations",
+              "Show mail as conversations",
+              "One row per conversation, which opens into a tree. The button at the top of the list switches for the time being without changing this.",
+            ),
+            select(
+              "preview lines message list text rows",
+              "Lines of each message's text shown in the list",
+              "",
+              () => String(general().previewLines),
+              [
+                ["0", "None"],
+                ["1", "1"],
+                ["2", "2"],
+                ["3", "Up to 3"],
+              ],
+              (v) => changeGeneral({ ...general(), previewLines: Number(v) }),
+            ),
+          ],
+        },
+        {
+          title: "Sending",
+          items: [
+            select(
+              "undo send delay seconds wait before sending",
+              "Wait before sending, so it can be undone",
+              "An Undo button shows for this long after you press Send.",
+              () => String(general().undoSendSeconds),
+              [
+                ["0", "Send at once"],
+                ["5", "5 seconds"],
+                ["10", "10 seconds"],
+                ["20", "20 seconds"],
+                ["30", "30 seconds"],
+                ["60", "1 minute"],
+              ],
+              (v) => changeGeneral({ ...general(), undoSendSeconds: Number(v) }),
+            ),
+          ],
+        },
+      ],
+    },
+    {
+      id: "appearance",
+      title: "Appearance",
+      groups: [
+        {
+          title: "Colours",
+          items: [
+            {
+              words: "colour color scheme theme dark light paper slate high contrast mode night",
+              view: () => (
+                <>
+                  <div class="setting-title">Colour scheme</div>
+                  <div class="scheme-grid" role="radiogroup" aria-label="Colour scheme">
+                    <For each={SCHEMES}>
+                      {(s) => (
+                        <button
+                          type="button"
+                          role="radio"
+                          aria-checked={appearance().scheme === s.id}
+                          class="scheme"
+                          classList={{ chosen: appearance().scheme === s.id }}
+                          onClick={() => look({ scheme: s.id })}
+                        >
+                          <span
+                            class="scheme-swatch"
+                            classList={{ split: s.id === "system" }}
+                            style={{ "--a": s.swatch[0], "--b": s.swatch[1], "--c": s.swatch[2] }}
+                          >
+                            <i />
+                            <i />
+                            <i />
+                          </span>
+                          <span class="scheme-name">{s.name}</span>
+                          <Show when={s.hint}>
+                            <span class="setting-aside">{s.hint}</span>
+                          </Show>
+                        </button>
+                      )}
+                    </For>
+                  </div>
+                  <p class="panel-hint flush">
+                    Formatted messages are always shown on a light page, as their senders laid them out. Plain messages
+                    follow the scheme.
+                  </p>
+                </>
+              ),
+            },
+            {
+              words: "accent colour color highlight selection blue teal green purple rose orange graphite",
+              view: () => (
+                <div class="setting-line">
+                  <span>
+                    Accent colour
+                    <span class="setting-aside">Used for the selection, buttons and links.</span>
+                  </span>
+                  <span class="accents" role="radiogroup" aria-label="Accent colour">
+                    <For each={ACCENTS}>
+                      {(a) => (
+                        <button
+                          type="button"
+                          role="radio"
+                          aria-checked={appearance().accent === a.id}
+                          aria-label={a.name}
+                          title={a.name}
+                          class="accent-dot"
+                          classList={{ chosen: appearance().accent === a.id }}
+                          style={{ "--dot": a.color }}
+                          onClick={() => look({ accent: a.id })}
+                        />
+                      )}
+                    </For>
+                  </span>
+                </div>
+              ),
+            },
+          ],
+        },
+        {
+          title: "The window",
+          items: [
+            {
+              words: "font interface window typeface menus list",
+              view: () => (
+                <FontPick
+                  label="Font"
+                  aside="For the folders, the message list, menus and buttons."
+                  standard="Inter (built in)"
+                  value={appearance().font}
+                  change={(font) => look({ font })}
+                />
+              ),
+            },
+            select(
+              "text size font size zoom bigger smaller larger scale",
+              "Size",
+              "Makes everything in the window larger or smaller together.",
+              () => String(appearance().textSize),
+              TEXT_SIZES.map((n): [string, string] => [String(n), n === 100 ? "100% (normal)" : `${n}%`]),
+              (v) => look({ textSize: Number(v) }),
+            ),
+          ],
+        },
+        {
+          title: "Messages",
+          items: [
+            {
+              words: "font reading message text typeface",
+              view: () => (
+                <FontPick
+                  label="Font for reading"
+                  aside="Used where a message does not choose its own font."
+                  standard="The system's"
+                  value={appearance().readingFont}
+                  change={(readingFont) => look({ readingFont })}
+                />
+              ),
+            },
+            select(
+              "reading message text size font size",
+              "Text size in messages",
+              "For reading and for writing.",
+              () => String(appearance().readingSize),
+              READING_SIZES.map((n): [string, string] => [String(n), n === 14 ? "14 (normal)" : String(n)]),
+              (v) => look({ readingSize: Number(v) }),
+            ),
+            {
+              words: "font writing composing message text typeface",
+              view: () => (
+                <FontPick
+                  label="Font for writing"
+                  aside="What you see while writing. Messages are sent as plain text, so the recipient's own font is used at their end."
+                  standard="Same as for reading"
+                  value={appearance().writingFont}
+                  change={(writingFont) => look({ writingFont })}
+                />
+              ),
+            },
+            {
+              words: "sample preview font reading",
+              view: () => (
+                <p class="reading-sample" aria-label="Sample of message text">
+                  This is how the text of a message looks. The quick brown fox jumps over the lazy dog: 0123456789.
                 </p>
-              </Show>
-              <button type="submit" disabled={!passwordSet() && !next()}>
-                {passwordSet() ? (next() ? "Change password" : "Remove password") : "Set password"}
-              </button>
-            </form>
+              ),
+            },
+          ],
+        },
+        {
+          items: [
+            {
+              words: "reset appearance defaults colour font size",
+              view: () => (
+                <div class="setting-line">
+                  <span>Put the appearance back as it came</span>
+                  <button onClick={() => look(DEFAULT_APPEARANCE)}>Reset appearance</button>
+                </div>
+              ),
+            },
+          ],
+        },
+      ],
+    },
+    {
+      id: "protection",
+      title: "Protection",
+      groups: [
+        {
+          title: "Warnings and checks",
+          items: PROTECTION.map(
+            (s): Item => ({
+              words: `${s.label} ${s.hint} protection`,
+              view: () => (
+                <Switch
+                  on={protection()[s.key]}
+                  label={s.label}
+                  hint={s.hint}
+                  change={(on) => changeProtection({ ...protection(), [s.key]: on })}
+                />
+              ),
+            }),
           ),
+        },
+        {
+          title: "Senders",
+          items: [
+            list("allowImagesFrom", "Senders whose pictures are loaded", "None. Add one from a message that has pictures.", "Remove"),
+            list("blockedSenders", "Blocked senders", "None. A blocked sender's mail goes to the junk folder.", "Unblock"),
+          ],
+        },
+        {
+          title: "Settings password",
+          items: [
+            {
+              words: "settings password require protect lock",
+              view: () => (
+                <form onSubmit={setPassword}>
+                  <p class="panel-hint flush">
+                    With a password set, no setting can be changed (other than how Outpost looks), no account removed
+                    and no warning overridden without it. It stops someone at the keyboard being talked into switching
+                    protection off. It is not a defence against someone who can change files on this computer.
+                  </p>
+                  <Show when={passwordSet()}>
+                    <label>
+                      Current password
+                      <input type="password" autocomplete="off" value={current()} onInput={(e) => setCurrent(e.currentTarget.value)} />
+                    </label>
+                  </Show>
+                  <div class="panel-row">
+                    <label class="grow">
+                      {passwordSet() ? "New password (empty removes it)" : "Password"}
+                      <input type="password" autocomplete="new-password" value={next()} onInput={(e) => setNext(e.currentTarget.value)} />
+                    </label>
+                    <label class="grow">
+                      The same again
+                      <input type="password" autocomplete="new-password" value={repeat()} onInput={(e) => setRepeat(e.currentTarget.value)} />
+                    </label>
+                  </div>
+                  <Show when={passwordNote()}>
+                    <p class="panel-note" role="status">
+                      {passwordNote()}
+                    </p>
+                  </Show>
+                  <button type="submit" disabled={!passwordSet() && !next()}>
+                    {passwordSet() ? (next() ? "Change password" : "Remove password") : "Set password"}
+                  </button>
+                </form>
+              ),
+            },
+          ],
         },
       ],
     },
     ...props.accounts
       .filter((a) => a.host)
-      .map(
-        (account): Section => ({
-          title: `Mail account: ${account.username}`,
-          items: accountItems(account, props.onAccountsChanged, setNote, props.onPassword),
-        }),
-      ),
-    ...davAccounts().map(
-      (account): Section => ({ title: `Calendar and contacts: ${account.username}`, items: davItems(account, setNote) }),
-    ),
+      .map((account): Page => {
+        const items = accountItems(account, props.onAccountsChanged, setNote, props.onPassword);
+        return {
+          id: `mail:${account.id}`,
+          title: account.username,
+          under: "Mail accounts",
+          groups: [
+            { title: "Incoming mail", items: items.slice(0, 2) },
+            { title: "Sending and identity", items: items.slice(2, 3) },
+            { title: "Signature", items: items.slice(3, 4) },
+            { title: "Sender checks", items: items.slice(4, 5) },
+            { title: "Remove", items: items.slice(5) },
+          ],
+        };
+      }),
     {
-      title: "Calendar and contacts accounts",
-      items: [{ words: "add calendar contacts account caldav carddav nextcloud tasks address book", view: () => <AddDav /> }],
-    },
-    {
-      title: "Mail accounts",
-      items: [
+      id: "mail:add",
+      title: "Add a mail account",
+      under: "Mail accounts",
+      groups: [
         {
-          words: "add mail account new mailbox imap",
-          view: () => (
-            <div class="setting-line">
-              <span>Add a mail account</span>
-              <button onClick={props.onAddAccount}>Add account</button>
-            </div>
-          ),
+          items: [
+            {
+              words: "add mail account new mailbox imap",
+              view: () => (
+                <div class="setting-line">
+                  <span>
+                    Add a mail account
+                    <span class="setting-aside">Any mailbox that offers IMAP. Gmail and similar need an app password.</span>
+                  </span>
+                  <button onClick={props.onAddAccount}>Add account</button>
+                </div>
+              ),
+            },
+          ],
         },
       ],
     },
+    ...davAccounts().map((account): Page => {
+      const items = davItems(account, setNote);
+      const first = items.findIndex((i) => i.words.includes(" colour color show sync"));
+      const last = items.length - 1;
+      const split = first < 0 ? last : first;
+      return {
+        id: `dav:${account.id}`,
+        title: account.username,
+        under: "Calendar and contacts",
+        groups: [
+          { title: "Connection", items: items.slice(0, split) },
+          { title: "Calendars, task lists and address books", items: items.slice(split, last) },
+          { title: "Remove", items: items.slice(last) },
+        ].filter((g) => g.items.length > 0),
+      };
+    }),
     {
-      title: "Keyboard shortcuts",
-      items: SHORTCUTS.map(
-        (s): Item => ({
-          words: `${s.label} ${s.keys} keyboard shortcut key`,
-          view: () => (
-            <div class="setting-line shortcut">
-              <span>{s.label}</span>
-              <kbd>{s.keys}</kbd>
-            </div>
-          ),
-        }),
-      ),
+      id: "dav:add",
+      title: "Add an account",
+      under: "Calendar and contacts",
+      groups: [
+        { items: [{ words: "add calendar contacts account caldav carddav nextcloud tasks address book", view: () => <AddDav /> }] },
+      ],
     },
     {
-      title: "About",
-      items: [
+      id: "shortcuts",
+      title: "Keyboard shortcuts",
+      groups: SHORTCUT_GROUPS.map((g) => ({
+        title: g.title,
+        tight: true,
+        items: SHORTCUTS.filter((s) => g.ids.includes(s.id)).map(
+          (s): Item => ({
+            words: `${s.label} ${s.keys} keyboard shortcut key`,
+            view: () => (
+              <div class="setting-line shortcut">
+                <span>{s.label}</span>
+                <kbd>{s.keys}</kbd>
+              </div>
+            ),
+          }),
+        ),
+      })),
+    },
+    {
+      id: "about",
+      title: "About and updates",
+      groups: [
         {
-          words: "about version licence license outpost",
-          view: () => (
-            <p class="panel-hint flush">
-              Outpost Mail, core {props.coreVersion}. Outpost's own code is released under the Unlicense. It sends
-              nothing about you or your mail to anyone: it talks only to your mail servers, and to DNS when checking a
-              signature.
-            </p>
-          ),
+          title: "Updates",
+          items: [
+            generalSwitch(
+              "checkForUpdates",
+              "Check for a new version once a day",
+              "Asks github.com for the latest release of Outpost. Nothing about you or your mail is sent; GitHub sees your internet address, as any website you visit does. A new version is announced, never installed for you.",
+            ),
+            {
+              words: "update check now version new release download",
+              view: () => <UpdateLine version={props.coreVersion} />,
+            },
+          ],
+        },
+        {
+          title: "About",
+          items: [
+            {
+              words: "about version licence license outpost privacy",
+              view: () => (
+                <p class="panel-hint flush">
+                  Outpost Mail {props.coreVersion}. Outpost's own code is released under the Unlicense. It has no
+                  telemetry: it talks to your mail and calendar servers, to DNS when checking a signature, and to
+                  github.com when checking for a new version.
+                </p>
+              ),
+            },
+            {
+              words: "log file troubleshooting problem report diagnostics",
+              view: () => (
+                <div class="setting-line">
+                  <span>
+                    Log
+                    <span class="setting-aside">
+                      What Outpost did and what went wrong, kept on this computer for troubleshooting. It names
+                      folders and servers; it never contains passwords or the text of mail.
+                    </span>
+                  </span>
+                  <button onClick={() => void core.revealLog().catch((e) => setNote(errorText(e)))}>Show the log file</button>
+                </div>
+              ),
+            },
+          ],
         },
       ],
     },
   ]);
 
+  const words = () => query().toLowerCase().split(/\s+/).filter(Boolean);
   const matches = (item: Item) => {
-    const words = query().toLowerCase().split(/\s+/).filter(Boolean);
     const text = item.words.toLowerCase();
-    return words.every((w) => text.includes(w));
+    return words().every((w) => text.includes(w));
   };
-  const shown = createMemo(() =>
-    sections()
-      .map((section) => ({ title: section.title, items: section.items.filter(matches) }))
-      .filter((section) => section.items.length > 0),
+  const searching = () => words().length > 0;
+  const [chosen, setChosen] = createSignal(props.page ?? "general");
+  // "mail:" opens the first mail account's section, whichever that is.
+  const page = () => pages().find((p) => p.id === chosen()) ?? pages().find((p) => p.id.startsWith(chosen())) ?? pages()[0]!;
+  /** While searching: every page that has a match, cut down to its matches. */
+  const found = createMemo(() =>
+    pages()
+      .map((p) => ({
+        ...p,
+        groups: p.groups.map((g) => ({ ...g, items: g.items.filter(matches) })).filter((g) => g.items.length > 0),
+      }))
+      .filter((p) => p.groups.length > 0),
   );
+  const shown = () => (searching() ? found() : [page()]);
+  const navGroups = createMemo(() => {
+    const out: { heading: string; pages: Page[] }[] = [];
+    for (const p of pages()) {
+      const heading = p.under ?? "";
+      const lastGroup = out[out.length - 1];
+      if (lastGroup && lastGroup.heading === heading) lastGroup.pages.push(p);
+      else out.push({ heading, pages: [p] });
+    }
+    return out;
+  });
+  let body: HTMLDivElement | undefined;
 
   return (
     <div class="settings">
@@ -766,8 +1106,8 @@ export function Settings(props: {
         <input
           type="search"
           class="settings-search"
-          placeholder="Search settings"
-          aria-label="Search settings"
+          placeholder="Search all settings"
+          aria-label="Search all settings"
           ref={(el) => setTimeout(() => el.focus())}
           value={query()}
           onInput={(e) => setQuery(e.currentTarget.value)}
@@ -776,27 +1116,187 @@ export function Settings(props: {
           Close
         </button>
       </header>
-      <Show when={passwordSet()}>
-        <p class="panel-note">Changing a setting needs the settings password.</p>
-      </Show>
-      <Show when={note()}>
-        <p class="panel-note" role="status">
-          {note()}
-        </p>
-      </Show>
-      <div class="settings-body panel">
-        <For each={shown()}>
-          {(section) => (
-            <section>
-              <h2>{section.title}</h2>
-              <For each={section.items}>{(item) => <div class="setting">{item.view()}</div>}</For>
-            </section>
-          )}
-        </For>
-        <Show when={shown().length === 0}>
-          <p class="panel-note">No setting matches "{query()}".</p>
-        </Show>
+      <div class="settings-main">
+        <nav class="settings-nav" aria-label="Settings sections">
+          <For each={navGroups()}>
+            {(group) => (
+              <>
+                <Show when={group.heading}>
+                  <div class="settings-nav-heading">{group.heading}</div>
+                </Show>
+                <For each={group.pages}>
+                  {(p) => (
+                    <button
+                      classList={{
+                        chosen: !searching() && page().id === p.id,
+                        dim: searching() && !found().some((f) => f.id === p.id),
+                      }}
+                      aria-current={!searching() && page().id === p.id ? "page" : undefined}
+                      title={p.title}
+                      onClick={() => {
+                        setQuery("");
+                        setChosen(p.id);
+                        body?.scrollTo(0, 0);
+                      }}
+                    >
+                      {p.title}
+                    </button>
+                  )}
+                </For>
+              </>
+            )}
+          </For>
+        </nav>
+        <div class="settings-body panel" ref={body}>
+          <Show when={passwordSet()}>
+            <p class="panel-note">Changing a setting needs the settings password. How Outpost looks can be changed without it.</p>
+          </Show>
+          <Show when={note()}>
+            <p class="panel-note" role="status">
+              {note()}
+            </p>
+          </Show>
+          <For each={shown()}>
+            {(p) => (
+              <section class="settings-page">
+                <h2>{p.under ? `${p.under}: ${p.title}` : p.title}</h2>
+                <For each={p.groups}>
+                  {(g) => (
+                    <div class="setting-group">
+                      <Show when={g.title}>
+                        <h3>{g.title}</h3>
+                      </Show>
+                      <div class="setting-card" classList={{ tight: g.tight }}>
+                        <For each={g.items}>{(item) => <div class="setting">{item.view()}</div>}</For>
+                      </div>
+                    </div>
+                  )}
+                </For>
+              </section>
+            )}
+          </For>
+          <Show when={searching() && found().length === 0}>
+            <p class="panel-note">No setting matches "{query()}".</p>
+          </Show>
+        </div>
       </div>
+    </div>
+  );
+}
+
+const SHORTCUT_GROUPS: { title: string; ids: string[] }[] = [
+  { title: "Writing", ids: ["new", "reply", "replyAll", "forward", "send"] },
+  { title: "Messages", ids: ["delete", "archive", "flag", "read", "unread", "selectAll", "up", "extend", "print"] },
+  { title: "Getting around", ids: ["mail", "calendar", "people", "tasks", "search", "sync", "settings", "close"] },
+];
+
+/** Choosing a font: the ones this computer has, or any other by name. */
+function FontPick(props: { label: string; aside: string; standard: string; value: string; change: (font: string) => void }) {
+  const fonts = () => {
+    const all = installedFonts();
+    return props.value && !all.includes(props.value) ? [props.value, ...all] : all;
+  };
+  const [other, setOther] = createSignal<string>();
+  const [missing, setMissing] = createSignal(false);
+  return (
+    <>
+      <label class="setting-line">
+        <span>
+          {props.label}
+          <span class="setting-aside">{props.aside}</span>
+        </span>
+        <select
+          value={other() !== undefined ? "\u0000other" : props.value}
+          style={{ "font-family": props.value ? `"${props.value}", var(--font)` : undefined }}
+          onChange={(e) => {
+            const value = e.currentTarget.value;
+            setMissing(false);
+            if (value === "\u0000other") setOther("");
+            else {
+              setOther(undefined);
+              props.change(value);
+            }
+          }}
+        >
+          <option value="">{props.standard}</option>
+          <For each={fonts()}>{(f) => <option value={f} style={{ "font-family": `"${f}"` }}>{f}</option>}</For>
+          <option value={"\u0000other"}>Another font…</option>
+        </select>
+      </label>
+      <Show when={other() !== undefined}>
+        <form
+          class="setting-line font-other"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const name = (other() ?? "").trim();
+            if (!name) return;
+            if (!fontInstalled(name)) {
+              setMissing(true);
+              return;
+            }
+            setOther(undefined);
+            props.change(name);
+          }}
+        >
+          <input
+            type="text"
+            class="grow"
+            spellcheck={false}
+            placeholder="The font's name, as other programs list it"
+            aria-label={`${props.label}: name of another font`}
+            value={other()}
+            onInput={(e) => {
+              setOther(e.currentTarget.value);
+              setMissing(false);
+            }}
+          />
+          <button type="submit">Use it</button>
+        </form>
+        <Show when={missing()}>
+          <p class="panel-hint">This computer does not seem to have a font of that name.</p>
+        </Show>
+      </Show>
+    </>
+  );
+}
+
+/** What the last check for a new version found, and a button to check now. */
+function UpdateLine(props: { version: string }) {
+  const [checking, setChecking] = createSignal(false);
+  const [problem, setProblem] = createSignal("");
+  const check = () => {
+    setChecking(true);
+    setProblem("");
+    void checkForUpdate(true)
+      .catch((e) => setProblem(errorText(e)))
+      .finally(() => setChecking(false));
+  };
+  return (
+    <div class="setting-line">
+      <span>
+        <Show when={update()} fallback={<>This is version {props.version}.</>}>
+          {(u) => (
+            <>
+              Version {u().version} is out; this is {props.version}.
+            </>
+          )}
+        </Show>
+        <span class="setting-aside">
+          {problem()
+            ? `Could not check: ${problem()}`
+            : update()
+              ? "Download the installer from the release page and run it; your mail and settings stay."
+              : updateChecked()
+                ? "No newer version has been released."
+                : "Not checked yet."}
+        </span>
+      </span>
+      <span class="setting-buttons">
+        <Show when={update()}>{(u) => <button onClick={() => void core.openLink(u().url)}>Open the release page</button>}</Show>
+        <button disabled={checking()} onClick={check}>
+          {checking() ? "Checking…" : "Check now"}
+        </button>
+      </span>
     </div>
   );
 }

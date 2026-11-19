@@ -209,6 +209,17 @@ pub enum Command {
         #[serde(default)]
         password: Option<Secret>,
     },
+    /// What is known about a newer version. With `force`, or if the last
+    /// answer is more than a day old and checking is switched on, GitHub is
+    /// asked and [`Event::UpdateChecked`] follows.
+    CheckForUpdate {
+        #[serde(default)]
+        force: bool,
+    },
+    /// How the app looks.
+    GetAppearance,
+    /// Changes how the app looks. Never needs the settings password.
+    SetAppearance { appearance: crate::settings::Appearance },
     /// Changes where an account's mail is fetched from, and its signature.
     /// The user name cannot be changed: that would be a different mailbox.
     /// `password` is the settings password, needed if one is set.
@@ -358,6 +369,17 @@ pub enum Response {
     General {
         general: crate::settings::General,
     },
+    Appearance {
+        appearance: crate::settings::Appearance,
+    },
+    Update {
+        /// A version newer than this one, as far as is known.
+        newer: Option<crate::updates::Newer>,
+        /// GitHub has been asked at least once.
+        checked: bool,
+        /// It is being asked now; an event follows.
+        checking: bool,
+    },
     Protection {
         protection: crate::settings::Protection,
         /// A password is needed to change these or to override a warning.
@@ -443,6 +465,12 @@ pub enum Event {
     },
     /// `AddAccount` failed. Nothing was saved.
     AccountSetupFailed { error: String },
+    /// A check for a new version, started by `CheckForUpdate`, finished.
+    UpdateChecked {
+        newer: Option<crate::updates::Newer>,
+        /// Why GitHub could not be asked, if it could not.
+        error: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -871,6 +899,8 @@ pub enum ErrorCode {
     UnknownMessage,
     /// The command cannot be carried out as things stand.
     NotPossible,
+    /// Another copy of the app has this data folder open.
+    AlreadyRunning,
     /// A password guards this and the one given is missing or wrong.
     WrongPassword,
     Internal,

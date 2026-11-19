@@ -37,6 +37,8 @@ pub struct General {
     pub conversations: bool,
     /// How many lines of each message's text the list shows: 0 to 3.
     pub preview_lines: u8,
+    /// Ask GitHub once a day whether a newer version has been released.
+    pub check_for_updates: bool,
 }
 
 impl Default for General {
@@ -48,6 +50,7 @@ impl Default for General {
             undo_send_seconds: 10,
             conversations: true,
             preview_lines: 3,
+            check_for_updates: true,
         }
     }
 }
@@ -58,6 +61,75 @@ impl General {
         self.preview_lines = self.preview_lines.min(3);
         self
     }
+}
+
+/// The colour schemes there are. The first is the default.
+pub const SCHEMES: &[&str] = &["system", "light", "dark", "paper", "slate", "contrast"];
+/// The accent colours there are. The first is the default.
+pub const ACCENTS: &[&str] = &["blue", "teal", "green", "purple", "rose", "orange", "graphite"];
+
+/// How the app looks. Unlike the other settings these are not guarded by
+/// the settings password: making the text larger weakens nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Appearance {
+    /// One of [`SCHEMES`]. "system" follows the desktop's light or dark.
+    pub scheme: String,
+    /// One of [`ACCENTS`].
+    pub accent: String,
+    /// The font of the interface. Empty is the built-in one.
+    pub font: String,
+    /// The size of everything in the window, in percent: 80 to 200.
+    pub text_size: u16,
+    /// The font messages are read in, where a message does not choose its
+    /// own. Empty is the system's.
+    pub reading_font: String,
+    /// The size of message text, in pixels at 100%: 11 to 28.
+    pub reading_size: u8,
+    /// The font messages are written in. Empty is the reading font.
+    pub writing_font: String,
+}
+
+impl Default for Appearance {
+    fn default() -> Self {
+        Appearance {
+            scheme: SCHEMES[0].into(),
+            accent: ACCENTS[0].into(),
+            font: String::new(),
+            text_size: 100,
+            reading_font: String::new(),
+            reading_size: 14,
+            writing_font: String::new(),
+        }
+    }
+}
+
+impl Appearance {
+    fn tidy(mut self) -> Appearance {
+        if !SCHEMES.contains(&self.scheme.as_str()) {
+            self.scheme = SCHEMES[0].into();
+        }
+        if !ACCENTS.contains(&self.accent.as_str()) {
+            self.accent = ACCENTS[0].into();
+        }
+        self.font = font_name(&self.font);
+        self.reading_font = font_name(&self.reading_font);
+        self.writing_font = font_name(&self.writing_font);
+        self.text_size = self.text_size.clamp(80, 200);
+        self.reading_size = self.reading_size.clamp(11, 28);
+        self
+    }
+}
+
+/// A font's name with nothing in it but what a name needs. The name ends up
+/// inside a style sheet, so quotes, semicolons and the like must not survive.
+fn font_name(name: &str) -> String {
+    let clean: String = name
+        .chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.'))
+        .take(64)
+        .collect();
+    clean.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The protection settings. Everything is on unless switched off.
@@ -132,6 +204,7 @@ fn listed(list: &[String], address: &str) -> bool {
 #[serde(rename_all = "camelCase", default)]
 struct Stored {
     general: General,
+    appearance: Appearance,
     protection: Protection,
     password: Option<PasswordHash>,
 }
@@ -184,6 +257,15 @@ impl Settings {
         self.change(password, |stored| stored.general = general.tidy())
     }
 
+    pub fn appearance(&self) -> Appearance {
+        self.stored.lock().unwrap().appearance.clone()
+    }
+
+    /// Needs no password: see [`Appearance`].
+    pub fn set_appearance(&self, appearance: Appearance) -> Result<(), Denied> {
+        self.write(|stored| stored.appearance = appearance.tidy())
+    }
+
     pub fn password_set(&self) -> bool {
         self.stored.lock().unwrap().password.is_some()
     }
@@ -213,6 +295,10 @@ impl Settings {
         if !self.allows(password) {
             return Err(Denied::WrongPassword);
         }
+        self.write(apply)
+    }
+
+    fn write(&self, apply: impl FnOnce(&mut Stored)) -> Result<(), Denied> {
         let mut stored = self.stored.lock().unwrap();
         let mut next = stored.clone();
         apply(&mut next);
@@ -327,6 +413,34 @@ mod tests {
         again.set_password(None, Some("sesame")).unwrap();
         assert_eq!(again.set_general(General::default(), None), Err(Denied::WrongPassword));
         again.set_general(General::default(), Some("sesame")).unwrap();
+    }
+
+    #[test]
+    fn appearance_is_kept_tidied_and_needs_no_password() {
+        let dir = temp();
+        let settings = Settings::load(Some(&dir));
+        assert_eq!(settings.appearance(), Appearance::default());
+        settings.set_password(None, Some("sesame")).unwrap();
+        let wanted = Appearance {
+            scheme: "dark".into(),
+            accent: "no such colour".into(),
+            font: "  Segoe   UI\"; } body { display: none ".into(),
+            text_size: 900,
+            reading_font: "Georgia".into(),
+            reading_size: 2,
+            writing_font: String::new(),
+        };
+        settings.set_appearance(wanted).unwrap();
+        let again = Settings::load(Some(&dir)).appearance();
+        assert_eq!((again.scheme.as_str(), again.accent.as_str()), ("dark", "blue"));
+        assert_eq!(again.font, "Segoe UI body display none");
+        assert_eq!((again.text_size, again.reading_size), (200, 11));
+        assert_eq!(again.reading_font, "Georgia");
+        // An unknown scheme in the file falls back rather than failing.
+        std::fs::write(dir.join(FILE), b"{\"appearance\": {\"scheme\": \"neon\", \"textSize\": 120}}").unwrap();
+        let odd = Settings::load(Some(&dir));
+        odd.set_appearance(odd.appearance()).unwrap();
+        assert_eq!((odd.appearance().scheme.as_str(), odd.appearance().text_size), ("system", 120));
     }
 
     #[test]

@@ -7,6 +7,178 @@ started.
 Status words: **Decided** (owner agreed), **Proposal** (default in use, owner
 has not reviewed), **Finding** (a test result).
 
+## 2026-11-18 · Milestone 9: hardening and release (in progress)
+
+Started on the owner's instruction, on Fable 5.2 as the handoff doc asks.
+**Proposals** unless marked otherwise. The milestone is **not closed**: its
+bar includes a week of daily use by the owner and the owner accepting the
+written-down gaps, and no release has been published.
+
+### Decided (owner, 18 November 2026): colour schemes, fonts and sizes
+
+The owner asked for colour schemes and for the fonts and font sizes to be
+adjustable. The handoff doc had a dark theme as "later"; this brings it
+forward. What was built:
+
+- **Six colour schemes**: Match the system (light or dark, following the
+  desktop, and changing with it), Light, Dark, Paper (warm, low-glare),
+  Slate (dark with a blue cast) and High contrast.
+- **Seven accent colours**, each with a lighter shade for the dark schemes.
+- **The window's font**: the built-in Inter, or any font on the computer.
+  The list offers the well-known fonts this computer actually has; any other
+  can be typed by name.
+- **Size**, 80% to 200%. *This zooms the whole window* rather than changing
+  only the letters. The message list works out every row's height from
+  fixed measurements, and zooming keeps all of them in step; changing only
+  the font size would have meant re-deriving each one. The owner asked for
+  "font sizes"; if separate control of text and spacing is wanted, that is
+  a later change.
+- **Messages**: the font and text size for reading, and the font for
+  writing. These are separate from the window's.
+
+Every colour in the style sheet is now a named value, so a scheme is one
+block that sets them. (Proposal) **Formatted (HTML) messages are always shown
+on a light page**, whatever the scheme: mail sets its colours piecemeal, dark
+text with no background being the commonest case, and recolouring it cannot
+be done reliably. Plain-text messages and the conversation view follow the
+scheme.
+
+(Proposal) **Appearance is not guarded by the settings password.** The
+password exists so that someone cannot be talked into switching protection
+off; making the text larger weakens nothing, and the people the password
+protects are the ones likeliest to want larger text.
+
+A font's name ends up inside a style sheet, so the core strips everything
+from it but letters, digits, spaces and `. - _`.
+
+### Decided (owner, 18 November 2026): the settings page is split into sections
+
+The owner found the one long page "a giant wall". Settings now has a list
+of sections down the left (General, Appearance, Protection, each mail
+account, each calendar account, Keyboard shortcuts, About and updates), and
+shows one section at a time, its settings grouped on cards under small
+headings. It covers the list and reading pane while open, for the width.
+
+The handoff doc's bar was "one searchable window with nothing nested". Both
+halves still hold: the search box looks through every section at once and
+shows whatever matches, and no section opens another. What changed is that
+the page is no longer all visible at once.
+
+### One copy of the app at a time
+
+Two copies syncing the same mail would each undo the other's work. Two
+defences:
+
+- The core takes a lock on `outpost.lock` in the data folder and refuses to
+  start without it (`AlreadyRunning`). The operating system releases the
+  lock if the app dies, so a crash never leaves the folder locked.
+- The shell (`tauri-plugin-single-instance`) notices the second start
+  first, and brings the running window forward instead. A copy pointed at
+  its own data folder with `OUTPOST_DATA` is deliberately separate.
+
+**Finding:** adding the lock showed that dropping the core did not stop its
+background work: the sync tasks held the core themselves, so it was never
+actually dropped, and in the tests an "old" core carried on syncing beside
+its replacement. The app's handle on the core now owns the running of it:
+when the last such handle goes, every sync is told to stop and the data
+folder is released, whatever background work still holds.
+
+### A damaged index is set aside and rebuilt
+
+**Finding:** an index file that was not a readable database (overwritten,
+cut short) stopped the whole app from starting. The index holds nothing the
+mail files and the server cannot restore, so it is now renamed to
+`index.sqlite.damaged`, an empty one takes its place, and the mail is read
+back in, as after an upgrade. Not covered: damage that only shows in the
+middle of a query, later. Checking the whole file at every start would take
+minutes on a large mailbox.
+
+Lost with a damaged index, as with an upgrade: changes made offline and not
+yet sent to the server, and which messages were marked "I trust this".
+
+If the core cannot start at all, the app now says why in a message box
+instead of simply not appearing.
+
+### A local log
+
+`<data>/log/outpost.log`, one line per event, at most three files of 1 MB.
+In it: starts and stops, each account's state when it changes (offline and
+why, sign-in refused, up to date again), update checks, and where a crash
+happened. Never in it: passwords, or the subject, sender or text of any
+message. It does name accounts and servers. Settings > About has a button
+that shows the file. The handoff doc's "sync status panel" is still the
+status bar.
+
+### Update check
+
+As the handoff doc decided: check GitHub releases and notify; the user
+installs by hand. Details in `docs/release.md`. (Proposal) It is **on by
+default**, with a switch in Settings that says exactly what is sent. The
+README's and About page's "talks only to your mail servers" now names
+GitHub too.
+
+### Installers and release
+
+Built by a GitHub workflow from a version tag, onto a **draft** release that
+a person publishes. Not code-signed, per the handoff doc. The Windows
+installer is per-user. See `docs/release.md` for what each file does and
+what has not been verified.
+
+The version is now 0.1.0. **No tag has been pushed and nothing has been
+released**: that waits for the owner's week of use.
+
+### Default mail program
+
+Built with the installers, as milestone 8 left it: the installers register
+Outpost for email links, a button in Settings starts the system's way of
+choosing it, and a `mailto:` address opens a new message. Only recipients,
+subject and text are taken from the address.
+
+### Licence notices ship with the app
+
+`tools/license-notices.py` gathers the licence texts of all 475 packages
+linked into the app (Windows and Linux together) into
+`THIRD-PARTY-NOTICES.txt`, which the release build installs with the app and
+attaches to the release. Still nothing copyleft except six indirect MPL-2.0
+packages, used unmodified. `cargo about` was the intended tool; the script
+does the same job with what a build already has.
+
+### Performance at a million messages
+
+See `docs/performance-results.md` for this milestone's run.
+
+### Gaps, written down for the owner to accept or not
+
+Milestone 9 is done "when the targets are met or the gaps are written down
+and accepted by the owner". The gaps:
+
+1. **No installer has been run.** Built, contents inspected, never
+   installed. Windows registry entries, the uninstaller and default-app
+   registration are untested.
+2. **Not seen by anyone on a real desktop:** the tray icon, notifications,
+   start minimised, close to tray, printing, the start-failure message box,
+   bringing the window forward on a second start, and opening from a
+   `mailto:` link in another program. The automated run cannot see these.
+3. **A week of daily use** has not happened.
+4. **OAuth sign-in** (milestone 7) is parked. Gmail works with an app
+   password (the owner confirmed this on 18 November 2026 with a personal
+   account); Microsoft 365 accounts that only allow OAuth cannot be added.
+5. **Features the handoff doc lists for version 1 that are not built:**
+   rich-text composing, drafts saved as you type, several identities per
+   account, per-folder views and columns, Favorites and All inboxes, sync
+   choices (headers only, skip large attachments, exclude a folder), import
+   from Maildir and mbox, a sync status panel, editable shortcuts.
+6. **Changing and sending mail on real providers** has been used by the
+   owner but not systematically tested; the automated tests run against a
+   local Dovecot.
+7. **Index damage found mid-query** is not recovered from automatically.
+8. **macOS** is not built.
+
+### Dependencies added
+
+- `tauri-plugin-single-instance`, `tauri-plugin-dialog` (both MIT or
+  Apache-2.0). The dialog plugin brings `rfd` (MIT) and `tauri-plugin-fs`.
+
 ## 2026-11-18 · Phase two: calendar, tasks and contacts
 
 **Started early on the owner's instruction (18 November 2026).** The handoff

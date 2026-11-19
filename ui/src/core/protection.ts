@@ -28,6 +28,7 @@ const [general, setGeneral] = createSignal<General>({
   undoSendSeconds: 10,
   conversations: true,
   previewLines: 3,
+  checkForUpdates: true,
 });
 const [protection, setProtection] = createSignal<Protection>(DEFAULTS);
 const [passwordSet, setPasswordSet] = createSignal(false);

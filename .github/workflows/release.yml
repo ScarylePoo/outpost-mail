@@ -1,0 +1,115 @@
+name: Release
+
+# Builds the installers. Pushing a tag like v0.1.0 also puts them on a
+# DRAFT GitHub release, which a person then reads through and publishes by
+# hand (docs/release.md). Run by hand from the Actions page, it only builds
+# them and keeps them as a download on the run, which is how to try the
+# installers before there is anything to release.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  installers:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The oldest Ubuntu still offered: a program built here also runs
+          # on newer systems, and not the other way round.
+          - os: ubuntu-22.04
+            bundles: deb,rpm,appimage
+          - os: windows-latest
+            bundles: nsis
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The tag matches the version in the source
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          version=$(node -p "require('./crates/shell-tauri/tauri.conf.json').version")
+          cargo_version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "v$version" != "$GITHUB_REF_NAME" ] || [ "$version" != "$cargo_version" ]; then
+            echo "Tag $GITHUB_REF_NAME, tauri.conf.json $version, Cargo.toml $cargo_version: these must agree."
+            exit 1
+          fi
+
+      - name: Linux build libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev patchelf file rpm
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # Most of the libraries ask that their licence notice travels with
+      # programs built from them. The file goes into the installed app and
+      # onto the release.
+      - name: Gather the libraries' licence notices
+        shell: bash
+        run: |
+          py=$(command -v python3 || command -v python)
+          "$py" tools/license-notices.py > crates/shell-tauri/installer/THIRD-PARTY-NOTICES.txt
+          wc -c crates/shell-tauri/installer/THIRD-PARTY-NOTICES.txt
+
+      - name: Build the app and its installers
+        run: npx tauri build --bundles ${{ matrix.bundles }} --config crates/shell-tauri/release.conf.json
+
+      # One folder of files with plain names, whatever the bundler called them.
+      - name: Gather the installers
+        shell: bash
+        run: |
+          version=$(node -p "require('./crates/shell-tauri/tauri.conf.json').version")
+          mkdir out
+          shopt -s nullglob
+          for f in target/release/bundle/nsis/*-setup.exe; do cp "$f" "out/Outpost-Mail-$version-windows-x64-setup.exe"; done
+          for f in target/release/bundle/deb/*.deb; do cp "$f" "out/outpost-mail_${version}_amd64.deb"; done
+          for f in target/release/bundle/rpm/*.rpm; do cp "$f" "out/outpost-mail-$version.x86_64.rpm"; done
+          for f in target/release/bundle/appimage/*.AppImage; do cp "$f" "out/Outpost-Mail-$version-x86_64.AppImage"; done
+          if [ "$RUNNER_OS" = Linux ]; then cp crates/shell-tauri/installer/THIRD-PARTY-NOTICES.txt out/; fi
+          ls -l out
+          [ -n "$(ls out)" ]
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ runner.os }}
+          path: out/*
+          if-no-files-found: error
+
+  draft-release:
+    needs: installers
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      # The installers are not code-signed, so the checksums are the only
+      # way to tell that a download is the file that was built here.
+      - name: Checksums
+        run: cd out && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Draft the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" out/* \
+            --draft \
+            --title "Outpost Mail ${GITHUB_REF_NAME#v}" \
+            --notes-file docs/release-notes.md

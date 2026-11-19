@@ -38,6 +38,9 @@ export type Command =
     }
   | { type: "getGeneral" }
   | { type: "setGeneral"; general: General; password?: string | null }
+  | { type: "checkForUpdate"; force?: boolean }
+  | { type: "getAppearance" }
+  | { type: "setAppearance"; appearance: Appearance }
   | { type: "updateAccount"; account: FolderId; host: string; port: number; encrypted: boolean; signature: string; password?: string | null }
   | { type: "removeAccount"; account: FolderId; password?: string | null }
   | { type: "exportMessage"; folder: FolderId; id: number }
@@ -222,6 +225,32 @@ export interface General {
   conversations: boolean;
   /** Lines of each message's text in the list: 0 to 3. */
   previewLines: number;
+  /** Ask GitHub once a day whether a newer version is out. */
+  checkForUpdates: boolean;
+}
+
+/** A version newer than the one running. */
+export interface NewerVersion {
+  version: string;
+  /** Its page on GitHub. */
+  url: string;
+}
+
+/** How the app looks. Mirrors `settings::Appearance` in the core. */
+export interface Appearance {
+  /** "system", "light", "dark", "paper", "slate" or "contrast". */
+  scheme: string;
+  accent: string;
+  /** Interface font; empty is the built-in one. */
+  font: string;
+  /** Size of everything in the window, percent. */
+  textSize: number;
+  /** Font messages are read in; empty is the system's. */
+  readingFont: string;
+  /** Size of message text, px at 100%. */
+  readingSize: number;
+  /** Font messages are written in; empty is the reading font. */
+  writingFont: string;
 }
 
 /** The protection settings: each its own switch. */
@@ -406,6 +435,8 @@ export type Response =
   | { type: "davItem"; item: DavItemView }
   | { type: "davSaved"; id: number }
   | { type: "general"; general: General }
+  | { type: "appearance"; appearance: Appearance }
+  | { type: "update"; newer: NewerVersion | null; checked: boolean; checking: boolean }
   | { type: "protection"; protection: Protection; passwordSet: boolean }
   | { type: "attachmentSaved"; path: string; name: string }
   | { type: "draft"; draft: DraftContent }
@@ -428,7 +459,8 @@ export type CoreEvent =
   | { type: "davAccountSetupFailed"; error: string }
   | { type: "davChanged"; account: FolderId }
   | { type: "newMail"; account: FolderId; folder: FolderId; count: number; sender: string; subject: string }
-  | { type: "accountSetupFailed"; error: string };
+  | { type: "accountSetupFailed"; error: string }
+  | { type: "updateChecked"; newer: NewerVersion | null; error: string | null };
 
 export interface CoreError {
   code: "badCommand" | "unknownFolder" | "unknownMessage" | "notPossible" | "wrongPassword" | "internal";
@@ -462,6 +494,9 @@ type ResponseFor = {
   answerInvitation: "accepted";
   getGeneral: "general";
   setGeneral: "general";
+  checkForUpdate: "update";
+  getAppearance: "appearance";
+  setAppearance: "appearance";
   updateAccount: "accepted";
   removeAccount: "accepted";
   exportMessage: "attachmentSaved";
@@ -509,4 +544,14 @@ export interface Transport {
   notify(title: string, body: string): Promise<void>;
   /** Shows the unread count on the tray icon. */
   setUnread(count: number): Promise<void>;
+  /** Calls `listener` with each `mailto:` address the app is started or
+   *  called up with. Returns a function that stops listening. */
+  onMailto(listener: (link: string) => void): () => void;
+  /** Starts the system's way of making Outpost the default mail
+   *  program. Resolves with a sentence saying what happened. */
+  chooseDefaultMailApp(): Promise<string>;
+  /** Shows the log file in the system's file manager. */
+  revealLog(): Promise<void>;
+  /** Scales everything in the window: 1 is normal size. */
+  setZoom(factor: number): Promise<void>;
 }

@@ -198,7 +198,7 @@ impl Core {
             }
             live.running = true;
         }
-        let (core, account) = (self.clone(), account.clone());
+        let (core, account) = (self.background(), account.clone());
         self.inner.runtime.spawn(async move {
             loop {
                 let password = {
@@ -270,7 +270,7 @@ impl Core {
         let dav = Dav::new(url, &config.username, &password);
         dav.discover().await.map_err(|e| e.to_string())?;
         let root = data_dir.join("dav");
-        let core = self.clone();
+        let core = self.background();
         tokio::task::spawn_blocking(move || -> Result<FolderId, String> {
             if core.dav_accounts().iter().any(|a| a.config == config) {
                 return Err("that account has already been added".into());
@@ -311,7 +311,7 @@ impl Core {
                 if config.url.is_empty() || config.username.is_empty() || password.0.is_empty() {
                     return Ok(Err(CoreError::new(ErrorCode::NotPossible, "the address, user name and password are all needed")));
                 }
-                let core = self.clone();
+                let core = self.background();
                 self.inner.runtime.spawn(async move {
                     let event = match core.add_dav_account(data_dir, config, password.0, remember).await {
                         Ok(account) => Event::DavAccountAdded { account },

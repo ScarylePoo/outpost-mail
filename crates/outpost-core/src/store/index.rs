@@ -316,8 +316,35 @@ pub struct Index {
 
 impl Index {
     /// Opens the index at `path`, creating or upgrading it as needed.
+    ///
+    /// A file that is not a readable index (cut short by a power failure,
+    /// overwritten, on a failing disk) is set aside as
+    /// `index.sqlite.damaged` and an empty one takes its place: the index
+    /// holds nothing that the mail files and the server cannot restore, and
+    /// the alternative is an app that will not start.
     pub fn open(path: impl Into<PathBuf>) -> Result<Index> {
         let path = path.into();
+        match Self::open_at(path.clone()) {
+            Err(StoreError::Index(e)) if is_damage(&e) => {
+                let beside = |suffix: &str| {
+                    let mut name = path.clone().into_os_string();
+                    name.push(suffix);
+                    PathBuf::from(name)
+                };
+                let aside = beside(".damaged");
+                let _ = std::fs::remove_file(&aside);
+                std::fs::rename(&path, &aside)?;
+                let _ = std::fs::remove_file(beside("-wal"));
+                let _ = std::fs::remove_file(beside("-shm"));
+                let mut index = Self::open_at(path)?;
+                index.discarded_old = true;
+                Ok(index)
+            }
+            other => other,
+        }
+    }
+
+    fn open_at(path: PathBuf) -> Result<Index> {
         let writer = Connection::open(&path)?;
         configure(&writer)?;
         writer.pragma_update(None, "journal_mode", "WAL")?;
@@ -1088,6 +1115,13 @@ fn configure(conn: &Connection) -> rusqlite::Result<()> {
 
 /// Brings the file to the current schema. Returns true if that meant
 /// throwing away an older index.
+/// Whether an error means the file itself is unusable, as opposed to a
+/// passing problem such as the file being locked.
+fn is_damage(error: &rusqlite::Error) -> bool {
+    use rusqlite::ErrorCode::{DatabaseCorrupt, NotADatabase};
+    matches!(error, rusqlite::Error::SqliteFailure(e, _) if matches!(e.code, DatabaseCorrupt | NotADatabase))
+}
+
 fn migrate(conn: &Connection) -> Result<bool> {
     let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     match version {

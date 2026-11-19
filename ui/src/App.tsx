@@ -17,6 +17,9 @@ import { Reader } from "./reader/Reader";
 import { AddAccount, PasswordPrompt } from "./accounts/AccountPanels";
 import { autoShellTest } from "./autotest";
 import { asking, general, loadProtection, messageActions } from "./core/protection";
+import { loadAppearance } from "./core/appearance";
+import { parseMailto } from "./mailto";
+import { checkForUpdate, update, updateEvent } from "./core/updates";
 import { PasswordAsk, Settings } from "./settings/Settings";
 import { MenuBar, type Menu } from "./MenuBar";
 import { pressed, SHORTCUTS } from "./shortcuts";
@@ -36,7 +39,7 @@ const VIEWS: { id: View; label: string }[] = [
 type Panel =
   | { kind: "none" }
   | { kind: "add" }
-  | { kind: "settings"; find?: string }
+  | { kind: "settings"; find?: string; page?: string }
   | { kind: "password"; account: string }
   | { kind: "compose"; account: string; draft: DraftContent; key: number };
 
@@ -173,6 +176,31 @@ export function App() {
       .catch((e) => setNotice(`Core not responding: ${e?.message ?? e}`));
     void loadAccounts();
     void loadProtection();
+    void loadAppearance();
+    // Once at the start and then a few times a day; the core asks GitHub
+    // at most once a day, and not at all if the setting is off.
+    const askAboutUpdates = () => void checkForUpdate().catch(() => {});
+    askAboutUpdates();
+    const updateTimer = setInterval(askAboutUpdates, 6 * 60 * 60 * 1000);
+    onCleanup(() => clearInterval(updateTimer));
+    // Started (or called up) by an email link somewhere: a new message to
+    // that address, for the user to finish and send or to close.
+    onCleanup(
+      core.onMailto((link) => {
+        const fields = parseMailto(link);
+        if (!fields) return;
+        // At startup the link can arrive before the accounts have loaded.
+        const open = (triesLeft: number) => {
+          const from = writingAccount()?.id ?? accounts().find((a) => a.sending)?.id ?? accounts().find((a) => a.host)?.id;
+          if (from) {
+            setView("mail");
+            compose({ ...EMPTY_DRAFT, ...fields }, from);
+          } else if (triesLeft > 0) setTimeout(() => open(triesLeft - 1), 300);
+          else setNotice(`Add a mail account to write to ${fields.to || "that address"}.`);
+        };
+        open(10);
+      }),
+    );
     void loadDavAccounts();
     // What the reading pane's failed-message view can ask for.
     messageActions.remove = () => void remove();
@@ -189,8 +217,9 @@ export function App() {
       // `?view=calendar` (or people, tasks) opens on that view.
       const wanted = params.get("view");
       if (wanted === "calendar" || wanted === "people" || wanted === "tasks") setView(wanted);
-      if (params.get("panel") === "protection") setPanel({ kind: "settings", find: "protection" });
-      if (params.get("panel") === "settings") setPanel({ kind: "settings", find: params.get("find") ?? "" });
+      if (params.get("panel") === "protection") setPanel({ kind: "settings", page: "protection" });
+      if (params.get("panel") === "settings")
+        setPanel({ kind: "settings", find: params.get("find") ?? "", page: params.get("page") ?? undefined });
       if (params.get("q")) setQuery(params.get("q")!);
     });
 
@@ -242,6 +271,9 @@ export function App() {
           setNotice(event.text);
           break;
         case "accountSetupFailed":
+          break;
+        case "updateChecked":
+          updateEvent(event);
           break;
       }
     });
@@ -617,16 +649,17 @@ export function App() {
       entries: [
         entry("sync", "Check for new mail"),
         null,
-        { label: "Protection settings", run: () => setPanel({ kind: "settings", find: "protection" }) },
-        { label: "Account settings", run: () => setPanel({ kind: "settings", find: "account" }) },
-        { label: "Calendar and contacts accounts", run: () => setPanel({ kind: "settings", find: "calendar account" }) },
+        { label: "Appearance", run: () => setPanel({ kind: "settings", page: "appearance" }) },
+        { label: "Protection settings", run: () => setPanel({ kind: "settings", page: "protection" }) },
+        { label: "Account settings", run: () => setPanel({ kind: "settings", page: "mail:" }) },
+        { label: "Calendar and contacts accounts", run: () => setPanel({ kind: "settings", page: "dav:" }) },
       ],
     },
     {
       title: "Help",
       entries: [
-        { label: "Keyboard shortcuts", run: () => setPanel({ kind: "settings", find: "shortcut" }) },
-        { label: "About Outpost", run: () => setPanel({ kind: "settings", find: "about" }) },
+        { label: "Keyboard shortcuts", run: () => setPanel({ kind: "settings", page: "shortcuts" }) },
+        { label: "About Outpost", run: () => setPanel({ kind: "settings", page: "about" }) },
       ],
     },
   ];
@@ -712,7 +745,7 @@ export function App() {
             fallback={
               <div class="side-hint">
                 <p>No calendar or contacts account yet.</p>
-                <button onClick={() => setPanel({ kind: "settings", find: "calendar account" })}>Add one in Settings</button>
+                <button onClick={() => setPanel({ kind: "settings", page: "dav:" })}>Add one in Settings</button>
               </div>
             }
           >
@@ -723,7 +756,7 @@ export function App() {
                   <div class="account" title={a.url}>
                     <span class="account-name">{a.username}</span>
                     <Show when={a.status.state === "needsPassword" || a.status.state === "signInFailed"}>
-                      <button class="sign-in" onClick={() => setPanel({ kind: "settings", find: "calendar account" })}>
+                      <button class="sign-in" onClick={() => setPanel({ kind: "settings", page: "dav:" })}>
                         Sign in
                       </button>
                     </Show>
@@ -908,7 +941,7 @@ export function App() {
         </Show>
       </main>
 
-      <section class="reading" aria-label="Reading pane">
+      <section class="reading" classList={{ wide: settingsOpen() !== undefined }} aria-label="Reading pane">
         <Switch>
           <Match when={panel().kind === "add"}>
             <AddAccount onDone={accountAdded} onCancel={() => setPanel({ kind: "none" })} />
@@ -919,6 +952,7 @@ export function App() {
                 accounts={accounts()}
                 coreVersion={coreVersion()}
                 find={open.find}
+                page={open.page}
                 onAccountsChanged={() => {
                   void loadAccounts();
                   list?.refresh();
@@ -987,6 +1021,13 @@ export function App() {
           {notice() || statusText(account()?.status)}
         </span>
         <span class="statusbar-right">
+          <Show when={update()}>
+            {(u) => (
+              <button class="update-ready" onClick={() => setPanel({ kind: "settings", page: "about" })}>
+                Version {u().version} is available
+              </button>
+            )}
+          </Show>
           core {coreVersion()} · {core.name}
         </span>
       </footer>

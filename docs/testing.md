@@ -195,7 +195,8 @@ new and unread, a message saved as a file being the message byte for byte,
 an account's server and signature being changed, and an account being
 removed with its files and stored password while the server is untouched.
 
-The app self-test opens Settings, searches it and closes it with Escape.
+The app self-test opens Settings, lists its sections, searches it and
+closes it with Escape.
 
 **By eye, not automated** (nothing in the test run can see these):
 
@@ -207,6 +208,44 @@ The app self-test opens Settings, searches it and closes it with Escape.
 3. Open a message and press Ctrl+P. Only the message should be on the page.
 4. Linux: the tray needs a desktop that shows tray icons, and
    `libayatana-appindicator3`.
+
+## Tests of hardening, appearance and release (milestone 9)
+
+Part of `cargo test`, and needing no server, so they run on Windows too:
+
+- `tests/hardening.rs`: a second core on the same data folder is refused,
+  until the last handle on the first is dropped; an index overwritten with
+  rubbish, and one cut short, are each set aside and the mail read back in;
+  a damaged settings file gives the protective defaults; with update
+  checking off, nothing is asked of GitHub unprompted.
+- `log.rs`: one event is one line, repeats are dropped, and the log never
+  grows past three files of 1 MB.
+- `updates.rs`: versions compare by number; a release's link is used only
+  if it is under this project's releases; an answer is kept for a day.
+- `settings.rs`: appearance is kept, kept in range, needs no password, and
+  a font name cannot carry style-sheet syntax.
+
+The app self-test now also chooses the Slate colour scheme and reports
+that the window took it and the core kept it, sets the size to 125% and
+reports that the window zoomed, and reports whether fonts were found on the
+computer. While it runs, the app makes its daily update check: one request
+to `api.github.com`, the only thing in the test that leaves the machine.
+
+Nothing tests the update check against a live newer release, because there
+is no release. Nothing runs an installer. See `docs/release.md`.
+
+**By eye, not automated:**
+
+1. Settings > Appearance: try each colour scheme. Look at the message list,
+   an open plain-text message, an open formatted message (which stays on a
+   light page), the calendar, and a message that failed its checks.
+2. Change the font and the size; the message list's rows should not clip or
+   leave gaps.
+3. Start Outpost a second time while it is running: the first window should
+   come forward and no second one appear.
+4. After installing with an installer: Settings > General > "Make Outpost
+   the default", then click an email address on a web page. A new message
+   to that address should open in Outpost.
 
 ## The app self-test (milestone 3)
 

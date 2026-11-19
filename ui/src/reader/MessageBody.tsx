@@ -9,6 +9,7 @@
 import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from "solid-js";
 import { core, type FolderId, type MessageView } from "../core";
 import { protection, protectionVersion, saveProtection } from "../core/protection";
+import { appearance, readingFamily } from "../core/appearance";
 import { SenderCheckPanel } from "./SenderCheck";
 import { InvitationCard } from "./InvitationCard";
 
@@ -16,11 +17,16 @@ import { InvitationCard } from "./InvitationCard";
 const framePolicy = (pictures: boolean) =>
   `default-src 'none'; img-src data:${pictures ? " https: http:" : ""}; style-src 'unsafe-inline'`;
 
-const FRAME_STYLE = `
-  html { color-scheme: light; }
+// A formatted message is always shown as its sender laid it out: on a light
+// page, whatever the app's colour scheme. Mail sets its own colours piecemeal
+// (dark text with no background is the commonest case) and recolouring it
+// reliably is not possible. The reading font and size are the default for
+// text the message does not style itself.
+const frameStyle = (dark: boolean) => `
+  html { color-scheme: light; background: #fff; }
   body {
-    margin: 0; padding: 0 0 8px;
-    font: 14px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+    margin: 0; padding: ${dark ? "12px 14px" : "0 0 8px"};
+    font: ${appearance().readingSize}px/1.6 ${readingFamily()};
     color: #1c1f23; background: #fff;
     overflow-wrap: anywhere;
   }
@@ -32,11 +38,12 @@ const FRAME_STYLE = `
 `;
 
 function frameDocument(html: string, pictures: boolean, dimmed: boolean): string {
+  const dark = document.documentElement.dataset.dark === "true";
   return (
     `<!doctype html><html><head><meta charset="utf-8">` +
     `<meta http-equiv="Content-Security-Policy" content="${framePolicy(pictures)}">` +
     `<meta name="referrer" content="no-referrer">` +
-    `<style>${FRAME_STYLE}${dimmed ? "body { opacity: 0.55; }" : ""}</style></head><body>${html}</body></html>`
+    `<style>${frameStyle(dark)}${dimmed ? "body { opacity: 0.55; }" : ""}</style></head><body>${html}</body></html>`
   );
 }
 

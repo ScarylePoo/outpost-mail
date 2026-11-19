@@ -144,6 +144,27 @@ was also compiling the Windows build, and passed in the four runs after it.
 The failure text was not captured. If it shows up again, capture it: a test
 that fails only under load is usually a timing assumption in the test.
 
+**Second sighting of the first one, 19 November 2026 (CI, Linux, run
+44492908144), and a probable cause, not proven.** The same test timed out
+after the same 30 seconds. Two things were changed:
+
+- *The likely cause is the test server.* Dovecot tells a waiting client
+  about new mail when the operating system tells Dovecot the mailbox
+  changed; when that notification is unavailable or missed, Dovecot notices
+  by itself only every `mailbox_idle_check_interval`, which defaults to 30
+  seconds: exactly the test's time limit. CI starts many private Dovecots
+  at once, which is where such notifications run out. The test servers now
+  set that interval to 1 second. This was not confirmed from a CI log (the
+  test deletes its server's log), so if the failure comes back, this
+  explanation was wrong.
+- *A real, narrow gap in the sync engine, found while looking.* Before
+  waiting for push, the engine compares the inbox with where its last sync
+  ended, and syncs if it is behind; to avoid spinning on a server whose
+  numbers never settle, it did that at most once before waiting. Mail
+  arriving in the instant between that one catch-up and the look after it
+  would then wait for the ten-minute poll. It now catches up as many as
+  three times in a row. This is unlikely to be what CI hit.
+
 **Explained and fixed, 19 November 2026:** `an_invitation_is_shown_answered_filed_and_replied_to`
 in `tests/invitations.rs` failed on CI (Linux, run 44486187126) with an
 `unwrap` on `None` at the cancellation step. The test waited for the

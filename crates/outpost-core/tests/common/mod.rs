@@ -94,6 +94,7 @@ instance_name = outpost-test-{port}
 log_path = {d}/dovecot.log
 protocols = imap
 listen = 127.0.0.1
+mailbox_idle_check_interval = 1s
 default_internal_user = {user}
 default_internal_group = {group}
 default_login_user = {user}

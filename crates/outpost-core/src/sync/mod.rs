@@ -710,10 +710,13 @@ async fn connected(
             .into_iter()
             .find(|f| f.remote_name.eq_ignore_ascii_case(b"INBOX"));
         let poll_due = tokio::time::Instant::now() + options.poll_interval;
-        // Set when the inbox was found to have moved on without us and was
-        // synced for that reason, until a real wait has happened: so that a
-        // server whose numbers never settle cannot keep us spinning.
-        let mut caught_up = false;
+        // How many times in a row the inbox was found to have moved on
+        // without us and was synced for that reason, with no real wait in
+        // between. Mail can arrive in the moment between such a sync and
+        // the look that follows it, so one catch-up is not always enough;
+        // but a server whose numbers never settle must not keep us
+        // spinning, so there is a limit.
+        let mut caught_up = 0u8;
         loop {
             stop.check()?;
             let remaining = poll_due.saturating_duration_since(tokio::time::Instant::now());
@@ -744,7 +747,7 @@ async fn connected(
                 // waiting, compare where the inbox is with where our last
                 // sync of it ended.
                 let synced = store.index().remote_folders()?.into_iter().find(|f| f.id == inbox.id).map(|f| f.state);
-                let behind = !caught_up
+                let behind = caught_up < 3
                     && synced.is_some_and(|state| {
                         opened.uid_next.is_some_and(|next| next != state.uid_next)
                             || opened.highest_modseq.is_some_and(|modseq| modseq != state.highest_modseq)
@@ -775,10 +778,10 @@ async fn connected(
                     acted.store(true, std::sync::atomic::Ordering::Relaxed);
                     false
                 } else if behind {
-                    caught_up = true;
+                    caught_up += 1;
                     true
                 } else {
-                    caught_up = false;
+                    caught_up = 0;
                     session.idle(limit, wake).await?
                 };
                 stop.check()?;
